@@ -1,13 +1,55 @@
-# LiteLLM Relay V0 Scope
+# LiteLLM Relay
 
-This repo currently contains the standalone product-scope artifact for a proposed machine-installed LiteLLM Relay agent.
+LiteLLM Relay is a local endpoint agent that helps route and shadow AI app traffic
+through LiteLLM Gateway. V0 focuses on macOS manual pilots and MDM-friendly PAC
+deployment for Notion Mac app traffic.
 
-Open `index.html` in a browser to review:
+## V0 scope
 
-- Product positioning and name candidates
-- V0 architecture
-- Notion Mac app interception proof path
-- GitHub repo structure
-- Implementation milestones and risks
+- Starts a local HTTP CONNECT proxy on `127.0.0.1:4142`.
+- Serves a PAC file at `http://127.0.0.1:4142/proxy.pac`.
+- Routes Notion domains through Relay when the PAC is installed.
+- Logs redacted Notion connection metadata to `~/.litellm-relay/relay.log.jsonl`.
+- Optionally sends a synthetic shadow event through LiteLLM Gateway for audit correlation.
 
-The live local proof in the artifact is intentionally metadata-only. Full HTTPS request interception for the Notion Mac app requires a managed proxy profile and trusted enterprise CA on a test Mac.
+V0 does **not** decrypt TLS, capture Notion prompts, capture cookies, or rewrite
+Notion private APIs. That requires a managed enterprise CA and a Notion-specific
+adapter, which is intentionally outside this first OSS cut.
+
+## Manual install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh | bash
+```
+
+To immediately route Notion traffic on a pilot Mac:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
+  | bash -s -- --set-system-proxy "Wi-Fi"
+```
+
+To enable Gateway shadow calls:
+
+```bash
+export LITELLM_GATEWAY_URL="https://gateway.example.com"
+export LITELLM_GATEWAY_API_KEY="sk-..."
+export LITELLM_RELAY_SHADOW_ENABLED=1
+
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
+  | bash -s -- --set-system-proxy "Wi-Fi"
+```
+
+## Local development
+
+```bash
+PYTHONPATH=src python3 -m litellm_relay.cli serve
+PYTHONPATH=src python3 -m litellm_relay.cli pac
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+## Docs
+
+- [Notion AI shadowing v0](docs/notion-shadow-v0.md)
+- [MDM rollout](docs/mdm.md)
+- [Product scope artifact](index.html)
