@@ -3,20 +3,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>LiteLLM Relay</title>
+  <title>LiteLLM Relay v0 Plan</title>
   <style>
     :root {
       --background: 240 10% 3.9%;
       --foreground: 0 0% 98%;
-      --card: 240 10% 3.9%;
+      --card: 240 8% 5.8%;
+      --muted: 240 4% 10.5%;
       --muted-foreground: 240 5% 64.9%;
       --border: 240 3.7% 15.9%;
       --primary: 162 74% 45%;
       --primary-foreground: 164 95% 8%;
       --secondary: 240 3.7% 15.9%;
+      --warning: 42 92% 55%;
+      --danger: 0 62.8% 50.6%;
       --radius: 0.625rem;
-      --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
     * { box-sizing: border-box; }
@@ -24,207 +27,493 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background: hsl(var(--background));
       color: hsl(var(--foreground));
+      background: hsl(var(--background));
       font-family: var(--font-sans);
       letter-spacing: 0;
     }
 
-    main {
-      width: min(1120px, calc(100% - 40px));
-      min-height: 100vh;
+    .shell {
+      width: min(1280px, calc(100% - 40px));
       margin: 0 auto;
+      padding: 24px 0 40px;
       display: grid;
-      align-items: center;
-      padding: 48px 0;
+      gap: 16px;
     }
 
-    .layout {
-      display: grid;
-      grid-template-columns: minmax(0, 0.92fr) minmax(360px, 0.68fr);
-      gap: 22px;
-      align-items: stretch;
-    }
-
-    .hero, .card {
+    .topbar, .panel, .cell {
       border: 1px solid hsl(var(--border));
       border-radius: var(--radius);
       background: hsl(var(--card));
       box-shadow: 0 1px 2px hsl(0 0% 0% / 0.18);
     }
 
-    .hero {
-      padding: clamp(28px, 5vw, 54px);
+    .topbar {
+      min-height: 62px;
+      padding: 0 18px;
       display: flex;
-      flex-direction: column;
+      align-items: center;
       justify-content: space-between;
-      gap: 40px;
-      min-height: 560px;
+      gap: 16px;
     }
 
-    .eyebrow {
-      display: inline-flex;
-      width: fit-content;
-      border: 1px solid hsl(var(--border));
-      border-radius: 999px;
-      padding: 6px 10px;
-      color: hsl(var(--muted-foreground));
-      font-size: 13px;
-      font-weight: 650;
-      background: hsl(var(--secondary));
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
     }
+
+    .logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      color: hsl(var(--primary));
+      border: 1px solid hsl(var(--primary));
+      font: 760 14px/1 var(--font-mono);
+    }
+
+    h1, h2, h3, p { margin: 0; }
 
     h1 {
-      margin: 22px 0 0;
-      max-width: 720px;
-      font-size: clamp(42px, 6vw, 74px);
-      line-height: 1.02;
-      letter-spacing: 0;
-    }
-
-    .lead {
-      max-width: 680px;
-      margin: 22px 0 0;
-      color: hsl(var(--muted-foreground));
-      font-size: 18px;
-      line-height: 1.7;
-    }
-
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 30px;
-    }
-
-    .button {
-      min-height: 40px;
-      border-radius: calc(var(--radius) - 2px);
-      border: 1px solid hsl(var(--border));
-      padding: 0 14px;
-      background: hsl(var(--secondary));
-      color: hsl(var(--foreground));
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      font-weight: 650;
-    }
-
-    .button.primary {
-      background: hsl(var(--primary));
-      border-color: hsl(var(--primary));
-      color: hsl(var(--primary-foreground));
-    }
-
-    .code {
-      border: 1px solid hsl(var(--border));
-      border-radius: calc(var(--radius) - 2px);
-      background: hsl(240 10% 6%);
-      padding: 14px;
-      color: hsl(var(--muted-foreground));
-      font: 13px/1.7 var(--font-mono);
-      overflow-x: auto;
-    }
-
-    .card {
-      padding: 22px;
-      display: grid;
-      gap: 16px;
-      align-content: start;
-    }
-
-    .card h2 {
-      margin: 0;
-      font-size: 20px;
+      font-size: 17px;
       line-height: 1.2;
     }
 
-    .card p {
-      margin: 0;
+    .subtitle {
       color: hsl(var(--muted-foreground));
-      line-height: 1.6;
+      font-size: 13px;
+      margin-top: 2px;
     }
 
-    .steps {
-      display: grid;
-      gap: 10px;
+    .badges {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
-    .step {
+    .badge {
+      min-height: 28px;
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid hsl(var(--border));
+      border-radius: 999px;
+      padding: 0 10px;
+      background: hsl(var(--secondary));
+      color: hsl(var(--muted-foreground));
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .badge.green {
+      color: hsl(var(--primary));
+      border-color: hsl(var(--primary) / 0.45);
+      background: hsl(var(--primary) / 0.1);
+    }
+
+    .grid {
       display: grid;
-      grid-template-columns: 34px minmax(0, 1fr);
-      gap: 12px;
+      grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.74fr);
+      gap: 16px;
       align-items: start;
     }
 
-    .num {
-      width: 28px;
-      height: 28px;
-      border-radius: 999px;
+    .panel {
+      padding: 16px;
       display: grid;
-      place-items: center;
-      background: hsl(var(--secondary));
-      color: hsl(var(--muted-foreground));
-      font: 700 12px/1 var(--font-mono);
+      gap: 14px;
+      min-width: 0;
     }
 
-    @media (max-width: 900px) {
-      .layout { grid-template-columns: 1fr; }
-      .hero { min-height: auto; }
+    .panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    h2 {
+      font-size: 16px;
+      line-height: 1.25;
+    }
+
+    .hint {
+      margin-top: 4px;
+      color: hsl(var(--muted-foreground));
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .cell {
+      padding: 13px;
+      min-height: 118px;
+      background: hsl(var(--muted));
+    }
+
+    .cell .num {
+      color: hsl(var(--primary));
+      font: 760 12px/1 var(--font-mono);
+    }
+
+    .cell h3 {
+      margin-top: 10px;
+      font-size: 14px;
+      line-height: 1.25;
+    }
+
+    .cell p {
+      margin-top: 7px;
+      color: hsl(var(--muted-foreground));
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .flow {
+      display: grid;
+      gap: 8px;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: 138px minmax(0, 1fr) 120px;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .node {
+      border: 1px solid hsl(var(--border));
+      border-radius: calc(var(--radius) - 2px);
+      padding: 10px;
+      background: hsl(var(--muted));
+      min-height: 58px;
+    }
+
+    .node strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .node span {
+      display: block;
+      margin-top: 5px;
+      color: hsl(var(--muted-foreground));
+      font: 12px/1.35 var(--font-mono);
+      overflow-wrap: anywhere;
+    }
+
+    .node.primary {
+      border-color: hsl(var(--primary) / 0.45);
+      background: hsl(var(--primary) / 0.08);
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid hsl(var(--border));
+      border-radius: var(--radius);
+    }
+
+    th, td {
+      padding: 10px 11px;
+      border-bottom: 1px solid hsl(var(--border));
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+    }
+
+    th {
+      color: hsl(var(--muted-foreground));
+      font-weight: 650;
+      background: hsl(var(--muted));
+    }
+
+    td {
+      color: hsl(var(--foreground));
+      line-height: 1.45;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    code, pre {
+      font-family: var(--font-mono);
+      letter-spacing: 0;
+    }
+
+    code {
+      color: hsl(var(--primary));
+      font-size: 0.95em;
+    }
+
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      border: 1px solid hsl(var(--border));
+      border-radius: calc(var(--radius) - 2px);
+      background: hsl(240 10% 4.4%);
+      color: hsl(var(--muted-foreground));
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .callout {
+      border: 1px solid hsl(var(--warning) / 0.45);
+      border-radius: var(--radius);
+      background: hsl(var(--warning) / 0.08);
+      padding: 12px;
+      color: hsl(var(--foreground));
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    @media (max-width: 980px) {
+      .grid, .matrix { grid-template-columns: 1fr; }
+      .flow-row { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; padding: 14px; flex-direction: column; }
+      .badges { justify-content: flex-start; }
     }
   </style>
 </head>
 <body>
-  <main>
-    <div class="layout">
-      <section class="hero">
+  <main class="shell">
+    <section class="topbar">
+      <div class="brand">
+        <div class="logo">LR</div>
         <div>
-          <span class="eyebrow">LiteLLM Relay</span>
-          <h1>Install a local proxy that shows intercepted AI traffic.</h1>
-          <p class="lead">
-            Relay runs on your machine, serves a PAC file, tunnels HTTPS traffic,
-            and exposes a local shadcn-style dashboard at
-            <code>http://127.0.0.1:4142/</code>.
-          </p>
-          <div class="actions">
-            <a class="button primary" href="http://127.0.0.1:4142/">Open local dashboard</a>
-            <a class="button" href="https://github.com/BerriAI/litellm-relay">GitHub repo</a>
-          </div>
+          <h1>LiteLLM Relay v0: capture local AI traffic and land it in Gateway Logs</h1>
+          <p class="subtitle">Default behavior: full proxy payload capture for configured AI domains, with redaction and Gateway ingestion.</p>
         </div>
-        <pre class="code">curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh | bash
+      </div>
+      <div class="badges">
+        <span class="badge green">Default: payload capture</span>
+        <span class="badge">Target: Notion Mac app</span>
+        <span class="badge">Gateway: Logs page</span>
+      </div>
+    </section>
 
-# Manual pilot: route Notion through Relay on Wi-Fi
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
-  | bash -s -- --set-system-proxy "Wi-Fi"</pre>
-      </section>
+    <section class="grid">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>v0 Acceptance Test</h2>
+              <p class="hint">A user sends a prompt in Notion AI. Relay captures the decrypted request/response preview, redacts sensitive headers, sends an ingestion event to LiteLLM Gateway, and the event appears in the Gateway Logs UI.</p>
+            </div>
+            <span class="badge green">ship proof</span>
+          </div>
+          <div class="matrix">
+            <div class="cell">
+              <div class="num">01</div>
+              <h3>Install local Relay</h3>
+              <p>LaunchAgent runs on <code>127.0.0.1:4142</code>, generates a local CA, and installs the PAC.</p>
+            </div>
+            <div class="cell">
+              <div class="num">02</div>
+              <h3>Capture payloads</h3>
+              <p>AI domains are MITM proxied by default. Request and response previews are stored locally.</p>
+            </div>
+            <div class="cell">
+              <div class="num">03</div>
+              <h3>Ingest to Gateway</h3>
+              <p>Relay sends a structured event to LiteLLM Gateway with metadata and redacted previews.</p>
+            </div>
+            <div class="cell">
+              <div class="num">04</div>
+              <h3>Show in Logs</h3>
+              <p>Gateway Logs displays app, host, user/device, request path, status, latency, and previews.</p>
+            </div>
+          </div>
+        </section>
 
-      <aside class="card">
-        <h2>What it does now</h2>
-        <div class="steps">
-          <div class="step">
-            <div class="num">01</div>
-            <p>Runs a local CONNECT proxy on <code>127.0.0.1:4142</code>.</p>
+        <section class="panel">
+          <h2>Data Flow</h2>
+          <div class="flow">
+            <div class="flow-row">
+              <div class="node"><strong>Notion Mac app</strong><span>HTTPS request to notion.so</span></div>
+              <div class="node primary"><strong>LiteLLM Relay</strong><span>PAC routes AI domains, Relay terminates TLS with trusted local CA</span></div>
+              <div class="node"><strong>Notion</strong><span>Upstream TLS</span></div>
+            </div>
+            <div class="flow-row">
+              <div class="node"><strong>Payload log</strong><span>request_preview, response_preview, redacted_headers</span></div>
+              <div class="node primary"><strong>Gateway ingestion</strong><span>POST captured event with relay metadata and correlation id</span></div>
+              <div class="node"><strong>Logs UI</strong><span>Visible as local_ai_proxy event</span></div>
+            </div>
           </div>
-          <div class="step">
-            <div class="num">02</div>
-            <p>Serves a PAC file that routes Notion domains through Relay.</p>
+        </section>
+
+        <section class="panel">
+          <h2>How Gateway Ingests It</h2>
+          <table class="table">
+            <thead>
+              <tr><th>Step</th><th>Gateway behavior</th><th>Why it works with Logs</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1. Authenticate</td>
+                <td>Relay calls <code>POST /internal/collector/events</code> with a Gateway virtual key or scoped ingest token.</td>
+                <td>Gateway can attribute all local-machine captures to the right team, key alias, user, and org.</td>
+              </tr>
+              <tr>
+                <td>2. Normalize</td>
+                <td>Gateway converts each Relay event into a <code>SpendLogsPayload</code>-compatible row.</td>
+                <td>The existing Logs UI already knows how to list and expand <code>LiteLLM_SpendLogs</code>.</td>
+              </tr>
+              <tr>
+                <td>3. Persist</td>
+                <td>Gateway inserts into <code>LiteLLM_SpendLogs</code> with duplicate skipping on <code>request_id</code>.</td>
+                <td>No new table or new Logs UI surface is required for v0.</td>
+              </tr>
+              <tr>
+                <td>4. Display</td>
+                <td>Logs reads it through <code>GET /spend/logs/ui</code> and detail reads through <code>/spend/logs/ui/{request_id}</code>.</td>
+                <td>Relay rows appear beside normal LiteLLM Gateway requests, but labeled as captured local AI traffic.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Ingestion Contract</h2>
+          <table class="table">
+            <thead>
+              <tr><th>Field</th><th>Purpose</th><th>Example</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>request_id</code></td><td>Primary key in <code>LiteLLM_SpendLogs</code> and detail-route lookup key.</td><td><code>relay-uuid</code></td></tr>
+              <tr><td><code>source</code></td><td>Stored inside metadata so Logs can label Relay captured traffic.</td><td><code>litellm-relay</code></td></tr>
+              <tr><td><code>app</code></td><td>Groups traffic by local AI tool.</td><td><code>notion</code></td></tr>
+              <tr><td><code>event_id</code></td><td>Correlates CONNECT, request, response, and Gateway log rows.</td><td><code>uuid</code></td></tr>
+              <tr><td><code>host</code></td><td>Captured upstream host, with optional hashed variant for privacy.</td><td><code>www.notion.so</code></td></tr>
+              <tr><td><code>method/path/status</code></td><td>Makes the Gateway Logs row useful without opening raw JSON.</td><td><code>POST /api/v3/...</code></td></tr>
+              <tr><td><code>call_type</code></td><td>Distinguishes captured local traffic from real LiteLLM model calls.</td><td><code>relay_capture</code></td></tr>
+              <tr><td><code>model</code></td><td>Human-readable source label, not a billed model invocation.</td><td><code>notion-ai</code></td></tr>
+              <tr><td><code>spend</code></td><td>Kept at zero so captured third-party traffic does not distort LiteLLM spend.</td><td><code>0</code></td></tr>
+              <tr><td><code>proxy_server_request</code></td><td>Existing Logs detail field for sanitized request content.</td><td><code>{"prompt":"..."}</code></td></tr>
+              <tr><td><code>response</code></td><td>Existing Logs detail field for sanitized response content.</td><td><code>{"text":"..."}</code></td></tr>
+              <tr><td><code>device/user/team</code></td><td>Enterprise attribution from install profile or env.</td><td><code>ishaan-mbp</code></td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <aside class="stack">
+        <section class="panel">
+          <h2>Gateway Side</h2>
+          <p class="hint">Gateway Logs already reads from <code>LiteLLM_SpendLogs</code> via <code>/spend/logs/ui</code>. For v0, Relay should call an authenticated ingestion endpoint that writes Relay rows into that same table. Synthetic <code>/v1/chat/completions</code> calls are only a smoke test; they create fake model calls and distort spend analytics.</p>
+          <pre>POST /internal/collector/events
+Authorization: Bearer sk-...
+Content-Type: application/json
+
+[{
+  "request_id": "relay-...",
+  "call_type": "relay_capture",
+  "model": "notion-ai",
+  "spend": 0,
+  "status": "success",
+  "metadata": "{\"source\":\"litellm-relay\"}",
+  "proxy_server_request": "{...redacted request...}",
+  "response": "{...redacted response...}"
+}]</pre>
+        </section>
+
+        <section class="panel">
+          <h2>Example Logs Row</h2>
+          <table class="table">
+            <tbody>
+              <tr><td>Time</td><td><code>2026-07-09 11:42:18</code></td></tr>
+              <tr><td>Source</td><td><code>Relay / Notion Mac</code></td></tr>
+              <tr><td>Model</td><td><code>notion-ai</code></td></tr>
+              <tr><td>Call type</td><td><code>relay_capture</code></td></tr>
+              <tr><td>Status</td><td><code>success · 200</code></td></tr>
+              <tr><td>Spend</td><td><code>$0.000000</code></td></tr>
+              <tr><td>Request</td><td><code>POST www.notion.so/api/v3/...</code></td></tr>
+              <tr><td>Request ID</td><td><code>relay-a183cb18-5809-4661</code></td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Expanded Log Detail</h2>
+          <pre>{
+  "request_id": "relay-a183cb18-5809-4661",
+  "call_type": "relay_capture",
+  "model": "notion-ai",
+  "status": "success",
+  "spend": 0,
+  "metadata": {
+    "source": "litellm-relay",
+    "app": "notion",
+    "device_id": "ishaan-mbp",
+    "host": "www.notion.so",
+    "path": "/api/v3/...",
+    "duration_ms": 842
+  },
+  "proxy_server_request": {
+    "method": "POST",
+    "headers": {
+      "authorization": "&lt;redacted&gt;",
+      "cookie": "&lt;redacted&gt;",
+      "content-type": "application/json"
+    },
+    "body_preview": "{...redacted Notion AI request...}"
+  },
+  "response": {
+    "status_code": 200,
+    "body_preview": "{...redacted Notion AI response...}"
+  }
+}</pre>
+        </section>
+
+        <section class="panel">
+          <h2>Local UI</h2>
+          <p class="hint">The local Relay dashboard remains the operator view. It should show exactly what will be sent to Gateway before ingestion.</p>
+          <table class="table">
+            <tbody>
+              <tr><td>Traffic table</td><td>Rows for CONNECT, request, response, ingestion result.</td></tr>
+              <tr><td>Inspector</td><td>Redacted payload previews plus raw event JSON.</td></tr>
+              <tr><td>Status</td><td>CA trusted, PAC enabled, Gateway auth, ingestion ok/fail.</td></tr>
+              <tr><td>Controls</td><td>Clear logs, copy PAC, copy CA path, test Gateway ingest.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Future Model Routing</h2>
+          <p class="hint">After v0 proves capture and ingestion, Relay can optionally replace selected app calls with LiteLLM model calls. That is not needed for the first proof.</p>
+          <div class="callout">
+            Keep v0 scoped to evidence: capture Notion AI payloads locally and show them in Gateway Logs. Routing Notion to LiteLLM models requires app-specific protocol adapters and response rewriting.
           </div>
-          <div class="step">
-            <div class="num">03</div>
-            <p>Logs intercepted host, port, duration, byte counts, and shadow status.</p>
-          </div>
-          <div class="step">
-            <div class="num">04</div>
-            <p>Shows those events in a local dashboard with filters and raw JSON inspection.</p>
-          </div>
-        </div>
-        <div class="code">curl -I -x http://127.0.0.1:4142 https://www.notion.so</div>
-        <p>
-          Default mode does not decrypt TLS or read prompts. It captures proxy metadata
-          and can send redacted shadow events through LiteLLM Gateway.
-        </p>
+        </section>
+
+        <section class="panel">
+          <h2>Commands</h2>
+          <pre>export LITELLM_GATEWAY_URL=https://gateway.litellm-sandbox.ai
+export LITELLM_GATEWAY_API_KEY=sk-...
+
+./install.sh --set-system-proxy "Wi-Fi"
+open http://127.0.0.1:4142/
+
+curl --cacert ~/.litellm-relay/mitm/litellm-relay-ca.pem \
+  -x http://127.0.0.1:4142 https://www.notion.so</pre>
+        </section>
       </aside>
-    </div>
+    </section>
   </main>
 </body>
 </html>

@@ -14,12 +14,14 @@ Usage:
 
 Environment:
   LITELLM_GATEWAY_URL              LiteLLM Gateway URL, default http://127.0.0.1:4000
-  LITELLM_GATEWAY_API_KEY          Gateway virtual key for shadow calls
+  LITELLM_GATEWAY_API_KEY          Gateway virtual key for Relay ingest/shadow calls
   LITELLM_RELAY_SHADOW_ENABLED     Set to 1 to shadow Notion connection events
   LITELLM_RELAY_SHADOW_MODEL       Model for synthetic shadow calls, default gpt-4o-mini
+  LITELLM_RELAY_CAPTURE_PAYLOADS   Capture request/response previews, default 1
 
-By default this installs and starts the local Relay LaunchAgent but does not
-change system proxy settings. Pass --set-system-proxy "Wi-Fi" for a manual pilot.
+By default this builds the Rust Relay binary, starts a LaunchAgent, and trusts the
+Relay local CA in your login keychain so AI app payloads can be captured.
+Pass --set-system-proxy "Wi-Fi" to route Notion and other AI apps through Relay.
 USAGE
 }
 
@@ -49,15 +51,27 @@ fi
 mkdir -p "$RELAY_HOME"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "$SCRIPT_DIR/src/litellm_relay" ]]; then
-  rsync -a --delete "$SCRIPT_DIR/src/" "$RELAY_HOME/src/"
+BUILD_DIR=""
+if [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
+  BUILD_DIR="$SCRIPT_DIR"
 else
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"' EXIT
   curl -fsSL "https://github.com/BerriAI/litellm-relay/archive/refs/heads/main.tar.gz" \
     | tar -xz -C "$TMP_DIR"
-  rsync -a --delete "$TMP_DIR/litellm-relay-main/src/" "$RELAY_HOME/src/"
+  BUILD_DIR="$TMP_DIR/litellm-relay-main"
 fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo is required to install LiteLLM Relay from source." >&2
+  echo "Install Rust from https://rustup.rs/ and rerun install.sh." >&2
+  exit 1
+fi
+
+cargo build --release --manifest-path "$BUILD_DIR/Cargo.toml"
+mkdir -p "$RELAY_HOME/bin"
+cp "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
+chmod 700 "$RELAY_HOME/bin/litellm-relay"
 
 cat > "$RELAY_HOME/env" <<ENV
 LITELLM_RELAY_HOST=127.0.0.1
@@ -67,6 +81,8 @@ LITELLM_GATEWAY_URL=${LITELLM_GATEWAY_URL:-http://127.0.0.1:4000}
 LITELLM_GATEWAY_API_KEY=${LITELLM_GATEWAY_API_KEY:-}
 LITELLM_RELAY_SHADOW_ENABLED=${LITELLM_RELAY_SHADOW_ENABLED:-0}
 LITELLM_RELAY_SHADOW_MODEL=${LITELLM_RELAY_SHADOW_MODEL:-gpt-4o-mini}
+LITELLM_RELAY_CAPTURE_PAYLOADS=${LITELLM_RELAY_CAPTURE_PAYLOADS:-1}
+LITELLM_RELAY_MITM_CA_DIR=$RELAY_HOME/mitm
 ENV
 chmod 600 "$RELAY_HOME/env"
 
@@ -77,10 +93,21 @@ set -euo pipefail
 set -a
 source "$RELAY_HOME/env"
 set +a
-export PYTHONPATH="$RELAY_HOME/src"
-exec /usr/bin/python3 -m litellm_relay.cli serve
+exec "$RELAY_HOME/bin/litellm-relay" serve
 RUNNER
 chmod 700 "$RELAY_HOME/bin/run-relay"
+
+set -a
+source "$RELAY_HOME/env"
+set +a
+CA_PATH="$("$RELAY_HOME/bin/litellm-relay" ca-path)"
+security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_PATH" >/dev/null 2>&1 || {
+  cat >&2 <<WARN
+warning: could not add the Relay CA to the login keychain.
+Payload capture requires trusting this certificate:
+  $CA_PATH
+WARN
+}
 
 cat > "$RELAY_HOME/relay.pac" <<PAC
 function FindProxyForURL(url, host) {
@@ -137,6 +164,7 @@ LiteLLM Relay installed.
 Relay proxy: 127.0.0.1:$RELAY_PORT
 Dashboard:   http://127.0.0.1:$RELAY_PORT/
 PAC URL:     http://127.0.0.1:$RELAY_PORT/proxy.pac
+Relay CA:    $CA_PATH
 Logs:        $RELAY_HOME/relay.log.jsonl
 
 To route Notion through Relay for a manual pilot:
@@ -144,7 +172,7 @@ To route Notion through Relay for a manual pilot:
   networksetup -setautoproxystate "Wi-Fi" on
 
 To verify interception without changing system settings:
-  curl -I -x http://127.0.0.1:$RELAY_PORT https://www.notion.so
+  curl --cacert "$CA_PATH" -x http://127.0.0.1:$RELAY_PORT https://www.notion.so
 
 To enable shadow calls through LiteLLM Gateway, set LITELLM_GATEWAY_API_KEY and
 LITELLM_RELAY_SHADOW_ENABLED=1 before running install.sh, then restart Relay.
