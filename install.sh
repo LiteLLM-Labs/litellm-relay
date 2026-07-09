@@ -85,7 +85,7 @@ chmod 700 "$RELAY_HOME/bin/run-relay"
 cat > "$RELAY_HOME/relay.pac" <<PAC
 function FindProxyForURL(url, host) {
   var relayProxy = "PROXY 127.0.0.1:$RELAY_PORT";
-  var notionDomains = ["notion.so", "notion.com", "api.notion.com", "www.notion.so", "app.notion.com"];
+  var notionDomains = ["notion.so", "notion.com", "api.notion.com", "www.notion.so", "app.notion.com", "api.openai.com", "openai.com", "chatgpt.com", "api.anthropic.com", "anthropic.com", "claude.ai"];
   host = host.toLowerCase();
   for (var i = 0; i < notionDomains.length; i++) {
     var domain = notionDomains[i];
@@ -135,12 +135,16 @@ cat <<DONE
 LiteLLM Relay installed.
 
 Relay proxy: 127.0.0.1:$RELAY_PORT
+Dashboard:   http://127.0.0.1:$RELAY_PORT/
 PAC URL:     http://127.0.0.1:$RELAY_PORT/proxy.pac
 Logs:        $RELAY_HOME/relay.log.jsonl
 
 To route Notion through Relay for a manual pilot:
   networksetup -setautoproxyurl "Wi-Fi" http://127.0.0.1:$RELAY_PORT/proxy.pac
   networksetup -setautoproxystate "Wi-Fi" on
+
+To verify interception without changing system settings:
+  curl -I -x http://127.0.0.1:$RELAY_PORT https://www.notion.so
 
 To enable shadow calls through LiteLLM Gateway, set LITELLM_GATEWAY_API_KEY and
 LITELLM_RELAY_SHADOW_ENABLED=1 before running install.sh, then restart Relay.

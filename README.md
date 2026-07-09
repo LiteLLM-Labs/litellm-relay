@@ -7,9 +7,10 @@ deployment for Notion Mac app traffic.
 ## V0 scope
 
 - Starts a local HTTP CONNECT proxy on `127.0.0.1:4142`.
+- Serves a local dashboard at `http://127.0.0.1:4142/`.
 - Serves a PAC file at `http://127.0.0.1:4142/proxy.pac`.
-- Routes Notion domains through Relay when the PAC is installed.
-- Logs redacted Notion connection metadata to `~/.litellm-relay/relay.log.jsonl`.
+- Routes known AI domains through Relay when the PAC is installed.
+- Logs redacted AI connection metadata to `~/.litellm-relay/relay.log.jsonl`.
 - Optionally sends a synthetic shadow event through LiteLLM Gateway for audit correlation.
 
 V0 does **not** decrypt TLS, capture Notion prompts, capture cookies, or rewrite
@@ -27,6 +28,24 @@ To immediately route Notion traffic on a pilot Mac:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
   | bash -s -- --set-system-proxy "Wi-Fi"
+```
+
+Open the dashboard:
+
+```bash
+open http://127.0.0.1:4142/
+```
+
+Generate a test intercepted request:
+
+```bash
+curl -I -x http://127.0.0.1:4142 https://www.notion.so
+```
+
+Generate a Codex/OpenAI-style intercepted request:
+
+```bash
+curl -I -x http://127.0.0.1:4142 https://api.openai.com/v1/models
 ```
 
 To enable Gateway shadow calls:

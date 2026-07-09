@@ -29,6 +29,7 @@ Trigger Notion AI in the Notion Mac app, then inspect:
 
 ```bash
 tail -f ~/.litellm-relay/relay.log.jsonl
+open http://127.0.0.1:4142/
 ```
 
 Expected redacted event:
@@ -46,6 +47,13 @@ Expected redacted event:
     "status": 200
   }
 }
+```
+
+You can generate a test row without changing system proxy settings:
+
+```bash
+curl -I -x http://127.0.0.1:4142 https://www.notion.so
+curl -I -x http://127.0.0.1:4142 https://api.openai.com/v1/models
 ```
 
 ## Why this is not MITM

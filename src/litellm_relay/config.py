@@ -13,6 +13,16 @@ DEFAULT_NOTION_DOMAINS = (
     "app.notion.com",
 )
 
+DEFAULT_AI_DOMAINS = (
+    *DEFAULT_NOTION_DOMAINS,
+    "api.openai.com",
+    "openai.com",
+    "chatgpt.com",
+    "api.anthropic.com",
+    "anthropic.com",
+    "claude.ai",
+)
+
 
 @dataclass(frozen=True)
 class RelayConfig:
@@ -20,6 +30,7 @@ class RelayConfig:
     port: int = 4142
     log_path: Path = Path.home() / ".litellm-relay" / "relay.log.jsonl"
     notion_domains: tuple[str, ...] = DEFAULT_NOTION_DOMAINS
+    ai_domains: tuple[str, ...] = DEFAULT_AI_DOMAINS
     shadow_enabled: bool = False
     gateway_url: str = "http://127.0.0.1:4000"
     gateway_api_key: str | None = None
@@ -30,11 +41,11 @@ class RelayConfig:
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
-        domains = os.getenv("LITELLM_RELAY_NOTION_DOMAINS")
-        parsed_domains = (
-            tuple(d.strip().lower() for d in domains.split(",") if d.strip())
-            if domains
-            else DEFAULT_NOTION_DOMAINS
+        notion_domains = parse_domains(
+            os.getenv("LITELLM_RELAY_NOTION_DOMAINS"), DEFAULT_NOTION_DOMAINS
+        )
+        ai_domains = parse_domains(
+            os.getenv("LITELLM_RELAY_AI_DOMAINS"), DEFAULT_AI_DOMAINS
         )
         return cls(
             host=os.getenv("LITELLM_RELAY_HOST", "127.0.0.1"),
@@ -45,7 +56,8 @@ class RelayConfig:
                     str(Path.home() / ".litellm-relay" / "relay.log.jsonl"),
                 )
             ),
-            notion_domains=parsed_domains,
+            notion_domains=notion_domains,
+            ai_domains=ai_domains,
             shadow_enabled=os.getenv("LITELLM_RELAY_SHADOW_ENABLED", "").lower()
             in {"1", "true", "yes", "on"},
             gateway_url=os.getenv("LITELLM_GATEWAY_URL", "http://127.0.0.1:4000"),
@@ -58,6 +70,12 @@ class RelayConfig:
                 os.getenv("LITELLM_RELAY_REQUEST_TIMEOUT_SECONDS", "10")
             ),
         )
+
+
+def parse_domains(raw: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if not raw:
+        return default
+    return tuple(d.strip().lower() for d in raw.split(",") if d.strip())
 
 
 def normalize_host(host: str) -> str:
@@ -75,3 +93,19 @@ def is_domain_match(host: str, domains: tuple[str, ...]) -> bool:
 def is_notion_host(host: str, config: RelayConfig) -> bool:
     return is_domain_match(host, config.notion_domains)
 
+
+def is_ai_host(host: str, config: RelayConfig) -> bool:
+    return is_domain_match(host, config.ai_domains)
+
+
+def classify_host(host: str, config: RelayConfig) -> str:
+    normalized = normalize_host(host)
+    if is_domain_match(normalized, config.notion_domains):
+        return "notion"
+    if is_domain_match(normalized, ("api.openai.com", "openai.com", "chatgpt.com")):
+        return "openai"
+    if is_domain_match(normalized, ("api.anthropic.com", "anthropic.com", "claude.ai")):
+        return "anthropic"
+    if is_ai_host(normalized, config):
+        return "ai"
+    return "unknown"

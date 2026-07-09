@@ -4,7 +4,7 @@ from .config import RelayConfig
 
 
 def build_pac(config: RelayConfig) -> str:
-    domains = ",\n    ".join(f'"{domain}"' for domain in config.notion_domains)
+    domains = ",\n    ".join(f'"{domain}"' for domain in config.ai_domains)
     return f"""function FindProxyForURL(url, host) {{
   var relayProxy = "PROXY {config.host}:{config.port}";
   var notionDomains = [
@@ -22,4 +22,3 @@ def build_pac(config: RelayConfig) -> str:
   return "DIRECT";
 }}
 """
-

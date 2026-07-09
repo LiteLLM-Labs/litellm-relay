@@ -1,790 +1,230 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LiteLLM Relay | V0 Scope</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiteLLM Relay</title>
   <style>
     :root {
-      --ink: #17202f;
-      --muted: #5f6b7a;
-      --line: #dce5e2;
-      --panel: #f7faf9;
-      --soft: #edf4f2;
-      --teal: #34c6a3;
-      --teal-dark: #14866f;
-      --amber: #cf8d35;
-      --plum: #6d5cae;
-      --white: #ffffff;
-      --code: #10231f;
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 3.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --border: 240 3.7% 15.9%;
+      --primary: 162 74% 45%;
+      --primary-foreground: 164 95% 8%;
+      --secondary: 240 3.7% 15.9%;
+      --radius: 0.625rem;
+      --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--ink);
-      background: #ffffff;
-      line-height: 1.55;
-    }
-
-    a {
-      color: var(--teal-dark);
-      text-decoration: none;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-
-    .hero {
-      min-height: 76vh;
-      display: grid;
-      grid-template-rows: auto 1fr;
-      background:
-        linear-gradient(90deg, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0.88) 43%, rgba(255,255,255,0.28) 100%),
-        url("assets/relay-hero.png") center right / cover no-repeat;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 24px clamp(22px, 5vw, 72px);
-      gap: 20px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-weight: 760;
+      min-height: 100vh;
+      background: hsl(var(--background));
+      color: hsl(var(--foreground));
+      font-family: var(--font-sans);
       letter-spacing: 0;
     }
 
-    .mark {
-      width: 28px;
-      height: 28px;
-      border: 2px solid var(--teal);
-      position: relative;
-    }
-
-    .mark::before,
-    .mark::after {
-      content: "";
-      position: absolute;
-      background: var(--teal);
-      left: 5px;
-      right: 5px;
-      height: 2px;
-      top: 12px;
-    }
-
-    .mark::after {
-      transform: rotate(90deg);
-    }
-
-    .nav {
-      display: flex;
-      gap: 18px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    .hero-inner {
-      width: min(1180px, calc(100% - 44px));
+    main {
+      width: min(1120px, calc(100% - 40px));
+      min-height: 100vh;
       margin: 0 auto;
       display: grid;
       align-items: center;
-      padding: 28px 0 34px;
+      padding: 48px 0;
     }
 
-    .hero-copy {
-      width: min(690px, 100%);
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 0.92fr) minmax(360px, 0.68fr);
+      gap: 22px;
+      align-items: stretch;
+    }
+
+    .hero, .card {
+      border: 1px solid hsl(var(--border));
+      border-radius: var(--radius);
+      background: hsl(var(--card));
+      box-shadow: 0 1px 2px hsl(0 0% 0% / 0.18);
+    }
+
+    .hero {
+      padding: clamp(28px, 5vw, 54px);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 40px;
+      min-height: 560px;
     }
 
     .eyebrow {
       display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      color: var(--teal-dark);
+      width: fit-content;
+      border: 1px solid hsl(var(--border));
+      border-radius: 999px;
+      padding: 6px 10px;
+      color: hsl(var(--muted-foreground));
       font-size: 13px;
-      font-weight: 720;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 18px;
-    }
-
-    .eyebrow::before {
-      content: "";
-      width: 34px;
-      height: 2px;
-      background: var(--teal);
-    }
-
-    h1, h2, h3 {
-      margin: 0;
-      line-height: 1.08;
-      letter-spacing: 0;
+      font-weight: 650;
+      background: hsl(var(--secondary));
     }
 
     h1 {
-      font-size: clamp(42px, 6.2vw, 76px);
-      max-width: 880px;
+      margin: 22px 0 0;
+      max-width: 720px;
+      font-size: clamp(42px, 6vw, 74px);
+      line-height: 1.02;
+      letter-spacing: 0;
     }
 
-    .subhead {
-      margin-top: 20px;
-      color: #384657;
-      font-size: clamp(19px, 2vw, 27px);
-      max-width: 760px;
+    .lead {
+      max-width: 680px;
+      margin: 22px 0 0;
+      color: hsl(var(--muted-foreground));
+      font-size: 18px;
+      line-height: 1.7;
     }
 
-    .hero-actions {
+    .actions {
       display: flex;
       flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 26px;
+      gap: 10px;
+      margin-top: 30px;
     }
 
     .button {
+      min-height: 40px;
+      border-radius: calc(var(--radius) - 2px);
+      border: 1px solid hsl(var(--border));
+      padding: 0 14px;
+      background: hsl(var(--secondary));
+      color: hsl(var(--foreground));
+      text-decoration: none;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      min-height: 44px;
-      padding: 0 18px;
-      border-radius: 6px;
-      border: 1px solid var(--ink);
-      color: var(--white);
-      background: var(--ink);
-      font-weight: 720;
-      font-size: 14px;
+      font-weight: 650;
     }
 
-    .button.secondary {
-      color: var(--ink);
-      background: rgba(255,255,255,0.82);
-      border-color: var(--line);
+    .button.primary {
+      background: hsl(var(--primary));
+      border-color: hsl(var(--primary));
+      color: hsl(var(--primary-foreground));
     }
 
-    .section {
-      padding: 74px clamp(22px, 5vw, 72px);
-      border-bottom: 1px solid var(--line);
-    }
-
-    .section.alt {
-      background: var(--panel);
-    }
-
-    .section-inner {
-      width: min(1180px, 100%);
-      margin: 0 auto;
-    }
-
-    .section-title {
-      display: grid;
-      grid-template-columns: minmax(0, 0.74fr) minmax(280px, 0.55fr);
-      gap: 42px;
-      align-items: end;
-      margin-bottom: 34px;
-    }
-
-    h2 {
-      font-size: clamp(32px, 4.3vw, 58px);
-    }
-
-    .section-title p {
-      color: var(--muted);
-      margin: 0;
-      font-size: 18px;
-    }
-
-    .grid-3 {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 18px;
-    }
-
-    .grid-2 {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
-    }
-
-    .tile {
-      border: 1px solid var(--line);
-      background: var(--white);
-      padding: 24px;
-      border-radius: 8px;
-      min-height: 180px;
-    }
-
-    .tile h3 {
-      font-size: 21px;
-      margin-bottom: 10px;
-    }
-
-    .tile p,
-    .tile li {
-      color: var(--muted);
-      margin: 0;
-    }
-
-    .tile ul {
-      margin: 14px 0 0;
-      padding-left: 18px;
-    }
-
-    .tag {
-      display: inline-flex;
-      padding: 4px 8px;
-      margin-bottom: 14px;
-      border-radius: 5px;
-      background: var(--soft);
-      color: var(--teal-dark);
-      font-size: 12px;
-      font-weight: 760;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
-
-    .architecture {
-      background: var(--code);
-      color: #d9fff5;
-      border-radius: 8px;
-      padding: clamp(24px, 4vw, 42px);
+    .code {
+      border: 1px solid hsl(var(--border));
+      border-radius: calc(var(--radius) - 2px);
+      background: hsl(240 10% 6%);
+      padding: 14px;
+      color: hsl(var(--muted-foreground));
+      font: 13px/1.7 var(--font-mono);
       overflow-x: auto;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
     }
 
-    .architecture pre {
-      margin: 0;
-      font: 15px/1.75 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      white-space: pre;
-    }
-
-    .architecture .muted {
-      color: #80b0a4;
-    }
-
-    .architecture .accent {
-      color: #62e6c7;
-    }
-
-    .proof {
-      display: grid;
-      grid-template-columns: minmax(280px, 0.62fr) minmax(0, 1fr);
-      gap: 24px;
-      align-items: stretch;
-    }
-
-    .evidence {
-      background: #101820;
-      color: #e5fff8;
-      border-radius: 8px;
+    .card {
       padding: 22px;
-      overflow-x: auto;
-    }
-
-    .evidence pre {
-      margin: 0;
-      font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      white-space: pre-wrap;
-    }
-
-    .timeline {
       display: grid;
-      gap: 14px;
+      gap: 16px;
+      align-content: start;
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+
+    .card p {
+      margin: 0;
+      color: hsl(var(--muted-foreground));
+      line-height: 1.6;
+    }
+
+    .steps {
+      display: grid;
+      gap: 10px;
     }
 
     .step {
       display: grid;
-      grid-template-columns: 64px minmax(0, 1fr);
-      gap: 18px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--white);
-      padding: 18px;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
     }
 
     .num {
-      color: var(--teal-dark);
-      font: 700 16px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-
-    .step h3 {
-      font-size: 20px;
-      margin-bottom: 7px;
-    }
-
-    .step p {
-      margin: 0;
-      color: var(--muted);
-    }
-
-    .matrix {
-      width: 100%;
-      border-collapse: collapse;
-      background: var(--white);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      overflow: hidden;
-      display: table;
-    }
-
-    .matrix th,
-    .matrix td {
-      text-align: left;
-      vertical-align: top;
-      padding: 16px;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .matrix th {
-      font-size: 13px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      background: var(--soft);
-    }
-
-    .matrix tr:last-child td {
-      border-bottom: 0;
-    }
-
-    .status {
-      font-weight: 780;
-      color: var(--ink);
-    }
-
-    .status.good {
-      color: var(--teal-dark);
-    }
-
-    .status.warn {
-      color: var(--amber);
-    }
-
-    .status.future {
-      color: var(--plum);
-    }
-
-    .repo-list {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 18px;
+      place-items: center;
+      background: hsl(var(--secondary));
+      color: hsl(var(--muted-foreground));
+      font: 700 12px/1 var(--font-mono);
     }
 
-    .path {
-      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: var(--soft);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 12px;
-      color: #25413a;
-    }
-
-    .source-list {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      margin: 0;
-      padding: 0;
-      list-style: none;
-    }
-
-    .source-list li {
-      border-top: 1px solid var(--line);
-      padding-top: 12px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    footer {
-      padding: 34px clamp(22px, 5vw, 72px);
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    @media (max-width: 860px) {
-      .hero {
-        min-height: auto;
-        background:
-          linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.86) 100%),
-          url("assets/relay-hero.png") center / cover no-repeat;
-      }
-
-      .nav {
-        display: none;
-      }
-
-      .section-title,
-      .grid-3,
-      .grid-2,
-      .proof,
-      .repo-list,
-      .source-list {
-        grid-template-columns: 1fr;
-      }
-
-      .matrix {
-        display: block;
-        overflow-x: auto;
-      }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .hero { min-height: auto; }
     }
   </style>
 </head>
 <body>
-  <header class="hero">
-    <div class="topbar">
-      <div class="brand"><span class="mark"></span><span>LiteLLM Relay</span></div>
-      <nav class="nav" aria-label="Page sections">
-        <a href="#scope">Scope</a>
-        <a href="#notion">Notion AI proof</a>
-        <a href="#repo">Repo</a>
-        <a href="#names">Names</a>
-      </nav>
-    </div>
-    <div class="hero-inner">
-      <div class="hero-copy">
-        <div class="eyebrow">V0 product scope</div>
-        <h1>Bring every employee AI tool back through LiteLLM Gateway.</h1>
-        <p class="subhead">
-          LiteLLM Relay is a machine-installed agent that routes supported desktop apps,
-          browser AI, coding tools, and MCP servers through the LiteLLM Gateway already
-          trusted for governance, budgets, guardrails, and observability.
-        </p>
-        <div class="hero-actions">
-          <a class="button" href="#notion">Review Notion AI path</a>
-          <a class="button secondary" href="#repo">Open repo scope</a>
-        </div>
-      </div>
-    </div>
-  </header>
-
   <main>
-    <section id="scope" class="section">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>The wedge is routing first, transparent capture second.</h2>
-          <p>
-            Do not promise perfect interception on day one. V0 wins by routing tools with
-            base URL or proxy support, discovering shadow AI, and graduating high-value
-            proprietary apps into managed capture.
+    <div class="layout">
+      <section class="hero">
+        <div>
+          <span class="eyebrow">LiteLLM Relay</span>
+          <h1>Install a local proxy that shows intercepted AI traffic.</h1>
+          <p class="lead">
+            Relay runs on your machine, serves a PAC file, tunnels HTTPS traffic,
+            and exposes a local shadcn-style dashboard at
+            <code>http://127.0.0.1:4142/</code>.
           </p>
-        </div>
-        <div class="grid-3">
-          <article class="tile">
-            <span class="tag">Route</span>
-            <h3>Supported tools use local endpoints</h3>
-            <p>Expose OpenAI-compatible and Anthropic-compatible local endpoints, then forward through LiteLLM Gateway with device and team metadata.</p>
-            <ul>
-              <li>Codex-style OpenAI clients</li>
-              <li>Claude Code and Anthropic-compatible CLIs</li>
-              <li>Aider, Continue, OpenCode, custom SDK apps</li>
-            </ul>
-          </article>
-          <article class="tile">
-            <span class="tag">Discover</span>
-            <h3>Shadow AI and MCP inventory</h3>
-            <p>Scan app configs, MCP server files, process destinations, and proxy flows so admins can see what tools are active before enforcing policy.</p>
-            <ul>
-              <li>Device app coverage</li>
-              <li>MCP server allowlist</li>
-              <li>Unsupported destination alerts</li>
-            </ul>
-          </article>
-          <article class="tile">
-            <span class="tag">Capture</span>
-            <h3>Managed proxy for proprietary apps</h3>
-            <p>Use PAC/system proxy first. Add MITM and Network Extension only where customers accept the certificate, privacy, and deployment tradeoffs.</p>
-            <ul>
-              <li>macOS PAC profile for V0</li>
-              <li>Root CA only for approved domains</li>
-              <li>Network Extension fallback</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section alt">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>Architecture</h2>
-          <p>
-            A local agent gives us app-specific adapters and a controlled path into the
-            existing Gateway instead of trying to make every private app API look native.
-          </p>
-        </div>
-        <div class="architecture" aria-label="Architecture diagram">
-          <pre><span class="muted">Desktop AI apps | Browser AI | Coding tools | MCP servers</span>
-          |
-          v
-<span class="accent">LiteLLM Relay local agent</span>
-  - 127.0.0.1 OpenAI endpoint:      /v1/chat/completions, /v1/responses
-  - 127.0.0.1 Anthropic endpoint:   /anthropic/v1/messages
-  - HTTP CONNECT proxy:             app-aware routing and telemetry
-  - Adapter workers:                Notion, Copilot, Claude, Cursor, MCP
-  - Policy client:                  signed config from Gateway
-  - Privacy filter:                 redact, hash, and sample before persistence
-          |
-          v
-<span class="accent">LiteLLM Gateway</span>
-  - Virtual keys, teams, budgets, rate limits
-  - Guardrails, logging, spend tracking
-  - Model routing, fallback, approvals
-  - Device and app coverage dashboards</pre>
-        </div>
-      </div>
-    </section>
-
-    <section id="notion" class="section">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>Notion AI: realistic proof path</h2>
-          <p>
-            The Notion Mac app is the right demo because it is a real desktop AI app.
-            The honest V0 proof has two levels: capture metadata today, then decrypt and
-            adapt only on a managed test Mac.
-          </p>
-        </div>
-        <div class="proof">
-          <article class="tile">
-            <span class="tag">Local evidence from this machine</span>
-            <h3>What we proved without installing anything</h3>
-            <p>
-              The Notion Mac app is installed and running as Electron. Its network service
-              process has active HTTPS sockets. The current system has no configured HTTP
-              proxy, so we did not change machine routing or inspect private content.
-            </p>
-            <ul>
-              <li>Process: <strong>Notion Helper --utility-sub-type=network.mojom.NetworkService</strong></li>
-              <li>Observed flow: <strong>Notion PID 853 -> TCP :443</strong></li>
-              <li>System proxy: <strong>disabled</strong></li>
-              <li>App bundle exposes Notion AI shortcut handling and NetLog troubleshooting strings.</li>
-            </ul>
-          </article>
-          <div class="evidence" aria-label="Redacted proof commands">
-            <pre>$ pgrep -afil Notion
-625 /Applications/Notion.app/Contents/MacOS/Notion
-853 Notion Helper --utility-sub-type=network.mojom.NetworkService
-
-$ lsof -nP -iTCP -sTCP:ESTABLISHED | rg Notion
-Notion 853 ... TCP 192.168.x.x:* -> 208.103.161.1:443
-Notion 853 ... TCP 192.168.x.x:* -> 208.103.161.2:443
-
-$ scutil --proxy
-ExceptionsList: *.local, 169.254/16
-No HTTP, HTTPS, SOCKS, or PAC proxy configured</pre>
+          <div class="actions">
+            <a class="button primary" href="http://127.0.0.1:4142/">Open local dashboard</a>
+            <a class="button" href="https://github.com/BerriAI/litellm-relay">GitHub repo</a>
           </div>
         </div>
+        <pre class="code">curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh | bash
 
-        <div style="height: 28px"></div>
+# Manual pilot: route Notion through Relay on Wi-Fi
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
+  | bash -s -- --set-system-proxy "Wi-Fi"</pre>
+      </section>
 
-        <div class="timeline">
+      <aside class="card">
+        <h2>What it does now</h2>
+        <div class="steps">
           <div class="step">
             <div class="num">01</div>
-            <div>
-              <h3>V0 demo: PAC/system proxy capture</h3>
-              <p>
-                Deploy Relay as <code>127.0.0.1:&lt;port&gt;</code>, install a managed PAC profile for
-                <code>*.notion.so</code>, <code>*.notion.com</code>, and <code>api.notion.com</code>, then trigger
-                Notion AI. Success is Notion app traffic arriving at Relay with process,
-                destination, timing, SNI or CONNECT host, and byte counts.
-              </p>
-            </div>
+            <p>Runs a local CONNECT proxy on <code>127.0.0.1:4142</code>.</p>
           </div>
           <div class="step">
             <div class="num">02</div>
-            <div>
-              <h3>Safe shadow-route proof</h3>
-              <p>
-                Use a scratch Notion page and prompt marker such as
-                <code>PROBE-LITELLM-&lt;uuid&gt;</code>. Relay redacts cookies, IDs, URLs, and raw prompt
-                text, then sends a synthetic proof call to LiteLLM Gateway with the same
-                hashed proof ID. This proves Gateway correlation without modifying Notion.
-              </p>
-            </div>
+            <p>Serves a PAC file that routes Notion domains through Relay.</p>
           </div>
           <div class="step">
             <div class="num">03</div>
-            <div>
-              <h3>MITM adapter proof</h3>
-              <p>
-                On a managed test Mac, trust the Relay enterprise CA and capture only
-                approved Notion domains. Look for Notion AI paths such as
-                <code>/api/v3/runInferenceTranscript</code>. Convert the private request into a
-                LiteLLM Gateway call, then synthesize a Notion-compatible response.
-              </p>
-            </div>
+            <p>Logs intercepted host, port, duration, byte counts, and shadow status.</p>
           </div>
           <div class="step">
             <div class="num">04</div>
-            <div>
-              <h3>Production fallback</h3>
-              <p>
-                If the app bypasses system proxy or customers need process-level enforcement,
-                move capture to macOS <code>NETransparentProxyProvider</code>. TLS decryption still
-                requires a trusted CA and explicit customer policy.
-              </p>
-            </div>
+            <p>Shows those events in a local dashboard with filters and raw JSON inspection.</p>
           </div>
         </div>
-      </div>
-    </section>
-
-    <section class="section alt">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>Support matrix</h2>
-          <p>Ship the reliable surfaces first, then use Relay telemetry to decide which proprietary apps deserve adapters.</p>
-        </div>
-        <table class="matrix">
-          <thead>
-            <tr>
-              <th>Surface</th>
-              <th>V0 mode</th>
-              <th>Gateway outcome</th>
-              <th>Risk</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>OpenAI SDKs, Codex-style CLIs, Aider, Continue, OpenCode</td>
-              <td><span class="status good">Direct local endpoint</span></td>
-              <td>Full LiteLLM Gateway routing, budgets, model policy, logs</td>
-              <td>Low. Apps already support custom base URLs.</td>
-            </tr>
-            <tr>
-              <td>Claude Code and Anthropic-compatible tools</td>
-              <td><span class="status good">Anthropic local endpoint</span></td>
-              <td>Translate into Gateway provider calls with team/device metadata</td>
-              <td>Medium. Need strong message-streaming parity.</td>
-            </tr>
-            <tr>
-              <td>GitHub Copilot / IDEs with proxy settings</td>
-              <td><span class="status warn">Configured proxy</span></td>
-              <td>Observe and optionally route where protocol allows</td>
-              <td>Medium. Cert trust and IDE-specific behavior matter.</td>
-            </tr>
-            <tr>
-              <td>Notion AI Mac app</td>
-              <td><span class="status warn">PAC/system proxy first</span></td>
-              <td>Metadata capture, shadow proof, then custom adapter</td>
-              <td>High. Private Notion API can change.</td>
-            </tr>
-            <tr>
-              <td>Browser AI and proprietary desktop apps</td>
-              <td><span class="status future">Transparent capture beta</span></td>
-              <td>Discover, block, or adapt per approved domain</td>
-              <td>High. Privacy, cert pinning, and legal review.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="repo" class="section">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>GitHub repo scope</h2>
-          <p>
-            Create the repo as <strong>litellm-relay</strong>. Keep the first PR narrow:
-            local endpoint, policy stub, one adapter, and a Notion proof harness.
-          </p>
-        </div>
-        <div class="grid-2">
-          <article class="tile">
-            <span class="tag">V0 milestones</span>
-            <h3>What ships first</h3>
-            <ul>
-              <li><strong>M0 spike:</strong> local OpenAI endpoint -> LiteLLM Gateway with device metadata.</li>
-              <li><strong>M1 alpha:</strong> macOS daemon, menu bar, policy sync, adapter fixtures.</li>
-              <li><strong>M2 beta:</strong> Windows/Linux service, signed installers, MDM examples.</li>
-              <li><strong>M3 capture:</strong> PAC/system proxy, cert-managed MITM proof, Notion adapter experiment.</li>
-              <li><strong>M4 fleet UI:</strong> Gateway pages for devices, app coverage, MCP inventory, policy rollout.</li>
-            </ul>
-          </article>
-          <article class="tile">
-            <span class="tag">Repository layout</span>
-            <h3>Initial folders</h3>
-            <div class="repo-list">
-              <div class="path">/agent<br>daemon, local endpoints, policy client</div>
-              <div class="path">/proxy<br>CONNECT proxy, PAC, TLS experiments</div>
-              <div class="path">/adapters<br>tool config patchers and app adapters</div>
-              <div class="path">/gateway<br>device, policy, audit API stubs</div>
-              <div class="path">/tray<br>macOS menu bar and diagnostics</div>
-              <div class="path">/installers<br>pkg, MSI, deb/rpm, MDM profiles</div>
-              <div class="path">/proofs/notion<br>redacted Notion AI capture harness</div>
-              <div class="path">/docs<br>security model and support matrix</div>
-            </div>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section id="names" class="section alt">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>Product names</h2>
-          <p>
-            Recommended: <strong>LiteLLM Relay</strong>. It is clear, ownable, and directly says
-            what the product does without copying competitor language.
-          </p>
-        </div>
-        <div class="grid-3">
-          <article class="tile">
-            <span class="tag">Recommended</span>
-            <h3>LiteLLM Relay</h3>
-            <p>Best balance of enterprise clarity and product polish. Works for “Relay agent,” “Relay policy,” and “Relay fleet.”</p>
-          </article>
-          <article class="tile">
-            <span class="tag">Enterprise clear</span>
-            <h3>LiteLLM Endpoint</h3>
-            <p>Reads like managed endpoint software. Strong for IT buyers, a little less distinctive.</p>
-          </article>
-          <article class="tile">
-            <span class="tag">Developer native</span>
-            <h3>LiteLLM Sidecar</h3>
-            <p>Good for coding tools and local agents, but less intuitive for browser AI and enterprise device fleets.</p>
-          </article>
-          <article class="tile">
-            <span class="tag">Simple</span>
-            <h3>LiteLLM Link</h3>
-            <p>Short and friendly. Good menu-bar feel, but weaker at communicating governance.</p>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-inner">
-        <div class="section-title">
-          <h2>Source notes</h2>
-          <p>These are the current references behind the product scope and implementation constraints.</p>
-        </div>
-        <ul class="source-list">
-          <li><a href="https://www.getmaxim.ai/bifrost/edge">Bifrost Edge product page</a>: market positioning around desktop apps, browser AI, coding tools, and gateway governance.</li>
-          <li><a href="https://docs.getbifrost.ai/edge/overview">Bifrost Edge docs</a>: machine-level routing and governance claims.</li>
-          <li><a href="https://docs.mitmproxy.org/stable/concepts/modes/">mitmproxy local capture</a>: local app capture pattern for transparent interception.</li>
-          <li><a href="https://docs.mitmproxy.org/stable/concepts/certificates/">mitmproxy certificates</a>: HTTPS decryption requires trusted CA installation.</li>
-          <li><a href="https://developer.chrome.com/docs/extensions/reference/api/webRequest">Chrome webRequest</a> and <a href="https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest">declarativeNetRequest</a>: browser extension capture and modification limits.</li>
-          <li><a href="https://www.notion.com/help/network-control">Notion Network Control</a>: Notion documents enterprise SSL proxy/CASB interception patterns for workspace controls.</li>
-          <li><a href="https://developer.apple.com/documentation/networkextension/netransparentproxyprovider">Apple NETransparentProxyProvider</a>: production fallback for transparent macOS capture.</li>
-          <li><a href="https://support.apple.com/guide/deployment/global-http-proxy-payload-settings-dep7ba46fcd/web">Apple Global HTTP Proxy payload</a>: MDM-managed proxy/PAC deployment path.</li>
-        </ul>
-      </div>
-    </section>
+        <div class="code">curl -I -x http://127.0.0.1:4142 https://www.notion.so</div>
+        <p>
+          Default mode does not decrypt TLS or read prompts. It captures proxy metadata
+          and can send redacted shadow events through LiteLLM Gateway.
+        </p>
+      </aside>
+    </div>
   </main>
-
-  <footer>
-    Prepared as a V0 scope artifact for a new LiteLLM repository. The live Notion evidence is metadata-only until Relay is installed with a managed proxy or test CA.
-  </footer>
 </body>
 </html>

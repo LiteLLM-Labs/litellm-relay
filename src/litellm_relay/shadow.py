@@ -99,14 +99,14 @@ def build_shadow_payload(
                 "role": "user",
                 "content": (
                     "Return exactly OK. "
-                    f"source=notion-mac method={event.get('method', 'CONNECT')} "
+                    f"source={event.get('app', 'ai')} method={event.get('method', 'CONNECT')} "
                     f"event_id={event_id} host_hash={host_hash[:16]}"
                 ),
             },
         ],
         "metadata": {
             "source": "litellm-relay",
-            "shadow_source": "notion-mac",
+            "shadow_source": str(event.get("app") or "ai"),
             "event_id": event_id,
             "host_hash": host_hash,
             "method": str(event.get("method", "CONNECT")),

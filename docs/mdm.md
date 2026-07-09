@@ -16,6 +16,12 @@ curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.
   | bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
+The installed dashboard is served locally at:
+
+```text
+http://127.0.0.1:4142/
+```
+
 ## Jamf
 
 1. Package this repo as a signed macOS package.
@@ -45,4 +51,3 @@ curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.
 macOS has a single Global HTTP Proxy payload per device. Customers already using
 a corporate proxy need a coordinated PAC file instead of a second competing
 profile.
-
