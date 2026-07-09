@@ -25,7 +25,11 @@ use crate::{
     terminal::{print_runtime_panel, print_trace_event},
 };
 
-const DASHBOARD_HTML: &str = include_str!("static/dashboard.html");
+const DASHBOARD_INDEX_HTML: &str = include_str!("static/dashboard/index.html");
+const DASHBOARD_CSS: &[u8] = include_bytes!("static/dashboard/assets/dashboard.css");
+const DASHBOARD_JS: &[u8] = include_bytes!("static/dashboard/assets/dashboard.js");
+const DASHBOARD_FAVICON: &[u8] =
+    br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#171717"/><text x="16" y="21" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#fafafa">LR</text></svg>"##;
 
 pub struct RelayProxy {
     config: Arc<RelayConfig>,
@@ -86,7 +90,42 @@ impl RelayProxy {
                 &mut stream,
                 200,
                 "text/html; charset=utf-8",
-                DASHBOARD_HTML.as_bytes(),
+                DASHBOARD_INDEX_HTML.as_bytes(),
+                method == "GET",
+            )
+            .await;
+        }
+
+        if matches!(method.as_str(), "GET" | "HEAD") && route.path == "/assets/dashboard.css" {
+            return write_response(
+                &mut stream,
+                200,
+                "text/css; charset=utf-8",
+                DASHBOARD_CSS,
+                method == "GET",
+            )
+            .await;
+        }
+
+        if matches!(method.as_str(), "GET" | "HEAD") && route.path == "/assets/dashboard.js" {
+            return write_response(
+                &mut stream,
+                200,
+                "application/javascript; charset=utf-8",
+                DASHBOARD_JS,
+                method == "GET",
+            )
+            .await;
+        }
+
+        if matches!(method.as_str(), "GET" | "HEAD")
+            && matches!(route.path.as_str(), "/favicon.ico" | "/favicon.svg")
+        {
+            return write_response(
+                &mut stream,
+                200,
+                "image/svg+xml",
+                DASHBOARD_FAVICON,
                 method == "GET",
             )
             .await;
