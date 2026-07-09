@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import type { ComponentType, ReactNode } from "react"
 import {
   Activity,
+  AppWindow,
   BadgeCheck,
   CircleAlert,
   Clipboard,
@@ -41,6 +42,7 @@ type RelayStatus = {
   log_path?: string
   ai_domains?: string[]
   notion_domains?: string[]
+  known_apps?: KnownApp[]
   capture_payloads?: boolean
   mitm_ca_path?: string | null
   shadow_enabled?: boolean
@@ -50,6 +52,22 @@ type RelayStatus = {
 }
 
 type RelayEvent = Record<string, unknown>
+
+type KnownApp = {
+  id: string
+  label: string
+  description: string
+  logo: {
+    text: string
+    background: string
+    foreground: string
+    border: string
+  }
+  matchers: {
+    domains: string[]
+    refs: string[]
+  }
+}
 
 const statusCards = [
   {
@@ -74,7 +92,7 @@ const statusCards = [
   },
 ] as const
 
-const eventColumns = ["event", "app", "host", "path", "status", "ingest"]
+const eventColumns = ["time", "event", "app", "host", "path", "status", "ingest"]
 
 function App() {
   const [status, setStatus] = useState<RelayStatus | null>(null)
@@ -83,6 +101,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<string | null>(null)
+  const [appFilter, setAppFilter] = useState("all")
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     setError(null)
@@ -136,17 +155,51 @@ function App() {
     }
   }, [refresh])
 
+  const knownApps = useMemo(() => status?.known_apps ?? [], [status?.known_apps])
+  const appById = useMemo(() => new Map(knownApps.map((app) => [app.id, app])), [knownApps])
+  const appOptions = useMemo(() => {
+    const seen = new Set(knownApps.map((app) => app.id))
+    for (const event of events) {
+      const appId = asText(event.app)
+      if (appId) {
+        seen.add(appId)
+      }
+    }
+    return Array.from(seen)
+  }, [events, knownApps])
+
+  const sortedEvents = useMemo(
+    () =>
+      events
+        .map((event, index) => ({ event, index }))
+        .sort((left, right) => {
+          const rightTime = getEventTimestamp(right.event)
+          const leftTime = getEventTimestamp(left.event)
+          if (rightTime !== leftTime) {
+            return rightTime - leftTime
+          }
+          return right.index - left.index
+        })
+        .map(({ event }) => event),
+    [events]
+  )
+
+  const filteredEvents = useMemo(
+    () => sortedEvents.filter((event) => appFilter === "all" || asText(event.app) === appFilter),
+    [appFilter, sortedEvents]
+  )
+
   const selectedEvent = useMemo(
-    () => events.find((event) => getEventId(event) === selectedEventId) ?? events.at(-1) ?? null,
-    [events, selectedEventId]
+    () => filteredEvents.find((event) => getEventId(event) === selectedEventId) ?? filteredEvents.at(0) ?? null,
+    [filteredEvents, selectedEventId]
   )
 
   const stats = useMemo(() => {
-    const requests = events.filter((event) => asText(event.event) === "http_request").length
-    const responses = events.filter((event) => asText(event.event) === "http_response").length
-    const ingestAttempts = events.filter((event) => asText(event.event) === "gateway_ingest")
+    const requests = filteredEvents.filter((event) => asText(event.event) === "http_request").length
+    const responses = filteredEvents.filter((event) => asText(event.event) === "http_response").length
+    const ingestAttempts = filteredEvents.filter((event) => asText(event.event) === "gateway_ingest")
     const ingestOk = ingestAttempts.filter((event) => event.ok === true).length
-    const errors = events.filter((event) => asText(event.event).includes("failed") || event.ok === false).length
+    const errors = filteredEvents.filter((event) => asText(event.event).includes("failed") || event.ok === false).length
 
     return {
       requests,
@@ -155,7 +208,7 @@ function App() {
       ingestOk,
       errors,
     }
-  }, [events])
+  }, [filteredEvents])
 
   const clearEvents = async () => {
     await fetch("/api/events/clear", { method: "POST" })
@@ -229,6 +282,30 @@ function App() {
               </CardAction>
             </CardHeader>
             <CardContent>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <Button
+                  variant={appFilter === "all" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setAppFilter("all")}
+                >
+                  <AppWindow className="size-4" />
+                  All apps
+                </Button>
+                {appOptions.map((appId) => {
+                  const app = appById.get(appId)
+                  return (
+                    <Button
+                      key={appId}
+                      variant={appFilter === appId ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setAppFilter(appId)}
+                    >
+                      <AppLogo app={app} fallback={appId} size="sm" />
+                      {app?.label ?? appId}
+                    </Button>
+                  )
+                })}
+              </div>
               <div className="overflow-hidden rounded-lg border">
                 <Table>
                   <TableHeader>
@@ -239,16 +316,14 @@ function App() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {events.length === 0 ? (
+                    {filteredEvents.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={eventColumns.length} className="h-28 text-center text-muted-foreground">
-                          {loading ? "Loading relay events..." : "No relay events yet."}
+                          {loading ? "Loading relay events..." : "No relay events for this filter."}
                         </TableCell>
                       </TableRow>
                     ) : (
-                      events
-                        .slice()
-                        .reverse()
+                      filteredEvents
                         .map((event) => (
                           <TableRow
                             key={getEventId(event)}
@@ -256,8 +331,13 @@ function App() {
                             className="cursor-pointer"
                             onClick={() => setSelectedEventId(getEventId(event))}
                           >
+                            <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
+                              {formatEventTime(event)}
+                            </TableCell>
                             <TableCell className="font-mono text-xs">{asText(event.event)}</TableCell>
-                            <TableCell>{asText(event.app) || "unknown"}</TableCell>
+                            <TableCell>
+                              <AppCell app={appById.get(asText(event.app))} fallback={asText(event.app) || "unknown"} />
+                            </TableCell>
                             <TableCell className="max-w-48 truncate font-mono text-xs">{asText(event.host) || "-"}</TableCell>
                             <TableCell className="max-w-56 truncate font-mono text-xs">{asText(event.path) || "-"}</TableCell>
                             <TableCell>
@@ -322,8 +402,8 @@ function App() {
         </section>
 
         <section className="grid gap-4 lg:grid-cols-3">
+          <KnownAppsCard apps={knownApps} />
           <DomainCard title="AI domains" domains={status?.ai_domains ?? []} icon={<Waypoints className="size-4" />} />
-          <DomainCard title="Notion domains" domains={status?.notion_domains ?? []} icon={<BadgeCheck className="size-4" />} />
           <Card>
             <CardHeader>
               <CardTitle>Capture totals</CardTitle>
@@ -437,6 +517,7 @@ function EventSummary({ event }: { event: RelayEvent | null }) {
 
   const rows = [
     ["Event", asText(event.event)],
+    ["Time", formatEventDateTime(event)],
     ["App", asText(event.app) || "unknown"],
     ["Host", asText(event.host) || "-"],
     ["Path", asText(event.path) || "-"],
@@ -490,6 +571,66 @@ function PreviewBlock({
   )
 }
 
+function KnownAppsCard({ apps }: { apps: KnownApp[] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <BadgeCheck className="size-4" />
+          Known apps
+        </CardTitle>
+        <CardDescription>{apps.length} app matchers configured</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-3">
+          {apps.map((app) => (
+            <div key={app.id} className="rounded-lg border bg-muted/20 p-3">
+              <div className="flex items-center gap-2">
+                <AppLogo app={app} fallback={app.id} />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">{app.label}</div>
+                  <div className="truncate text-xs text-muted-foreground">{app.description}</div>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {app.matchers.refs.map((ref) => (
+                  <Badge key={ref} variant="secondary">{ref}</Badge>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function AppCell({ app, fallback }: { app?: KnownApp; fallback: string }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <AppLogo app={app} fallback={fallback} size="sm" />
+      <span className="truncate">{app?.label ?? fallback}</span>
+    </div>
+  )
+}
+
+function AppLogo({ app, fallback, size = "md" }: { app?: KnownApp; fallback: string; size?: "sm" | "md" }) {
+  const text = app?.logo.text ?? fallback.slice(0, 2).toUpperCase()
+  const dimension = size === "sm" ? "size-5 text-[10px]" : "size-8 text-xs"
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center rounded-md border font-mono font-semibold ${dimension}`}
+      style={{
+        backgroundColor: app?.logo.background ?? "var(--muted)",
+        borderColor: app?.logo.border ?? "var(--border)",
+        color: app?.logo.foreground ?? "var(--foreground)",
+      }}
+    >
+      {text}
+    </span>
+  )
+}
+
 function DomainCard({ title, domains, icon }: { title: string; domains: string[]; icon: ReactNode }) {
   return (
     <Card>
@@ -523,6 +664,41 @@ function getEventId(event?: RelayEvent | null) {
     return ""
   }
   return asText(event.event_id) || `${asText(event.event)}-${asText(event.host)}-${asText(event.path)}-${asText(event.status_code)}`
+}
+
+function getEventTimestamp(event: RelayEvent) {
+  const capturedAt = asText(event.captured_at)
+  if (!capturedAt) {
+    return 0
+  }
+  const timestamp = Date.parse(capturedAt)
+  return Number.isNaN(timestamp) ? 0 : timestamp
+}
+
+function formatEventTime(event: RelayEvent) {
+  const timestamp = getEventTimestamp(event)
+  if (!timestamp) {
+    return "-"
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(timestamp))
+}
+
+function formatEventDateTime(event: RelayEvent) {
+  const timestamp = getEventTimestamp(event)
+  if (!timestamp) {
+    return "-"
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(timestamp))
 }
 
 function asText(value: unknown) {

@@ -12,6 +12,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
 use crate::{
+    apps::known_apps,
     cert::{client_tls_config, ensure_ca, server_tls_config},
     config::{classify_host, is_ai_host, is_notion_host, RelayConfig},
     events::{append_event, clear_events, read_events},
@@ -490,6 +491,7 @@ impl RelayProxy {
             "shadow_enabled": self.config.shadow_enabled,
             "gateway_url": self.config.gateway_url,
             "events_loaded": read_events(&self.config.log_path, 1000).len(),
+            "known_apps": known_apps(),
             "runtime": "rust",
         }))
     }

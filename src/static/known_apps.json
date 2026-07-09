@@ -1,0 +1,53 @@
+[
+  {
+    "id": "notion",
+    "label": "Notion",
+    "description": "Notion workspace and Notion AI traffic.",
+    "logo": {
+      "text": "N",
+      "background": "#ffffff",
+      "foreground": "#111111",
+      "border": "#d4d4d4"
+    },
+    "matchers": {
+      "domains": [
+        "notion.so",
+        "notion.com",
+        "api.notion.com",
+        "www.notion.so",
+        "app.notion.com",
+        "msgstore-001.www.notion.so"
+      ],
+      "refs": [
+        "notion",
+        "notion-ai"
+      ]
+    }
+  },
+  {
+    "id": "codex",
+    "label": "Codex",
+    "description": "Codex, ChatGPT, and OpenAI API traffic routed through Relay.",
+    "logo": {
+      "text": "CX",
+      "background": "#0f172a",
+      "foreground": "#ffffff",
+      "border": "#334155"
+    },
+    "matchers": {
+      "domains": [
+        "api.openai.com",
+        "chatgpt.com",
+        "chat.openai.com",
+        "codex.openai.com",
+        "desktop.openai.com",
+        "openai.com"
+      ],
+      "refs": [
+        "codex",
+        "chatgpt",
+        "openai"
+      ]
+    }
+  }
+]

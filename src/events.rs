@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Result;
+use chrono::Utc;
 use serde_json::Value;
 
 pub fn append_event(log_path: &Path, event: Value) -> Result<()> {
@@ -50,6 +51,8 @@ pub fn read_events(log_path: &Path, limit: usize) -> Vec<Value> {
 
 pub fn redact_event(mut event: Value) -> Value {
     if let Value::Object(map) = &mut event {
+        map.entry("captured_at")
+            .or_insert_with(|| Value::String(Utc::now().to_rfc3339()));
         for key in [
             "authorization",
             "cookie",

@@ -1,28 +1,7 @@
 use std::{env, fs, io, path::PathBuf};
 
+use crate::apps::{classify_known_app, default_ai_domains, default_notion_domains};
 use crate::system::{env_bool, home_dir};
-
-const DEFAULT_NOTION_DOMAINS: &[&str] = &[
-    "notion.so",
-    "notion.com",
-    "api.notion.com",
-    "www.notion.so",
-    "app.notion.com",
-];
-
-const DEFAULT_AI_DOMAINS: &[&str] = &[
-    "notion.so",
-    "notion.com",
-    "api.notion.com",
-    "www.notion.so",
-    "app.notion.com",
-    "api.openai.com",
-    "openai.com",
-    "chatgpt.com",
-    "api.anthropic.com",
-    "anthropic.com",
-    "claude.ai",
-];
 
 #[derive(Clone, Debug)]
 pub struct RelayConfig {
@@ -54,11 +33,11 @@ impl RelayConfig {
                 .unwrap_or_else(|_| relay_home.join("relay.log.jsonl")),
             notion_domains: parse_domains(
                 env::var("LITELLM_RELAY_NOTION_DOMAINS").ok(),
-                DEFAULT_NOTION_DOMAINS,
+                default_notion_domains(),
             ),
             ai_domains: parse_domains(
                 env::var("LITELLM_RELAY_AI_DOMAINS").ok(),
-                DEFAULT_AI_DOMAINS,
+                default_ai_domains(),
             ),
             shadow_enabled: env_bool("LITELLM_RELAY_SHADOW_ENABLED", false),
             gateway_url: env::var("LITELLM_GATEWAY_URL")
@@ -130,18 +109,8 @@ pub fn is_notion_host(host: &str, config: &RelayConfig) -> bool {
 
 pub fn classify_host(host: &str, config: &RelayConfig) -> String {
     let normalized = normalize_host(host);
-    if is_domain_match(&normalized, &config.notion_domains) {
-        "notion".into()
-    } else if is_domain_match(
-        &normalized,
-        &["api.openai.com", "openai.com", "chatgpt.com"].map(String::from),
-    ) {
-        "openai".into()
-    } else if is_domain_match(
-        &normalized,
-        &["api.anthropic.com", "anthropic.com", "claude.ai"].map(String::from),
-    ) {
-        "anthropic".into()
+    if let Some(app_id) = classify_known_app(&normalized) {
+        app_id.into()
     } else if is_ai_host(&normalized, config) {
         "ai".into()
     } else {
@@ -156,7 +125,7 @@ fn is_domain_match(host: &str, domains: &[String]) -> bool {
         .any(|domain| normalized == *domain || normalized.ends_with(&format!(".{domain}")))
 }
 
-fn parse_domains(raw: Option<String>, default: &[&str]) -> Vec<String> {
+fn parse_domains(raw: Option<String>, default: Vec<String>) -> Vec<String> {
     raw.map(|value| {
         value
             .split(',')
@@ -166,7 +135,7 @@ fn parse_domains(raw: Option<String>, default: &[&str]) -> Vec<String> {
             .collect()
     })
     .filter(|domains: &Vec<String>| !domains.is_empty())
-    .unwrap_or_else(|| default.iter().map(|value| value.to_string()).collect())
+    .unwrap_or(default)
 }
 
 fn env_parse<T>(name: &str, default: T) -> T
