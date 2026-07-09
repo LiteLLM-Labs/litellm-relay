@@ -26,23 +26,40 @@ truncated and headers are redacted.
 curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh | bash
 ```
 
-To install and immediately route Notion traffic on a pilot Mac:
+Then open a new terminal and run:
+
+```bash
+relay
+```
+
+`relay` opens the interactive setup wizard if this is your first run, sends you
+through LiteLLM Gateway SSO, and then starts the live terminal trace view. That
+is the normal local flow: install once, type `relay`, finish login, and keep the
+terminal open while it traces routed AI traffic.
+
+To install and start Relay as a background service for a pilot Mac:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh \
+  | bash -s -- --background
+```
+
+To also route Notion traffic through the background service:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh \
   | bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
-Setup asks for your LiteLLM Gateway URL, opens browser SSO, saves the local
-Relay credential, and starts the service. For headless installs, set
-`LITELLM_GATEWAY_API_KEY` before running the installer.
+For headless or MDM installs, set `LITELLM_GATEWAY_URL` and
+`LITELLM_GATEWAY_API_KEY`, then run the installer with `--background`.
 
 ## Usage
 
 Start Relay:
 
 ```bash
-litellm-relay
+relay
 ```
 
 Open the local dashboard:

@@ -10,7 +10,8 @@ use crate::{
 };
 
 #[derive(Parser)]
-#[command(name = "litellm-relay")]
+#[command(name = "relay")]
+#[command(bin_name = "relay")]
 #[command(about = "Local LiteLLM Gateway relay for AI app traffic")]
 struct Cli {
     #[command(subcommand)]
