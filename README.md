@@ -6,7 +6,6 @@ LiteLLM Relay runs on a machine and sends supported AI app traffic through your
 existing LiteLLM Gateway. Use it to bring desktop apps, browser AI tools, coding
 tools, and MCP servers under the same Gateway budgets, logs, and policy.
 
-![LiteLLM Relay](assets/relay-hero.png)
 
 ## Features
 
