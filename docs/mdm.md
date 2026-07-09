@@ -28,11 +28,9 @@ http://127.0.0.1:4142/
 2. Deploy the package to the pilot scope.
 3. Deploy a configuration profile with an Auto Proxy URL:
    `http://127.0.0.1:4142/proxy.pac`.
-4. Set environment values through a managed LaunchAgent plist or a future Relay
-   enrollment profile:
-   - `LITELLM_GATEWAY_URL`
-   - `LITELLM_RELAY_SHADOW_ENABLED`
-   - `LITELLM_RELAY_SHADOW_MODEL`
+4. Deploy `~/.litellm-relay/config.yaml` with Gateway URL, capture settings,
+   shadow settings, and approved domains. The LaunchAgent reads that one file
+   when Relay starts.
 
 ## Intune
 

@@ -2,24 +2,26 @@
 set -euo pipefail
 
 RELAY_HOME="${RELAY_HOME:-$HOME/.litellm-relay}"
-RELAY_PORT="${LITELLM_RELAY_PORT:-4142}"
+RELAY_PORT="4142"
 NETWORK_SERVICE=""
 BACKGROUND_SERVICE=0
+SETUP_GATEWAY_URL=""
+SETUP_API_KEY=""
+INSTALL_BIN_DIR_OVERRIDE=""
 
 usage() {
   cat <<'USAGE'
 Install LiteLLM Relay on macOS.
 
 Usage:
-  ./src/install.sh [--background] [--set-system-proxy "Wi-Fi"]
+  ./src/install.sh [--background] [--set-system-proxy "Wi-Fi"] [--gateway-url URL] [--api-key KEY]
 
-Environment:
-  LITELLM_RELAY_BIN_DIR           Optional install location for the relay command
-  LITELLM_GATEWAY_URL              Optional default LiteLLM Gateway URL
-  LITELLM_GATEWAY_API_KEY          Optional non-interactive Gateway key fallback
-  LITELLM_RELAY_SHADOW_ENABLED     Set to 1 to shadow Notion connection events
-  LITELLM_RELAY_SHADOW_MODEL       Model for synthetic shadow calls, default gpt-4o-mini
-  LITELLM_RELAY_CAPTURE_PAYLOADS   Capture request/response previews, default 1
+Options:
+  --background                    Configure Gateway auth and start the LaunchAgent
+  --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
+  --gateway-url URL               Gateway URL for non-interactive setup
+  --api-key KEY                   Gateway key for non-interactive setup
+  --bin-dir DIR                   Install relay shims into DIR
 
 By default this builds the Rust Relay binary, installs the relay command, and
 trusts the Relay local CA in your login keychain so AI app payloads can be
@@ -32,6 +34,9 @@ the foreground terminal trace view.
 
 Pass --background to also configure Gateway SSO and start the Relay LaunchAgent.
 Pass --set-system-proxy "Wi-Fi" to route AI apps through the background service.
+
+Relay settings are stored in:
+  ~/.litellm-relay/config.yaml
 USAGE
 }
 
@@ -44,6 +49,18 @@ while [[ $# -gt 0 ]]; do
     --set-system-proxy)
       NETWORK_SERVICE="${2:-}"
       BACKGROUND_SERVICE=1
+      shift 2
+      ;;
+    --gateway-url)
+      SETUP_GATEWAY_URL="${2:-}"
+      shift 2
+      ;;
+    --api-key)
+      SETUP_API_KEY="${2:-}"
+      shift 2
+      ;;
+    --bin-dir)
+      INSTALL_BIN_DIR_OVERRIDE="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -66,8 +83,8 @@ fi
 mkdir -p "$RELAY_HOME"
 
 choose_bin_dir() {
-  if [[ -n "${LITELLM_RELAY_BIN_DIR:-}" ]]; then
-    printf '%s\n' "$LITELLM_RELAY_BIN_DIR"
+  if [[ -n "$INSTALL_BIN_DIR_OVERRIDE" ]]; then
+    printf '%s\n' "$INSTALL_BIN_DIR_OVERRIDE"
   elif [[ -d /usr/local/bin && -w /usr/local/bin ]]; then
     printf '%s\n' "/usr/local/bin"
   elif [[ -d /opt/homebrew/bin && -w /opt/homebrew/bin ]]; then
@@ -202,11 +219,11 @@ DONE
 fi
 
 SETUP_ARGS=()
-if [[ -n "${LITELLM_GATEWAY_URL:-}" ]]; then
-  SETUP_ARGS+=(--gateway-url "$LITELLM_GATEWAY_URL")
+if [[ -n "$SETUP_GATEWAY_URL" ]]; then
+  SETUP_ARGS+=(--gateway-url "$SETUP_GATEWAY_URL")
 fi
-if [[ -n "${LITELLM_GATEWAY_API_KEY:-}" ]]; then
-  SETUP_ARGS+=(--api-key "$LITELLM_GATEWAY_API_KEY")
+if [[ -n "$SETUP_API_KEY" ]]; then
+  SETUP_ARGS+=(--api-key "$SETUP_API_KEY")
 fi
 
 "$RELAY_HOME/bin/litellm-relay" setup "${SETUP_ARGS[@]}"
@@ -215,31 +232,15 @@ mkdir -p "$RELAY_HOME/bin"
 cat > "$RELAY_HOME/bin/run-relay" <<RUNNER
 #!/usr/bin/env zsh
 set -euo pipefail
-set -a
-source "$RELAY_HOME/env"
-set +a
 exec "$RELAY_HOME/bin/litellm-relay" serve
 RUNNER
 chmod 700 "$RELAY_HOME/bin/run-relay"
 
-set -a
-source "$RELAY_HOME/env"
-set +a
-
-cat > "$RELAY_HOME/relay.pac" <<PAC
-function FindProxyForURL(url, host) {
-  var relayProxy = "PROXY 127.0.0.1:$RELAY_PORT";
-  var notionDomains = ["notion.so", "notion.com", "api.notion.com", "www.notion.so", "app.notion.com", "api.openai.com", "openai.com", "chatgpt.com", "api.anthropic.com", "anthropic.com", "claude.ai"];
-  host = host.toLowerCase();
-  for (var i = 0; i < notionDomains.length; i++) {
-    var domain = notionDomains[i];
-    if (host === domain || dnsDomainIs(host, "." + domain)) {
-      return relayProxy;
-    }
-  }
-  return "DIRECT";
-}
-PAC
+"$RELAY_HOME/bin/litellm-relay" pac > "$RELAY_HOME/relay.pac"
+RELAY_PORT="$(sed -n 's/.*PROXY 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$RELAY_HOME/relay.pac" | head -n 1)"
+if [[ -z "$RELAY_PORT" ]]; then
+  RELAY_PORT="4142"
+fi
 
 PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.plist"
 mkdir -p "$(dirname "$PLIST")"
@@ -295,7 +296,7 @@ To route Notion through Relay for a manual pilot:
 To verify interception without changing system settings:
   curl --cacert "$CA_PATH" -x http://127.0.0.1:$RELAY_PORT https://www.notion.so
 
-Gateway auth is saved in $RELAY_HOME/env.
+Gateway auth and Relay settings are saved in $RELAY_HOME/config.yaml.
 DONE
 if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
   cat <<DONE

@@ -2,11 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    cert::ensure_ca,
-    config::{load_saved_env, RelayConfig},
-    pac::build_pac,
-    proxy::RelayProxy,
-    setup::run_setup,
+    cert::ensure_ca, config::RelayConfig, pac::build_pac, proxy::RelayProxy, setup::run_setup,
 };
 
 #[derive(Parser)]
@@ -36,7 +32,6 @@ enum CommandKind {
 }
 
 pub async fn run() -> Result<()> {
-    load_saved_env()?;
     let cli = Cli::parse();
     match cli.command {
         None => run_interactive_default().await,
@@ -45,18 +40,17 @@ pub async fn run() -> Result<()> {
 }
 
 async fn run_interactive_default() -> Result<()> {
-    let mut config = RelayConfig::from_env();
+    let mut config = RelayConfig::load()?;
     if config.gateway_api_key.is_none() {
         println!("LiteLLM Relay is not set up yet. Starting setup.");
         run_setup(None, None).await?;
-        load_saved_env()?;
-        config = RelayConfig::from_env();
+        config = RelayConfig::load()?;
     }
     RelayProxy::new(config).serve_forever().await
 }
 
 async fn run_command(command: CommandKind) -> Result<()> {
-    let config = RelayConfig::from_env();
+    let config = RelayConfig::load()?;
     match command {
         CommandKind::Serve => RelayProxy::new(config).serve_forever().await,
         CommandKind::Pac => {

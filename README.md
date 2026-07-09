@@ -51,8 +51,14 @@ curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/inst
   | bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
-For headless or MDM installs, set `LITELLM_GATEWAY_URL` and
-`LITELLM_GATEWAY_API_KEY`, then run the installer with `--background`.
+For headless or MDM installs, pass setup values as installer flags:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh \
+  | bash -s -- --background \
+    --gateway-url https://gateway.example.com \
+    --api-key sk-...
+```
 
 ## Usage
 
@@ -75,6 +81,49 @@ curl --cacert ~/.litellm-relay/mitm/litellm-relay-ca.pem \
   -x http://127.0.0.1:4142 https://api.openai.com/v1/models
 ```
 
+## Configuration
+
+Relay keeps one local settings file:
+
+```text
+~/.litellm-relay/config.yaml
+```
+
+Example:
+
+```yaml
+relay:
+  host: 127.0.0.1
+  port: 4142
+  log_path: /Users/you/.litellm-relay/relay.log.jsonl
+  mitm_ca_dir: /Users/you/.litellm-relay/mitm
+gateway:
+  url: https://gateway.example.com
+  api_key: sk-...
+shadow:
+  enabled: false
+  model: gpt-4o-mini
+  min_interval_seconds: 60
+capture:
+  payloads: true
+  payload_preview_bytes: 8192
+  payload_body_bytes: 262144
+domains:
+  notion:
+    - notion.so
+    - notion.com
+  ai:
+    - api.openai.com
+    - chatgpt.com
+    - chat.openai.com
+    - codex.openai.com
+timeouts:
+  request_seconds: 10.0
+```
+
+Run `relay setup` to update Gateway auth, or edit this file for local port,
+capture, shadow, and domain settings.
+
 ## Troubleshooting
 
 If `relay` says port `4142` is already in use, stop the old Python relay and
@@ -87,8 +136,9 @@ relay
 
 To run on a different port:
 
-```bash
-LITELLM_RELAY_PORT=4143 relay
+```yaml
+relay:
+  port: 4143
 ```
 
 ## Development

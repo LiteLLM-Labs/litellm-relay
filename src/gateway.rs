@@ -37,7 +37,7 @@ impl GatewayClient {
             return json!({"attempted": false, "ok": false});
         }
         let Some(api_key) = &self.config.gateway_api_key else {
-            return json!({"attempted": false, "ok": false, "error": "LITELLM_GATEWAY_API_KEY is not set"});
+            return json!({"attempted": false, "ok": false, "error": "gateway.api_key is not set in config.yaml"});
         };
         let host = event
             .get("host")
@@ -85,7 +85,7 @@ impl GatewayClient {
                 attempted: false,
                 ok: false,
                 status: None,
-                error: Some("LITELLM_GATEWAY_API_KEY is not set".into()),
+                error: Some("gateway.api_key is not set in config.yaml".into()),
             };
         };
         let status_code = capture

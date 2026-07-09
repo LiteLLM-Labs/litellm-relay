@@ -1,16 +1,5 @@
 use std::{env, path::PathBuf, process::Command};
 
-pub fn env_bool(name: &str, default: bool) -> bool {
-    env::var(name)
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(default)
-}
-
 pub fn home_dir() -> PathBuf {
     env::var("HOME")
         .map(PathBuf::from)

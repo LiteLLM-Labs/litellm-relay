@@ -18,11 +18,16 @@ workspace IDs, or response bodies.
 git clone https://github.com/BerriAI/litellm-relay.git
 cd litellm-relay
 
-export LITELLM_GATEWAY_URL="https://gateway.example.com"
-export LITELLM_GATEWAY_API_KEY="sk-..."
-export LITELLM_RELAY_SHADOW_ENABLED=1
+./src/install.sh --set-system-proxy "Wi-Fi" \
+  --gateway-url "https://gateway.example.com" \
+  --api-key "sk-..."
+```
 
-./src/install.sh --set-system-proxy "Wi-Fi"
+Enable synthetic shadow calls in `~/.litellm-relay/config.yaml` when needed:
+
+```yaml
+shadow:
+  enabled: true
 ```
 
 Trigger Notion AI in the Notion Mac app, then inspect:

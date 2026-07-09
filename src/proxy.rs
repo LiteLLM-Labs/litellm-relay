@@ -57,8 +57,9 @@ impl RelayProxy {
                      Stop the old Relay process and try again:\n\
                        pkill -f 'litellm_relay.cli serve'\n\
                        relay\n\n\
-                     Or run Relay on another port:\n\
-                       LITELLM_RELAY_PORT={} relay",
+                     Or edit ~/.litellm-relay/config.yaml and set:\n\
+                       relay:\n\
+                         port: {}",
                     self.config.port + 1
                 );
             }
