@@ -10,7 +10,7 @@ usage() {
 Install LiteLLM Relay on macOS.
 
 Usage:
-  ./install.sh [--set-system-proxy "Wi-Fi"]
+  ./src/install.sh [--set-system-proxy "Wi-Fi"]
 
 Environment:
   LITELLM_GATEWAY_URL              LiteLLM Gateway URL, default http://127.0.0.1:4000
@@ -52,7 +52,9 @@ mkdir -p "$RELAY_HOME"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR=""
-if [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
+if [[ -f "$SCRIPT_DIR/../Cargo.toml" ]]; then
+  BUILD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+elif [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
   BUILD_DIR="$SCRIPT_DIR"
 else
   TMP_DIR="$(mktemp -d)"
@@ -175,5 +177,5 @@ To verify interception without changing system settings:
   curl --cacert "$CA_PATH" -x http://127.0.0.1:$RELAY_PORT https://www.notion.so
 
 To enable shadow calls through LiteLLM Gateway, set LITELLM_GATEWAY_API_KEY and
-LITELLM_RELAY_SHADOW_ENABLED=1 before running install.sh, then restart Relay.
+LITELLM_RELAY_SHADOW_ENABLED=1 before running src/install.sh, then restart Relay.
 DONE

@@ -22,7 +22,7 @@ export LITELLM_GATEWAY_URL="https://gateway.example.com"
 export LITELLM_GATEWAY_API_KEY="sk-..."
 export LITELLM_RELAY_SHADOW_ENABLED=1
 
-./install.sh --set-system-proxy "Wi-Fi"
+./src/install.sh --set-system-proxy "Wi-Fi"
 ```
 
 Trigger Notion AI in the Notion Mac app, then inspect:

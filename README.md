@@ -44,13 +44,13 @@ The installer builds the Rust binary from source, writes a LaunchAgent, and
 trusts the local Relay CA in your login keychain:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh | bash
 ```
 
 To immediately route Notion traffic on a pilot Mac:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh \
   | bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
@@ -81,7 +81,7 @@ export LITELLM_GATEWAY_URL="https://gateway.example.com"
 export LITELLM_GATEWAY_API_KEY="sk-..."
 export LITELLM_RELAY_SHADOW_ENABLED=1
 
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh \
   | bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
@@ -100,4 +100,4 @@ cargo clippy --all-targets -- -D warnings
 
 - [Notion AI shadowing v0](docs/notion-shadow-v0.md)
 - [MDM rollout](docs/mdm.md)
-- [Product scope artifact](index.html)
+- [Dashboard/product scope artifact](src/static/dashboard.html)
