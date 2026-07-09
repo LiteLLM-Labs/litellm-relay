@@ -75,6 +75,22 @@ curl --cacert ~/.litellm-relay/mitm/litellm-relay-ca.pem \
   -x http://127.0.0.1:4142 https://api.openai.com/v1/models
 ```
 
+## Troubleshooting
+
+If `relay` says port `4142` is already in use, stop the old Python relay and
+start again:
+
+```bash
+pkill -f 'litellm_relay.cli serve'
+relay
+```
+
+To run on a different port:
+
+```bash
+LITELLM_RELAY_PORT=4143 relay
+```
+
 ## Development
 
 ```bash

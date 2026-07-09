@@ -1,6 +1,6 @@
-use std::{fs, net::SocketAddr, sync::Arc, time::Instant};
+use std::{fs, io::ErrorKind, net::SocketAddr, sync::Arc, time::Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use rustls::pki_types::ServerName;
 use serde_json::{json, Value};
@@ -48,7 +48,23 @@ impl RelayProxy {
             fs::create_dir_all(parent)?;
         }
         let listen = format!("{}:{}", self.config.host, self.config.port);
-        let listener = TcpListener::bind(&listen).await?;
+        let listener = match TcpListener::bind(&listen).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::AddrInUse => {
+                bail!(
+                    "Relay could not start because {listen} is already in use.\n\n\
+                     Stop the old Relay process and try again:\n\
+                       pkill -f 'litellm_relay.cli serve'\n\
+                       relay\n\n\
+                     Or run Relay on another port:\n\
+                       LITELLM_RELAY_PORT={} relay",
+                    self.config.port + 1
+                );
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to bind Relay to {listen}"));
+            }
+        };
         self.log_event(json!({
             "event": "relay_started",
             "listen": listen,

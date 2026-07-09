@@ -111,6 +111,28 @@ install_path_entry() {
   export PATH="$bin_dir:$PATH"
 }
 
+stop_legacy_python_relay() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local pid command stopped
+  stopped=0
+  while IFS= read -r pid; do
+    if [[ -z "$pid" ]]; then
+      continue
+    fi
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command" == *"litellm_relay.cli serve"* ]]; then
+      if [[ "$stopped" == "0" ]]; then
+        echo "Stopping old Python LiteLLM Relay on port $RELAY_PORT..."
+        stopped=1
+      fi
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  done < <(lsof -tiTCP:"$RELAY_PORT" -sTCP:LISTEN 2>/dev/null || true)
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR=""
 if [[ -f "$SCRIPT_DIR/../Cargo.toml" ]]; then
@@ -131,7 +153,10 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo build --release --manifest-path "$BUILD_DIR/Cargo.toml"
+stop_legacy_python_relay
+
+echo "Building LiteLLM Relay..."
+cargo build --quiet --release --manifest-path "$BUILD_DIR/Cargo.toml"
 mkdir -p "$RELAY_HOME/bin"
 cp "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
 chmod 700 "$RELAY_HOME/bin/litellm-relay"
