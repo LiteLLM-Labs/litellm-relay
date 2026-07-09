@@ -430,7 +430,7 @@ impl RelayProxy {
                     duration_ms: request_started.elapsed().as_millis() as u64,
                 })
                 .await;
-            self.log_ingest(
+            self.log_collector_ingest(
                 &capture_event_id,
                 &event_id,
                 &host,
@@ -496,7 +496,7 @@ impl RelayProxy {
         }))
     }
 
-    fn log_ingest(
+    fn log_collector_ingest(
         &self,
         capture_event_id: &str,
         connection_event_id: &str,
@@ -507,7 +507,7 @@ impl RelayProxy {
         self.log_event(json!({
             "event_id": capture_event_id,
             "connection_event_id": connection_event_id,
-            "event": "gateway_ingest",
+            "event": "collector_spend_logs",
             "host": host,
             "app": classify_host(host, &self.config),
             "path": path,

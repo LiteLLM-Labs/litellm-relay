@@ -131,7 +131,7 @@ impl GatewayClient {
         match self
             .http_client
             .post(format!(
-                "{}/internal/collector/events",
+                "{}/collector/spend-logs",
                 self.config.gateway_url.trim_end_matches('/')
             ))
             .bearer_auth(api_key)
