@@ -5,7 +5,7 @@ LiteLLM Relay is a proxy you install on employee machines. It detects AI traffic
 <img width="2467" height="1080" alt="relay-hero" src="https://github.com/user-attachments/assets/e766224d-014b-4083-b03e-be11abfb0b4a" />
 
 # Usage 
- 1. Install LiteLLM Relay on all your employee devices, using [supported MDM](supported-mdms)
+ 1. Install LiteLLM Relay on all your employee devices, using [supported MDM](https://github.com/LiteLLM-Labs/litellm-relay#supported-mdms)
  2. Employees use AI tools as they normally would, such as Notion AI.
     <img width="2200" height="1654" alt="Xnapper-2026-07-09-18 25 01" src="https://github.com/user-attachments/assets/01f59c09-c927-4d04-af37-35ff5b7ec8fb" />
  3. Every request, response, and usage event is captured in LiteLLM.
