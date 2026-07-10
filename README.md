@@ -1,21 +1,36 @@
 # LiteLLM Relay
 
-local relay for AI apps
+Detect shadow AI from every data source in your company.
 
-LiteLLM Relay runs on a machine and sends supported AI app traffic through your
-existing LiteLLM Gateway. Use it to bring desktop apps, browser AI tools, coding
-tools, and MCP servers under the same Gateway budgets, logs, and policy.
+LiteLLM Relay brings the AI tools your team already uses into LiteLLM AI
+Gateway. Desktop apps, browser AI, coding tools, agents, MCP clients, and direct
+LLM API calls can all be routed through one gateway instead of living in
+separate, untracked places.
 
+Make LiteLLM AI Gateway your single pane of glass for AI usage across the org.
+Once Relay is active on employee devices, AI traffic is routed through LiteLLM AI
+Gateway, where it can be logged, governed, and audited in one place.
+
+## Supported MDMs
+
+Deploy LiteLLM Relay with your existing device-management process:
+
+- Jamf
+- Microsoft Intune
+- Kandji
+- Mosyle
+- VMware Workspace ONE
+- Addigy
+- Custom shell scripts or internal deployment workflows
 
 ## Features
 
-- Local proxy on `127.0.0.1:4142`
-- PAC file for routing selected AI domains through Relay
-- Gateway SSO setup during install
-- Local dashboard at `http://127.0.0.1:4142/`
-- Redacted request/response previews in `~/.litellm-relay/relay.log.jsonl`
-- Optional HTTPS capture with a local Relay CA for approved domains
-- Metadata-only mode for apps that use certificate pinning or stricter pilots
+- Detect shadow AI usage across employee devices and company traffic sources
+- Route AI traffic through LiteLLM AI Gateway for central visibility
+- Log AI activity from desktop apps, browser AI, coding tools, agents, MCP
+  clients, and LLM APIs
+- Apply one set of Gateway controls for audit, access, provider routing, and
+  policy
 
 Relay does not log cookies or authorization headers. Payload previews are
 truncated and headers are redacted.
