@@ -18,10 +18,11 @@ use crate::{
     events::{append_event, clear_events, read_events},
     gateway::{CaptureIngest, GatewayClient, IngestResult},
     http::{
-        build_http_payload, copy_bidirectional_counted, parse_connect_target, parse_limit,
-        parse_request_line, parse_response_status, parse_route, parse_start_line,
-        read_http_message, read_until_headers, redact_headers, scrub_request_target, should_close,
-        write_response,
+        build_http_payload, build_metadata_only_http_payload, copy_bidirectional_counted,
+        parse_connect_target, parse_limit, parse_request_line, parse_response_status, parse_route,
+        parse_start_line, read_http_body, read_http_head, read_http_message, read_until_headers,
+        redact_headers, request_protocol_decision, response_protocol_decision,
+        scrub_request_target, should_close, write_response, ProtocolCompatibilityDecision,
     },
     pac::build_pac,
     terminal::{print_runtime_panel, print_trace_event},
@@ -358,6 +359,7 @@ impl RelayProxy {
             let request_started = Instant::now();
             let request_line = parse_request_line(&request.header_text);
             let request_path = scrub_request_target(&request_line.path);
+            let request_protocol = request_protocol_decision(&request.headers);
             let request_payload = build_http_payload(
                 &request.body,
                 &request.headers,
@@ -372,20 +374,116 @@ impl RelayProxy {
             upstream_tls.write_all(&request.raw).await?;
             upstream_tls.flush().await?;
 
-            let response = match read_http_message(&mut upstream_tls).await? {
-                Some(message) => message,
+            let response_head = match read_http_head(&mut upstream_tls).await? {
+                Some(head) => head,
                 None => break,
             };
-            bytes_in += response.raw.len();
-            let status_code = parse_response_status(&response.header_text);
+            bytes_in += response_head.raw_headers.len();
+            let status_code = parse_response_status(&response_head.header_text);
+            let response_protocol = response_protocol_decision(status_code, &response_head.headers);
+
+            if request_protocol.is_metadata_only() || response_protocol.is_metadata_only() {
+                let tunnel_decision = metadata_tunnel_decision(request_protocol, response_protocol);
+                let response_payload = build_metadata_only_http_payload(
+                    &response_head.headers,
+                    json!({
+                        "status_code": status_code,
+                    }),
+                    tunnel_decision,
+                );
+                let app = classify_host(&host, &self.config);
+                let classification = classify_captured_traffic(CapturedTraffic {
+                    app: &app,
+                    host: &host,
+                    method: &request_line.method,
+                    path: &request_path,
+                    request_headers: &request.headers,
+                    request_payload: &request_payload,
+                    response_payload: &response_payload,
+                });
+                self.log_event(json!({
+                    "event_id": capture_event_id,
+                    "connection_event_id": event_id,
+                    "event": "http_request",
+                    "method": request_line.method,
+                    "path": request_path,
+                    "host": host,
+                    "app": app,
+                    "ai_match": is_ai_host(&host, &self.config),
+                    "notion_match": is_notion_host(&host, &self.config),
+                    "traffic_kind": classification.kind,
+                    "traffic_reason": classification.reason,
+                    "collector_eligible": false,
+                    "capture_mode": "metadata_only_tunnel",
+                    "protocol_compatibility_reason": tunnel_decision.reason.as_str(),
+                    "headers": redact_headers(&request.headers),
+                    "request_bytes": request.body.len(),
+                    "request_preview": request_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
+                    "request_truncated": request_payload.get("preview_truncated").cloned().unwrap_or(Value::Bool(false)),
+                }))?;
+                self.log_event(json!({
+                    "event_id": capture_event_id,
+                    "connection_event_id": event_id,
+                    "event": "http_response",
+                    "method": request_line.method,
+                    "path": request_path,
+                    "host": host,
+                    "app": app,
+                    "traffic_kind": classification.kind,
+                    "traffic_reason": classification.reason,
+                    "collector_eligible": false,
+                    "capture_mode": "metadata_only_tunnel",
+                    "protocol_compatibility_reason": tunnel_decision.reason.as_str(),
+                    "status_code": status_code,
+                    "headers": redact_headers(&response_head.headers),
+                    "response_bytes": 0,
+                    "response_preview": response_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
+                    "response_truncated": false,
+                }))?;
+                self.log_collector_skipped(
+                    &capture_event_id,
+                    &event_id,
+                    &host,
+                    &request_path,
+                    &classification,
+                )?;
+                client_tls.write_all(&response_head.raw_headers).await?;
+                client_tls.flush().await?;
+                let (tunnel_bytes_out, tunnel_bytes_in) =
+                    copy_bidirectional_counted(&mut client_tls, &mut upstream_tls).await?;
+                bytes_out += tunnel_bytes_out as usize;
+                bytes_in += tunnel_bytes_in as usize;
+                self.log_event(json!({
+                    "event_id": capture_event_id,
+                    "connection_event_id": event_id,
+                    "event": "protocol_tunnel_closed",
+                    "method": request_line.method,
+                    "path": request_path,
+                    "host": host,
+                    "app": app,
+                    "duration_ms": request_started.elapsed().as_millis() as u64,
+                    "bytes_out": tunnel_bytes_out,
+                    "bytes_in": tunnel_bytes_in,
+                    "capture_mode": "metadata_only_tunnel",
+                    "protocol_compatibility_reason": tunnel_decision.reason.as_str(),
+                }))?;
+                break;
+            }
+
+            let response_body = read_http_body(&mut upstream_tls, &response_head.headers).await?;
+            bytes_in += response_body.raw.len();
+            let mut response_raw = response_head.raw_headers;
+            response_raw.extend_from_slice(&response_body.raw);
             let response_payload = build_http_payload(
-                &response.body,
-                &response.headers,
+                &response_body.decoded,
+                &response_head.headers,
                 self.config.payload_preview_bytes,
                 self.config.payload_body_bytes,
                 json!({
                     "status_code": status_code,
-                    "headers": redact_headers(&response.headers),
+                    "headers": redact_headers(&response_head.headers),
+                    "capture_mode": "buffered_capture",
+                    "protocol_compatibility_reason": response_protocol.reason.as_str(),
                 }),
             );
             let app = classify_host(&host, &self.config);
@@ -411,6 +509,8 @@ impl RelayProxy {
                 "traffic_kind": classification.kind,
                 "traffic_reason": classification.reason,
                 "collector_eligible": classification.is_ai_request(),
+                "capture_mode": "buffered_capture",
+                "protocol_compatibility_reason": response_protocol.reason.as_str(),
                 "headers": redact_headers(&request.headers),
                 "request_bytes": request.body.len(),
                 "request_preview": request_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
@@ -428,8 +528,10 @@ impl RelayProxy {
                 "traffic_reason": classification.reason,
                 "collector_eligible": classification.is_ai_request(),
                 "status_code": status_code,
-                "headers": redact_headers(&response.headers),
-                "response_bytes": response.body.len(),
+                "capture_mode": "buffered_capture",
+                "protocol_compatibility_reason": response_protocol.reason.as_str(),
+                "headers": redact_headers(&response_head.headers),
+                "response_bytes": response_body.decoded.len(),
                 "response_preview": response_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
                 "response_truncated": response_payload.get("preview_truncated").cloned().unwrap_or(Value::Bool(false)),
             }))?;
@@ -467,10 +569,10 @@ impl RelayProxy {
                 )?;
             }
 
-            client_tls.write_all(&response.raw).await?;
+            client_tls.write_all(&response_raw).await?;
             client_tls.flush().await?;
 
-            if should_close(&request.headers) || should_close(&response.headers) {
+            if should_close(&request.headers) || should_close(&response_head.headers) {
                 break;
             }
         }
@@ -570,5 +672,16 @@ impl RelayProxy {
     fn log_event(&self, event: Value) -> Result<()> {
         print_trace_event(&event);
         append_event(&self.config.log_path, event)
+    }
+}
+
+fn metadata_tunnel_decision(
+    request: ProtocolCompatibilityDecision,
+    response: ProtocolCompatibilityDecision,
+) -> ProtocolCompatibilityDecision {
+    if request.is_metadata_only() {
+        request
+    } else {
+        response
     }
 }

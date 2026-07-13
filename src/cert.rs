@@ -8,6 +8,19 @@ use std::{
 use anyhow::{anyhow, Result};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AlpnProtocol {
+    Http11,
+}
+
+impl AlpnProtocol {
+    fn wire_name(self) -> Vec<u8> {
+        match self {
+            Self::Http11 => b"http/1.1".to_vec(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CertificateAuthority {
     pub cert_path: PathBuf,
@@ -72,7 +85,7 @@ pub fn server_tls_config(host: &str, ca_dir: &Path) -> Result<ServerConfig> {
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![AlpnProtocol::Http11.wire_name()];
     Ok(config)
 }
 
@@ -82,7 +95,7 @@ pub fn client_tls_config() -> ClientConfig {
     let mut config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![AlpnProtocol::Http11.wire_name()];
     config
 }
 
