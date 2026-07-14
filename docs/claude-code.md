@@ -1,14 +1,61 @@
-# Claude Code onboarding
+# Claude Code CLI onboarding
 
-Relay onboards Claude Code onto your LiteLLM AI Gateway with zero manual setup. Employees never receive a provider API key and never export environment variables. Their corporate identity authenticates each request, and the Gateway maps that identity to a per-user virtual key with its own budget, model access, and spend tracking.
+Relay onboards Claude Code onto your LiteLLM AI Gateway with zero manual setup. Employees never receive a provider API key and never export environment variables. Their corporate identity authenticates each request, and the Gateway maps that identity to a per-user virtual key with its own budget, model access, and spend tracking. Codex and other coding tools follow the same pattern and are coming next.
 
 ## How it works
 
-An admin enables JWT auth on the Gateway once, and from then on onboarding a device is a single `relay onboard` call. The MDM package (Jamf/Intune) installs Claude Code from your internal registry (npm/Homebrew via JFrog) alongside Relay, then runs `relay onboard`, which writes `~/.claude/settings.json` so Claude Code points at the Gateway and pulls its bearer token from Relay's token helper
+An admin enables JWT auth on the Gateway once, and from then on onboarding a device is a single `relay onboard` call. The MDM package (Jamf/Intune) installs Claude Code from your internal registry (npm/Homebrew via JFrog) alongside Relay, then runs `relay onboard`, which writes `~/.claude/settings.json` so Claude Code points at the Gateway and pulls its bearer token from Relay's token helper.
 
-When the developer runs `claude`, Relay signs them in through the corporate IdP on first use and hands Claude Code a short-lived bearer token. The Gateway validates it, maps it to the developer's virtual key, enforces budget and limits, logs spend, and forwards upstream. No provider key ever touches the device, and offboarding is removing the identity from the SSO group, after which its tokens stop validating
+When the developer runs `claude`, Relay signs them in through the corporate IdP on first use and hands Claude Code a short-lived bearer token. The Gateway validates it, maps it to the developer's virtual key, enforces budget and limits, logs spend, and forwards upstream. No provider key ever touches the device, and offboarding is removing the identity from the SSO group, after which its tokens stop validating.
 
-The README has the [step-by-step guide with screenshots](../README.md#claude-code-onboarding-with-idp-sign-in)
+## Step-by-step guide
+
+### Step 1: Enable JWT auth on the Gateway (admin, once)
+
+Turn on JWT auth with `auto_register` so each SSO identity maps to its own virtual key and limits with no manual key handoff:
+
+```yaml
+general_settings:
+  enable_jwt_auth: True
+  litellm_jwtauth:
+    user_id_jwt_field: "sub"
+    user_id_upsert: True
+    team_id_jwt_field: "team_id"
+    team_id_upsert: True
+    virtual_key_claim_field: "email"
+    unregistered_jwt_client_behavior: "auto_register"
+```
+
+### Step 2: Run `relay onboard` on the device
+
+The MDM package (Jamf/Intune) installs Claude Code from your internal registry and Relay, then runs `relay onboard`. It writes `~/.claude/settings.json` pointing `ANTHROPIC_BASE_URL` at the Gateway, adds the team header, and wires an `apiKeyHelper` that supplies the identity token. Note there is no `ANTHROPIC_API_KEY` on the machine.
+
+```bash
+relay onboard \
+  --gateway-url https://gateway.yourco.com \
+  --authorize-url https://login.yourco.com/authorize \
+  --team engineering
+```
+
+![relay onboard writing Claude settings](img/claude-onboard.png)
+
+### Step 3: Start Claude Code and sign in
+
+The developer runs `claude` with no key and no exports. Relay opens the corporate IdP sign-in in the browser. A local mock IdP is shown here; in production this is your Okta, Entra, or Google tenant, set through `--authorize-url`.
+
+![corporate IdP sign-in](img/claude-idp-signin.png)
+
+### Step 4: Use Claude Code through the Gateway
+
+After sign-in, Relay hands Claude Code a short-lived bearer token and Claude Code answers through the Gateway, with no key on the device.
+
+![Claude Code answering through the Gateway](img/claude-code-answer.png)
+
+### Step 5: Track spend in LiteLLM
+
+The Gateway auto-registers a per-user virtual key from the SSO identity and tracks spend by user and team. Offboarding is removing the identity from the SSO group, after which its tokens stop validating.
+
+![auto-registered per-user virtual keys](img/claude-virtual-keys.png)
 
 ## Commands
 
@@ -63,7 +110,7 @@ JWT_AUDIENCE="litellm-gateway"
 
 ## Production versus demo IdP
 
-In production, `--authorize-url` points at your corporate IdP's OIDC authorize endpoint (Okta, Entra, Google, and similar). The screenshots in the README use a local mock IdP for demonstration only; it is not part of a deployment.
+In production, `--authorize-url` points at your corporate IdP's OIDC authorize endpoint (Okta, Entra, Google, and similar). The screenshots above use a local mock IdP for demonstration only; it is not part of a deployment.
 
 ## MDM rollout
 
