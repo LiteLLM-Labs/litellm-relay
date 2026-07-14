@@ -2,14 +2,13 @@
 
 Relay onboards Claude Code onto your LiteLLM AI Gateway with zero manual setup. Employees never receive a provider API key and never export environment variables. Their corporate identity authenticates each request, and the Gateway maps that identity to a per-user virtual key with its own budget, model access, and spend tracking.
 
-## v0 flow
+## How it works
 
-1. Admin (once): enable JWT auth on the Gateway with `auto_register`, so each SSO identity maps to its own virtual key and limits with no manual key handoff
-2. Package (Jamf/Intune): the managed install pulls Claude Code from your internal registry (npm/Homebrew via JFrog) and installs Relay
-3. Package: `relay onboard` writes `~/.claude/settings.json`, pointing `ANTHROPIC_BASE_URL` at the Gateway, adding the team header, and wiring an `apiKeyHelper` that supplies the identity token
-4. Developer: opens a terminal and runs `claude`; no key, no exports
-5. Runtime: Relay signs the developer in through the corporate IdP on first use and hands Claude Code a short-lived bearer token; the Gateway validates it, maps it to the developer's virtual key, enforces budget and limits, logs spend, and forwards upstream
-6. Offboarding: remove the identity from the SSO group and its tokens stop validating; no secrets live on the device
+An admin enables JWT auth on the Gateway once, and from then on onboarding a device is a single `relay onboard` call. The MDM package (Jamf/Intune) installs Claude Code from your internal registry (npm/Homebrew via JFrog) alongside Relay, then runs `relay onboard`, which writes `~/.claude/settings.json` so Claude Code points at the Gateway and pulls its bearer token from Relay's token helper
+
+When the developer runs `claude`, Relay signs them in through the corporate IdP on first use and hands Claude Code a short-lived bearer token. The Gateway validates it, maps it to the developer's virtual key, enforces budget and limits, logs spend, and forwards upstream. No provider key ever touches the device, and offboarding is removing the identity from the SSO group, after which its tokens stop validating
+
+The README has the [step-by-step guide with screenshots](../README.md#claude-code-onboarding-with-idp-sign-in)
 
 ## Commands
 
