@@ -151,12 +151,12 @@ shared with the rollout.
 
 ### One file pins both tools; a device reconciles both
 
-![relay sync reconciles Claude Code and Codex to the pinned versions](images/relay-sync-reconcile.png)
+![relay sync reconciles Claude Code and Codex to the pinned versions](img/relay-sync-reconcile.png)
 
 ### Claude Code answers through the Gateway on the pinned build
 
-![claude answers through the Gateway and the request shows in the proxy log](images/claude-through-gateway.png)
+![claude answers through the Gateway and the request shows in the proxy log](img/claude-through-gateway.png)
 
 ### A local edit to managed settings is corrected on the next sync
 
-![tampered managed settings restored by relay sync](images/enforcement-restore.png)
+![tampered managed settings restored by relay sync](img/enforcement-restore.png)
