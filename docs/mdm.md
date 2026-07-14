@@ -6,13 +6,13 @@ software: manual pilot first, then Jamf, Intune, or Kandji.
 ## Manual pilot
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh | bash
 ```
 
 To route Notion traffic immediately:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh \
+curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh \
   | bash -s -- --set-system-proxy "Wi-Fi"
 ```
 

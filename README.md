@@ -97,7 +97,7 @@ truncated and headers are redacted.
 Production deployments should pin the source tag and verify the source archive:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh | \
   RELAY_VERSION=v0.1.0 \
   RELAY_SHA256=<release-tarball-sha256> \
   bash

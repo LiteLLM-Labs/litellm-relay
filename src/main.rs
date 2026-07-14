@@ -1,3 +1,4 @@
+mod ai_tools;
 mod app;
 mod apps;
 mod auth;

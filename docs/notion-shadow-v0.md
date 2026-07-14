@@ -15,7 +15,7 @@ workspace IDs, or response bodies.
 ## Install for a manual pilot
 
 ```bash
-git clone https://github.com/BerriAI/litellm-relay.git
+git clone https://github.com/LiteLLM-Labs/litellm-relay.git
 cd litellm-relay
 
 ./src/install.sh --set-system-proxy "Wi-Fi" \

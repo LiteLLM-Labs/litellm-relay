@@ -260,9 +260,9 @@ download_source_tree() {
   if [[ -n "$RELAY_SOURCE_URL" ]]; then
     source_url="$RELAY_SOURCE_URL"
   elif [[ -n "$RELAY_VERSION" ]]; then
-    source_url="https://github.com/BerriAI/litellm-relay/archive/refs/tags/$RELAY_VERSION.tar.gz"
+    source_url="https://github.com/LiteLLM-Labs/litellm-relay/archive/refs/tags/$RELAY_VERSION.tar.gz"
   elif [[ "$RELAY_ALLOW_UNPINNED_MAIN" == "1" ]]; then
-    source_url="https://github.com/BerriAI/litellm-relay/archive/refs/heads/main.tar.gz"
+    source_url="https://github.com/LiteLLM-Labs/litellm-relay/archive/refs/heads/main.tar.gz"
     cat >&2 <<WARN
 warning: installing from mutable main because RELAY_ALLOW_UNPINNED_MAIN=1 was set.
 Prefer RELAY_VERSION plus RELAY_SHA256 for production deployments.

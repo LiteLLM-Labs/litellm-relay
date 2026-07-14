@@ -297,7 +297,7 @@ fn prompt_team_selection(teams: &[TeamOption]) -> Result<String> {
     }
 }
 
-fn open_browser(url: &str) {
+pub(crate) fn open_browser(url: &str) {
     let status = if cfg!(target_os = "macos") {
         Command::new("open").arg(url).status()
     } else if cfg!(target_os = "windows") {
@@ -309,8 +309,8 @@ fn open_browser(url: &str) {
     match status {
         Ok(status) if status.success() => {}
         _ => {
-            println!("Could not open a browser automatically.");
-            println!("Open this URL to continue: {url}");
+            eprintln!("Could not open a browser automatically.");
+            eprintln!("Open this URL to continue: {url}");
         }
     }
 }

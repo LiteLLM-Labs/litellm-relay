@@ -25,6 +25,28 @@
     }
   },
   {
+    "id": "claude",
+    "label": "Claude Code",
+    "description": "Claude Code and Anthropic API traffic routed through Relay.",
+    "logo": {
+      "text": "CC",
+      "background": "#d97757",
+      "foreground": "#ffffff",
+      "border": "#b45309"
+    },
+    "matchers": {
+      "domains": [
+        "api.anthropic.com",
+        "anthropic.com"
+      ],
+      "refs": [
+        "claude",
+        "claude-code",
+        "anthropic"
+      ]
+    }
+  },
+  {
     "id": "codex",
     "label": "Codex",
     "description": "Codex, ChatGPT, and OpenAI API traffic routed through Relay.",

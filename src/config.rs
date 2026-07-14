@@ -40,6 +40,8 @@ pub struct RelaySettings {
     pub capture: CaptureSection,
     pub domains: DomainSection,
     pub timeouts: TimeoutSection,
+    pub idp: IdpSection,
+    pub claude: ClaudeSection,
 }
 
 impl RelaySettings {
@@ -158,6 +160,29 @@ impl Default for TimeoutSection {
     fn default() -> Self {
         Self {
             request_seconds: 10.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct IdpSection {
+    pub authorize_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ClaudeSection {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+}
+
+impl Default for ClaudeSection {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-4-5".into(),
+            team: None,
         }
     }
 }
