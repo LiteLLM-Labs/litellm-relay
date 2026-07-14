@@ -20,7 +20,8 @@ use crate::{
     http::{
         build_http_payload, copy_bidirectional_counted, parse_connect_target, parse_limit,
         parse_request_line, parse_response_status, parse_route, parse_start_line,
-        read_http_message, read_until_headers, redact_headers, should_close, write_response,
+        read_http_message, read_until_headers, redact_headers, scrub_request_target, should_close,
+        write_response,
     },
     pac::build_pac,
     terminal::{print_runtime_panel, print_trace_event},
@@ -356,6 +357,7 @@ impl RelayProxy {
             let request_started_at = Utc::now();
             let request_started = Instant::now();
             let request_line = parse_request_line(&request.header_text);
+            let request_path = scrub_request_target(&request_line.path);
             let request_payload = build_http_payload(
                 &request.body,
                 &request.headers,
@@ -363,7 +365,7 @@ impl RelayProxy {
                 self.config.payload_body_bytes,
                 json!({
                     "method": request_line.method,
-                    "path": request_line.path,
+                    "path": request_path,
                     "headers": redact_headers(&request.headers),
                 }),
             );
@@ -391,7 +393,7 @@ impl RelayProxy {
                 app: &app,
                 host: &host,
                 method: &request_line.method,
-                path: &request_line.path,
+                path: &request_path,
                 request_headers: &request.headers,
                 request_payload: &request_payload,
                 response_payload: &response_payload,
@@ -401,7 +403,7 @@ impl RelayProxy {
                 "connection_event_id": event_id,
                 "event": "http_request",
                 "method": request_line.method,
-                "path": request_line.path,
+                "path": request_path,
                 "host": host,
                 "app": app,
                 "ai_match": is_ai_host(&host, &self.config),
@@ -419,7 +421,7 @@ impl RelayProxy {
                 "connection_event_id": event_id,
                 "event": "http_response",
                 "method": request_line.method,
-                "path": request_line.path,
+                "path": request_path,
                 "host": host,
                 "app": app,
                 "traffic_kind": classification.kind,
@@ -439,7 +441,7 @@ impl RelayProxy {
                         host: host.clone(),
                         app,
                         method: request_line.method.clone(),
-                        path: request_line.path.clone(),
+                        path: request_path.clone(),
                         started_at: request_started_at,
                         ended_at: Utc::now(),
                         request_payload,
@@ -452,7 +454,7 @@ impl RelayProxy {
                     &capture_event_id,
                     &event_id,
                     &host,
-                    &request_line.path,
+                    &request_path,
                     ingest,
                 )?;
             } else {
@@ -460,7 +462,7 @@ impl RelayProxy {
                     &capture_event_id,
                     &event_id,
                     &host,
-                    &request_line.path,
+                    &request_path,
                     &classification,
                 )?;
             }

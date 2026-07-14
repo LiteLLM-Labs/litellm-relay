@@ -220,16 +220,9 @@ pub fn should_close(headers: &HashMap<String, String>) -> bool {
 }
 
 pub fn redact_headers(headers: &HashMap<String, String>) -> Value {
-    let sensitive = [
-        "authorization",
-        "cookie",
-        "set-cookie",
-        "x-notion-token",
-        "x-api-key",
-    ];
     let mut redacted = Map::new();
     for (key, value) in headers {
-        let value = if sensitive.contains(&key.as_str()) {
+        let value = if is_sensitive_name(key) {
             "<redacted>"
         } else {
             value
@@ -237,6 +230,76 @@ pub fn redact_headers(headers: &HashMap<String, String>) -> Value {
         redacted.insert(key.clone(), Value::String(value.to_string()));
     }
     Value::Object(redacted)
+}
+
+pub fn scrub_request_target(target: &str) -> String {
+    let parsed = if target.starts_with("http://") || target.starts_with("https://") {
+        url::Url::parse(target)
+    } else {
+        url::Url::parse(&format!("http://relay.local{target}"))
+    };
+    let Ok(mut url) = parsed else {
+        return target.to_string();
+    };
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if is_sensitive_name(key.as_ref()) {
+                "<redacted>".to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect();
+    url.set_query(None);
+    if !pairs.is_empty() {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+
+    let mut scrubbed = url.path().to_string();
+    if let Some(query) = url.query() {
+        scrubbed.push('?');
+        scrubbed.push_str(query);
+    }
+    scrubbed
+}
+
+pub fn is_sensitive_name(name: &str) -> bool {
+    const SENSITIVE_EXACT: [&str; 10] = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "password",
+        "passwd",
+        "secret",
+        "signature",
+        "sig",
+        "code",
+    ];
+    const SENSITIVE_PARTS: [&str; 14] = [
+        "api-key",
+        "apikey",
+        "auth",
+        "bearer",
+        "client-secret",
+        "credential",
+        "csrf",
+        "id-token",
+        "jwt",
+        "refresh-token",
+        "secret",
+        "session",
+        "token",
+        "xsrf",
+    ];
+    let normalized = name.trim().to_ascii_lowercase().replace('_', "-");
+    SENSITIVE_EXACT.contains(&normalized.as_str())
+        || SENSITIVE_PARTS.iter().any(|part| normalized.contains(part))
 }
 
 pub fn build_http_payload(
@@ -257,7 +320,12 @@ pub fn build_http_payload(
                 "body_preview".into(),
                 json!(preview_bytes(&decoded, preview_limit)),
             );
-            payload.insert("body".into(), json!(preview_bytes(&decoded, body_limit)));
+            let body_value = if body_limit == 0 {
+                Value::Null
+            } else {
+                json!(preview_bytes(&decoded, body_limit))
+            };
+            payload.insert("body".into(), body_value);
             payload.insert("decoded_body_bytes".into(), json!(decoded.len()));
             payload.insert("body_truncated".into(), json!(decoded.len() > body_limit));
             payload.insert(
@@ -412,5 +480,53 @@ mod tests {
         assert_eq!(payload["decoded_body_bytes"], 25);
         assert_eq!(payload["body_truncated"], false);
         assert_eq!(payload["preview_truncated"], true);
+    }
+
+    #[test]
+    fn build_http_payload_omits_body_when_body_limit_is_zero() {
+        let headers = HashMap::from([("content-type".to_string(), "application/json".to_string())]);
+        let payload = build_http_payload(
+            br#"{"prompt":"hello notion"}"#,
+            &headers,
+            10,
+            0,
+            json!({"method": "POST", "path": "/api/v3/runInferenceTranscript"}),
+        );
+
+        assert_eq!(payload["body"], Value::Null);
+        assert_eq!(payload["body_preview"], "{\"prompt\":");
+        assert_eq!(payload["body_truncated"], true);
+        assert_eq!(payload["preview_truncated"], true);
+    }
+
+    #[test]
+    fn redact_headers_redacts_secret_style_names() {
+        let headers = HashMap::from([
+            ("authorization".to_string(), "Bearer token".to_string()),
+            ("x-session-id".to_string(), "session-secret".to_string()),
+            ("x-api-key".to_string(), "sk-secret".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+
+        let redacted = redact_headers(&headers);
+
+        assert_eq!(redacted["authorization"], "<redacted>");
+        assert_eq!(redacted["x-session-id"], "<redacted>");
+        assert_eq!(redacted["x-api-key"], "<redacted>");
+        assert_eq!(redacted["content-type"], "application/json");
+    }
+
+    #[test]
+    fn scrub_request_target_redacts_query_secrets() {
+        let scrubbed = scrub_request_target(
+            "/v1/responses?model=gpt-4o&api_key=sk-secret&session_id=abc&limit=10",
+        );
+
+        assert_eq!(
+            scrubbed,
+            "/v1/responses?model=gpt-4o&api_key=%3Credacted%3E&session_id=%3Credacted%3E&limit=10"
+        );
+        assert!(!scrubbed.contains("sk-secret"));
+        assert!(!scrubbed.contains("abc"));
     }
 }

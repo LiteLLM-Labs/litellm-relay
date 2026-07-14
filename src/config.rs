@@ -124,22 +124,12 @@ impl Default for ShadowSection {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CaptureSection {
     pub payloads: bool,
     pub payload_preview_bytes: usize,
     pub payload_body_bytes: usize,
-}
-
-impl Default for CaptureSection {
-    fn default() -> Self {
-        Self {
-            payloads: true,
-            payload_preview_bytes: 8192,
-            payload_body_bytes: 262_144,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -375,6 +365,33 @@ capture:
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.shadow_model, "gpt-4o-mini");
         assert!(!config.ai_domains.is_empty());
+    }
+
+    #[test]
+    fn should_default_to_metadata_only_capture() {
+        let config = RelaySettings::default().to_config();
+
+        assert!(!config.mitm_enabled);
+        assert_eq!(config.payload_preview_bytes, 0);
+        assert_eq!(config.payload_body_bytes, 0);
+    }
+
+    #[test]
+    fn should_preserve_explicit_capture_limits() {
+        let settings: RelaySettings = serde_yaml::from_str(
+            r#"
+capture:
+  payloads: true
+  payload_preview_bytes: 8192
+  payload_body_bytes: 262144
+"#,
+        )
+        .expect("settings yaml should parse");
+        let config = settings.to_config();
+
+        assert!(config.mitm_enabled);
+        assert_eq!(config.payload_preview_bytes, 8192);
+        assert_eq!(config.payload_body_bytes, 262_144);
     }
 
     #[test]
