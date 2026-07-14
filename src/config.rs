@@ -42,6 +42,7 @@ pub struct RelaySettings {
     pub timeouts: TimeoutSection,
     pub idp: IdpSection,
     pub claude: ClaudeSection,
+    pub codex: CodexSection,
 }
 
 impl RelaySettings {
@@ -182,6 +183,27 @@ impl Default for ClaudeSection {
     fn default() -> Self {
         Self {
             model: "claude-sonnet-4-5".into(),
+            team: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CodexSection {
+    pub model: String,
+    pub wire_api: String,
+    pub provider_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+}
+
+impl Default for CodexSection {
+    fn default() -> Self {
+        Self {
+            model: "gpt-5-codex".into(),
+            wire_api: "responses".into(),
+            provider_id: "litellm".into(),
             team: None,
         }
     }

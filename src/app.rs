@@ -2,7 +2,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ai_tools::{onboard, print_token, OnboardParams},
+    ai_tools::{
+        onboard, onboard_codex, print_codex_token, print_token, CodexOnboardParams, OnboardParams,
+    },
     cert::ensure_ca,
     config::RelayConfig,
     pac::build_pac,
@@ -47,6 +49,24 @@ enum CommandKind {
     },
     /// Print a valid IdP bearer token for Claude Code's apiKeyHelper.
     ClaudeToken,
+    /// Wire Codex CLI to route through the Gateway via IdP sign-in.
+    OnboardCodex {
+        #[arg(long)]
+        gateway_url: Option<String>,
+        #[arg(long)]
+        authorize_url: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        wire_api: Option<String>,
+        /// Static gateway key fallback for environments without an IdP.
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Print a valid IdP bearer token for Codex's auth command hook.
+    CodexToken,
 }
 
 pub async fn run() -> Result<()> {
@@ -96,5 +116,21 @@ async fn run_command(command: CommandKind) -> Result<()> {
             model,
         }),
         CommandKind::ClaudeToken => print_token(),
+        CommandKind::OnboardCodex {
+            gateway_url,
+            authorize_url,
+            team,
+            model,
+            wire_api,
+            api_key,
+        } => onboard_codex(CodexOnboardParams {
+            gateway_url,
+            authorize_url,
+            team,
+            model,
+            wire_api,
+            api_key,
+        }),
+        CommandKind::CodexToken => print_codex_token(),
     }
 }
