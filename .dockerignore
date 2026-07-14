@@ -1,0 +1,7 @@
+target/
+.git/
+.github/
+ui/node_modules/
+ui/dist/
+ui/.vite/
+*.log
