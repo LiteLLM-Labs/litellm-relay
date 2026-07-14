@@ -192,7 +192,6 @@ impl Default for ClaudeSection {
 #[serde(default)]
 pub struct CodexSection {
     pub model: String,
-    pub wire_api: String,
     pub provider_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -202,7 +201,6 @@ impl Default for CodexSection {
     fn default() -> Self {
         Self {
             model: "gpt-5-codex".into(),
-            wire_api: "responses".into(),
             provider_id: "litellm".into(),
             team: None,
         }

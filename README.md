@@ -74,6 +74,8 @@ Relay onboards the OpenAI Codex CLI the same way it onboards Claude Code: it wri
 
 Codex reads `~/.codex/config.toml`. Relay defines a custom OpenAI-compatible provider under `[model_providers.<id>]` (pointing `base_url` at the Gateway's `/v1`) and selects it with the top-level `model_provider`/`model` keys. For the credential it uses Codex's command-backed `auth` hook, which runs Relay's token command to fetch a short-lived identity bearer token on demand (Codex refreshes it on the `refresh_interval_ms` interval).
 
+> **Gateway must serve the Responses API.** Codex only supports `wire_api = "responses"` (`wire_api = "chat"` is rejected by the CLI), so the provider talks to the Gateway's `POST /v1/responses`. LiteLLM supports the Responses API — make sure it is enabled for the models you expose.
+
 ### Step 1: Enable JWT auth on the Gateway (admin, once)
 
 Same as Claude Code — see [Step 1 above](#step-1-enable-jwt-auth-on-the-gateway-admin-once).
@@ -112,13 +114,24 @@ There is no API key in the file. `relay codex-token` prints a valid IdP bearer t
 
 The developer runs `codex` with no key and no exports. On first use Relay opens the corporate IdP sign-in in the browser, caches the identity token, and hands Codex a short-lived bearer token for each request. Spend is tracked per-user in LiteLLM, exactly as with Claude Code.
 
-### Static-key fallback
+### Credential alternatives
 
-For environments without an IdP, pass `--api-key` and Relay embeds the gateway key as `experimental_bearer_token` on the provider instead of wiring the identity token command. The config file is written with `0600` permissions.
+The `auth` hook is the default and keeps no key on the device. Two alternatives are available; Codex treats `auth`, `env_key`, and `experimental_bearer_token` as mutually exclusive, so Relay writes exactly one.
 
-```bash
-relay onboard-codex --gateway-url https://gateway.yourco.com --api-key sk-...
-```
+- `--env-key <VAR>`: Codex reads the bearer key from an environment variable (`env_key = "<VAR>"`) rather than invoking the hook. Populate it with the identity token from your shell profile:
+
+  ```bash
+  relay onboard-codex --gateway-url https://gateway.yourco.com --env-key LITELLM_API_KEY
+  export LITELLM_API_KEY="$(relay codex-token)"
+  ```
+
+- `--api-key <KEY>`: for environments without an IdP, embeds a static gateway key as `experimental_bearer_token` on the provider.
+
+  ```bash
+  relay onboard-codex --gateway-url https://gateway.yourco.com --api-key sk-...
+  ```
+
+The config file is written with `0600` permissions.
 
 ## Supported MDMs
 

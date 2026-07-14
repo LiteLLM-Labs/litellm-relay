@@ -9,6 +9,11 @@ use crate::{
     system::home_dir,
 };
 
+/// Codex's only supported wire protocol as of codex-rs `rust-v0.144.4`: the
+/// Responses API at `/v1/responses`. `wire_api = "chat"` is rejected by the
+/// binary, so the Gateway must serve the OpenAI Responses API.
+const WIRE_API: &str = "responses";
+
 /// How often Codex proactively refreshes the bearer token, matching its own
 /// default of five minutes so the short-lived identity token stays valid.
 const TOKEN_REFRESH_INTERVAL_MS: i64 = 300_000;
@@ -16,6 +21,21 @@ const TOKEN_REFRESH_INTERVAL_MS: i64 = 300_000;
 /// Environment variable that overrides where the Codex config is written. Used
 /// by tests so they never touch the developer's real `~/.codex/config.toml`.
 const CODEX_CONFIG_PATH_ENV: &str = "LITELLM_RELAY_CODEX_CONFIG";
+
+/// How Codex should obtain the Gateway bearer credential. These map onto the
+/// mutually exclusive auth fields of Codex's `ModelProviderInfo`.
+#[derive(Debug, Default)]
+enum Credential<'a> {
+    /// Command-backed `auth` hook running Relay's token helper (default). Codex
+    /// fetches a short-lived identity token on demand; no key on the device.
+    #[default]
+    TokenHelper,
+    /// Codex reads the bearer key from an environment variable (`env_key`).
+    /// Relay's token helper is expected to populate it with the identity token.
+    EnvKey(&'a str),
+    /// Static gateway key embedded as `experimental_bearer_token`.
+    StaticKey(&'a str),
+}
 
 /// Inputs for wiring Codex CLI to route through the Gateway. Supplied by the
 /// onboarding command or interactively; any field left unset falls back to the
@@ -26,9 +46,10 @@ pub struct CodexOnboardParams {
     pub authorize_url: Option<String>,
     pub team: Option<String>,
     pub model: Option<String>,
-    pub wire_api: Option<String>,
-    /// Static gateway key fallback for environments without an IdP. When set,
-    /// the config embeds the key instead of the identity token helper.
+    /// Have Codex read the bearer key from this env var instead of the token
+    /// helper hook. Relay's token command is expected to populate it.
+    pub env_key: Option<String>,
+    /// Static gateway key fallback for environments without an IdP.
     pub api_key: Option<String>,
 }
 
@@ -36,7 +57,7 @@ pub struct CodexOnboardParams {
 /// through a custom OpenAI-compatible provider. By default the provider uses a
 /// command-backed `auth` hook that runs Relay's token helper, so Codex obtains
 /// a short-lived corporate-identity bearer token and no provider key ever
-/// touches the device. A static `--api-key` is preserved as a fallback.
+/// touches the device. `--env-key` and a static `--api-key` are alternatives.
 pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
@@ -48,9 +69,6 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     if let Some(model) = params.model {
         settings.codex.model = model;
     }
-    if let Some(wire_api) = params.wire_api {
-        settings.codex.wire_api = wire_api;
-    }
     if params.team.is_some() {
         settings.codex.team = params.team;
     }
@@ -59,15 +77,29 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
         .api_key
         .as_deref()
         .filter(|key| !key.trim().is_empty());
-    if static_key.is_none() && settings.idp.authorize_url.trim().is_empty() {
+    let env_key = params
+        .env_key
+        .as_deref()
+        .filter(|key| !key.trim().is_empty());
+    if static_key.is_some() && env_key.is_some() {
+        bail!("--api-key and --env-key are mutually exclusive");
+    }
+    let credential = match (static_key, env_key) {
+        (Some(key), _) => Credential::StaticKey(key),
+        (_, Some(var)) => Credential::EnvKey(var),
+        _ => Credential::TokenHelper,
+    };
+
+    let needs_idp = matches!(credential, Credential::TokenHelper);
+    if needs_idp && settings.idp.authorize_url.trim().is_empty() {
         bail!(
             "onboarding requires an IdP authorize URL (--authorize-url or idp.authorize_url), \
-             or pass --api-key for a static gateway key"
+             or pass --env-key / --api-key for a static credential"
         );
     }
 
     let exe = relay_executable()?;
-    let config_path = write_codex_config(&settings, static_key, &exe)?;
+    let config_path = write_codex_config(&settings, &credential, &exe)?;
     save_settings(&settings)?;
 
     println!(
@@ -79,10 +111,18 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     if let Some(team) = &settings.codex.team {
         println!("Team header: x-litellm-team: {team}");
     }
-    if static_key.is_some() {
-        println!("Using a static gateway key from --api-key.");
-    } else {
-        println!("Codex will fetch a short-lived identity token via Relay on each request.");
+    match &credential {
+        Credential::TokenHelper => {
+            println!("Codex fetches a short-lived identity token via `relay codex-token`.");
+        }
+        Credential::EnvKey(var) => {
+            println!(
+                "Codex reads the bearer key from ${var}. Populate it with the identity token, e.g.\n  export {var}=\"$({exe} codex-token)\""
+            );
+        }
+        Credential::StaticKey(_) => {
+            println!("Using a static gateway key from --api-key.");
+        }
     }
     println!("Wrote {}", config_path.display());
     println!("Run `codex` and sign in through your browser on first use.");
@@ -117,7 +157,7 @@ fn relay_executable() -> Result<String> {
 
 fn write_codex_config(
     settings: &RelaySettings,
-    static_key: Option<&str>,
+    credential: &Credential,
     exe: &str,
 ) -> Result<PathBuf> {
     let path = codex_config_path();
@@ -131,7 +171,7 @@ fn write_codex_config(
     } else {
         String::new()
     };
-    let rendered = render_codex_config(&existing, settings, static_key, exe)?;
+    let rendered = render_codex_config(&existing, settings, credential, exe)?;
     fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
     secure_file(&path)?;
     Ok(path)
@@ -142,7 +182,7 @@ fn write_codex_config(
 fn render_codex_config(
     existing: &str,
     settings: &RelaySettings,
-    static_key: Option<&str>,
+    credential: &Credential,
     exe: &str,
 ) -> Result<String> {
     let mut doc = existing
@@ -159,16 +199,16 @@ fn render_codex_config(
         doc["model_providers"] = Item::Table(providers);
     }
     doc["model_providers"][provider_id] =
-        Item::Table(build_provider_table(settings, static_key, exe));
+        Item::Table(build_provider_table(settings, credential, exe));
 
     Ok(doc.to_string())
 }
 
-fn build_provider_table(settings: &RelaySettings, static_key: Option<&str>, exe: &str) -> Table {
+fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: &str) -> Table {
     let mut provider = Table::new();
     provider["name"] = value("LiteLLM AI Gateway");
     provider["base_url"] = value(provider_base_url(settings));
-    provider["wire_api"] = value(settings.codex.wire_api.clone());
+    provider["wire_api"] = value(WIRE_API);
 
     if let Some(team) = &settings.codex.team {
         let mut headers = InlineTable::new();
@@ -176,11 +216,10 @@ fn build_provider_table(settings: &RelaySettings, static_key: Option<&str>, exe:
         provider["http_headers"] = value(headers);
     }
 
-    match static_key {
-        Some(key) => {
-            provider["experimental_bearer_token"] = value(key);
-        }
-        None => {
+    // Codex treats `auth`, `env_key`, and `experimental_bearer_token` as
+    // mutually exclusive, so exactly one is written.
+    match credential {
+        Credential::TokenHelper => {
             let mut auth = Table::new();
             auth["command"] = value(exe);
             let mut args = Array::new();
@@ -188,6 +227,12 @@ fn build_provider_table(settings: &RelaySettings, static_key: Option<&str>, exe:
             auth["args"] = value(args);
             auth["refresh_interval_ms"] = value(TOKEN_REFRESH_INTERVAL_MS);
             provider["auth"] = Item::Table(auth);
+        }
+        Credential::EnvKey(var) => {
+            provider["env_key"] = value(*var);
+        }
+        Credential::StaticKey(key) => {
+            provider["experimental_bearer_token"] = value(*key);
         }
     }
 
@@ -228,8 +273,13 @@ mod tests {
     #[test]
     fn should_point_codex_at_gateway_and_select_provider() {
         let settings = settings_with_team(None);
-        let rendered =
-            render_codex_config("", &settings, None, "/opt/relay/litellm-relay").unwrap();
+        let rendered = render_codex_config(
+            "",
+            &settings,
+            &Credential::TokenHelper,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
         let doc = parse(&rendered);
 
         assert_eq!(doc["model"].as_str(), Some("gpt-5-codex"));
@@ -247,8 +297,13 @@ mod tests {
     #[test]
     fn should_use_token_helper_and_not_write_static_key_on_sso_path() {
         let settings = settings_with_team(None);
-        let rendered =
-            render_codex_config("", &settings, None, "/opt/relay/litellm-relay").unwrap();
+        let rendered = render_codex_config(
+            "",
+            &settings,
+            &Credential::TokenHelper,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
         let doc = parse(&rendered);
         let provider = &doc["model_providers"]["litellm"];
 
@@ -266,12 +321,30 @@ mod tests {
     }
 
     #[test]
+    fn should_write_env_key_and_no_auth_hook_on_env_key_path() {
+        let settings = settings_with_team(None);
+        let rendered = render_codex_config(
+            "",
+            &settings,
+            &Credential::EnvKey("LITELLM_API_KEY"),
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
+        let doc = parse(&rendered);
+        let provider = &doc["model_providers"]["litellm"];
+
+        assert_eq!(provider["env_key"].as_str(), Some("LITELLM_API_KEY"));
+        assert!(provider.get("auth").is_none());
+        assert!(provider.get("experimental_bearer_token").is_none());
+    }
+
+    #[test]
     fn should_embed_static_key_and_drop_auth_hook_on_static_path() {
         let settings = settings_with_team(None);
         let rendered = render_codex_config(
             "",
             &settings,
-            Some("sk-static-123"),
+            &Credential::StaticKey("sk-static-123"),
             "/opt/relay/litellm-relay",
         )
         .unwrap();
@@ -286,13 +359,19 @@ mod tests {
             provider.get("auth").is_none(),
             "static path must not configure the token helper hook"
         );
+        assert!(provider.get("env_key").is_none());
     }
 
     #[test]
     fn should_add_team_header_when_team_set() {
         let settings = settings_with_team(Some("engineering"));
-        let rendered =
-            render_codex_config("", &settings, None, "/opt/relay/litellm-relay").unwrap();
+        let rendered = render_codex_config(
+            "",
+            &settings,
+            &Credential::TokenHelper,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
         let doc = parse(&rendered);
 
         assert_eq!(
@@ -311,8 +390,13 @@ name = \"Other\"
 base_url = \"https://other.example.com/v1\"
 ";
         let settings = settings_with_team(None);
-        let rendered =
-            render_codex_config(existing, &settings, None, "/opt/relay/litellm-relay").unwrap();
+        let rendered = render_codex_config(
+            existing,
+            &settings,
+            &Credential::TokenHelper,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
         let doc = parse(&rendered);
 
         assert_eq!(doc["approval_policy"].as_str(), Some("on-request"));
@@ -331,7 +415,12 @@ base_url = \"https://other.example.com/v1\"
         env::set_var(CODEX_CONFIG_PATH_ENV, &config_path);
 
         let settings = settings_with_team(None);
-        let written = write_codex_config(&settings, None, "/opt/relay/litellm-relay").unwrap();
+        let written = write_codex_config(
+            &settings,
+            &Credential::TokenHelper,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
 
         assert_eq!(written, config_path);
         let contents = fs::read_to_string(&config_path).unwrap();

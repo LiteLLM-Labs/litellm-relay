@@ -59,8 +59,10 @@ enum CommandKind {
         team: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Have Codex read the bearer key from this env var instead of the
+        /// token helper hook (Relay's token command populates it).
         #[arg(long)]
-        wire_api: Option<String>,
+        env_key: Option<String>,
         /// Static gateway key fallback for environments without an IdP.
         #[arg(long)]
         api_key: Option<String>,
@@ -121,14 +123,14 @@ async fn run_command(command: CommandKind) -> Result<()> {
             authorize_url,
             team,
             model,
-            wire_api,
+            env_key,
             api_key,
         } => onboard_codex(CodexOnboardParams {
             gateway_url,
             authorize_url,
             team,
             model,
-            wire_api,
+            env_key,
             api_key,
         }),
         CommandKind::CodexToken => print_codex_token(),
