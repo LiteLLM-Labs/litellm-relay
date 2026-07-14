@@ -8,7 +8,23 @@ An admin enables JWT auth on the Gateway once, and from then on onboarding a dev
 
 When the developer runs `claude`, Relay signs them in through the corporate IdP on first use and hands Claude Code a short-lived bearer token. The Gateway validates it, maps it to the developer's virtual key, enforces budget and limits, logs spend, and forwards upstream. No provider key ever touches the device, and offboarding is removing the identity from the SSO group, after which its tokens stop validating
 
-The README has the [step-by-step guide with screenshots](../README.md#claude-code-onboarding-with-idp-sign-in)
+## Usage
+
+`relay onboard` writes the Claude Code settings pointing at the Gateway:
+
+![relay onboard writing Claude settings](img/claude-onboard.png)
+
+On first use Relay opens the corporate IdP sign-in in the browser (a local mock IdP is shown here; in production this is your Okta, Entra, or Google tenant):
+
+![corporate IdP sign-in](img/claude-idp-signin.png)
+
+After sign-in, Claude Code answers through the Gateway with no key on the device:
+
+![Claude Code answering through the Gateway](img/claude-code-answer.png)
+
+The Gateway auto-registers a per-user virtual key from the SSO identity and tracks spend by user and team:
+
+![auto-registered per-user virtual keys](img/claude-virtual-keys.png)
 
 ## Commands
 
