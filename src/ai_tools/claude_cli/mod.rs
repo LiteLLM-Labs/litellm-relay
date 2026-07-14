@@ -1,13 +1,21 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::{
+    ai_tools::managed_config::ClaudeCodePolicy,
     ai_tools::token::ensure_token,
+    ai_tools::version::{self, ToolReconcile},
     config::{load_settings, save_settings, RelaySettings},
     system::home_dir,
 };
+
+const CLAUDE_MANAGED_SETTINGS_PATH_ENV: &str = "LITELLM_RELAY_CLAUDE_MANAGED_SETTINGS_PATH";
+pub const CLAUDE_TOOL_LABEL: &str = "Claude Code";
 
 /// Inputs for wiring Claude Code to route through the Gateway. Supplied by the
 /// MDM package (Jamf/Intune) or interactively; any field left unset falls back
@@ -60,6 +68,81 @@ pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
     let token = ensure_token(&settings.idp.authorize_url)?;
     println!("{token}");
+    Ok(())
+}
+
+/// Reconciles this device's Claude Code against the approved policy: installs
+/// the pinned version if it differs, then writes Claude Code enterprise managed
+/// settings so the model and Gateway wiring cannot be overridden locally. Safe
+/// to run repeatedly; a matching version does no install.
+pub fn reconcile(policy: &ClaudeCodePolicy, settings: &RelaySettings) -> Result<ToolReconcile> {
+    let state = version::reconcile(
+        "claude",
+        &policy.registry,
+        &policy.package,
+        policy.version.as_deref(),
+    )?;
+    let settings_path = claude_managed_settings_path();
+    write_managed_settings(&settings_path, settings, policy)?;
+    Ok(ToolReconcile {
+        state,
+        settings_path,
+    })
+}
+
+fn claude_managed_settings_path() -> PathBuf {
+    if let Ok(path) = env::var(CLAUDE_MANAGED_SETTINGS_PATH_ENV) {
+        return PathBuf::from(path);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from("/etc/claude-code/managed-settings.json")
+    }
+}
+
+fn write_managed_settings(
+    path: &Path,
+    settings: &RelaySettings,
+    policy: &ClaudeCodePolicy,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut root = Map::new();
+    for (key, value) in &policy.managed_settings {
+        root.insert(key.clone(), value.clone());
+    }
+
+    let mut env_map = match root.remove("env") {
+        Some(Value::Object(existing)) => existing,
+        _ => Map::new(),
+    };
+    env_map.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        Value::String(settings.gateway.url.clone()),
+    );
+    let model = policy
+        .model
+        .clone()
+        .unwrap_or_else(|| settings.claude.model.clone());
+    env_map.insert("ANTHROPIC_MODEL".into(), Value::String(model));
+    if let Some(team) = &settings.claude.team {
+        env_map.insert(
+            "ANTHROPIC_CUSTOM_HEADERS".into(),
+            Value::String(format!("x-litellm-team: {team}")),
+        );
+    }
+    root.insert("env".into(), Value::Object(env_map));
+
+    let serialized = serde_json::to_string_pretty(&Value::Object(root))?;
+    fs::write(path, format!("{serialized}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -182,5 +265,54 @@ mod tests {
         let command = token_helper_command().unwrap();
         assert!(command.ends_with("' claude-token"));
         assert!(command.starts_with('\''));
+    }
+
+    #[test]
+    fn should_write_managed_env_from_policy_and_settings() {
+        let dir = std::env::temp_dir().join(format!("relay-managed-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("managed-settings.json");
+
+        let mut settings = RelaySettings::default();
+        settings.gateway.url = "https://gateway.example.com".into();
+        settings.claude.team = Some("engineering".into());
+        settings.claude.model = "fallback-model".into();
+
+        let policy = ClaudeCodePolicy {
+            version: Some("1.2.3".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            ..ClaudeCodePolicy::default()
+        };
+
+        write_managed_settings(&path, &settings, &policy).unwrap();
+
+        let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["env"]["ANTHROPIC_BASE_URL"],
+            "https://gateway.example.com"
+        );
+        assert_eq!(written["env"]["ANTHROPIC_MODEL"], "claude-sonnet-4-5");
+        assert_eq!(
+            written["env"]["ANTHROPIC_CUSTOM_HEADERS"],
+            "x-litellm-team: engineering"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn should_fall_back_to_settings_model_when_policy_has_none() {
+        let dir = std::env::temp_dir().join(format!("relay-managed-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("managed-settings.json");
+
+        let mut settings = RelaySettings::default();
+        settings.claude.model = "settings-model".into();
+        let policy = ClaudeCodePolicy::default();
+
+        write_managed_settings(&path, &settings, &policy).unwrap();
+
+        let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["env"]["ANTHROPIC_MODEL"], "settings-model");
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

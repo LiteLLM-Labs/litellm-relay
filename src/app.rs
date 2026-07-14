@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ai_tools::{onboard, print_token, OnboardParams},
+    ai_tools::{onboard, print_token, sync, OnboardParams},
     cert::ensure_ca,
     config::RelayConfig,
     pac::build_pac,
@@ -47,6 +47,11 @@ enum CommandKind {
     },
     /// Print a valid IdP bearer token for Claude Code's apiKeyHelper.
     ClaudeToken,
+    /// Fetch the Gateway's managed policy and reconcile the Claude Code version.
+    Sync {
+        #[arg(long)]
+        gateway_url: Option<String>,
+    },
 }
 
 pub async fn run() -> Result<()> {
@@ -96,5 +101,6 @@ async fn run_command(command: CommandKind) -> Result<()> {
             model,
         }),
         CommandKind::ClaudeToken => print_token(),
+        CommandKind::Sync { gateway_url } => sync(gateway_url).await,
     }
 }

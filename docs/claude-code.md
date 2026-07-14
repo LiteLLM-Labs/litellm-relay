@@ -68,3 +68,7 @@ In production, `--authorize-url` points at your corporate IdP's OIDC authorize e
 ## MDM rollout
 
 The MDM package installs Claude Code from your internal registry and runs `relay onboard` with your Gateway URL, IdP authorize URL, and default team. Everything else follows the standard Relay rollout in [mdm.md](mdm.md): package the repo, deploy to the pilot scope, then broaden through Jamf or Intune. Because the settings file contains no provider key and the token is fetched at runtime through the IdP, the same package is safe to push fleet-wide.
+
+## Central version management
+
+MDM handles the initial install; the approved Claude Code and Codex versions are then pinned centrally and reconciled by `relay sync`. See [managing AI tool versions](managing-ai-tool-versions.md) for the admin runbook and [the v0 design](claude-version-management-v0.md) for the scope.
