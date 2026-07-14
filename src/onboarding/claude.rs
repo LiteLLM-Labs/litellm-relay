@@ -1,17 +1,13 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    config::{load_settings, relay_home, save_settings, RelaySettings},
-    idp::{sign_in, token_expiry},
+    config::{load_settings, save_settings, RelaySettings},
+    onboarding::token::ensure_token,
     system::home_dir,
 };
-
-const TOKEN_REFRESH_SKEW_SECONDS: i64 = 60;
 
 /// Inputs for wiring Claude Code to route through the Gateway. Supplied by the
 /// MDM package (Jamf/Intune) or interactively; any field left unset falls back
@@ -22,13 +18,6 @@ pub struct OnboardParams {
     pub authorize_url: Option<String>,
     pub team: Option<String>,
     pub model: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct CachedToken {
-    token: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exp: Option<i64>,
 }
 
 /// Writes `~/.claude/settings.json` so `claude` sends requests to the Gateway
@@ -67,59 +56,11 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
 }
 
 /// Prints a valid IdP bearer token on stdout for Claude Code's `apiKeyHelper`.
-/// Reuses the cached token until it nears expiry, then re-runs browser sign-in.
 pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
-    if let Some(token) = valid_cached_token()? {
-        println!("{token}");
-        return Ok(());
-    }
-
-    if settings.idp.authorize_url.trim().is_empty() {
-        bail!("no IdP configured; run `relay onboard` first");
-    }
-    let authorize_url = settings.idp.authorize_url.clone();
-    let token = sign_in(&authorize_url)?;
-    cache_token(&token)?;
+    let token = ensure_token(&settings.idp.authorize_url)?;
     println!("{token}");
     Ok(())
-}
-
-fn valid_cached_token() -> Result<Option<String>> {
-    let path = token_cache_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let cached: CachedToken = match serde_json::from_str(&contents) {
-        Ok(cached) => cached,
-        Err(_) => return Ok(None),
-    };
-    match cached.exp {
-        Some(exp) if exp <= Utc::now().timestamp() + TOKEN_REFRESH_SKEW_SECONDS => Ok(None),
-        _ => Ok(Some(cached.token)),
-    }
-}
-
-fn cache_token(token: &str) -> Result<()> {
-    let path = token_cache_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let cached = CachedToken {
-        token: token.to_string(),
-        exp: token_expiry(token),
-    };
-    fs::write(&path, serde_json::to_string(&cached)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    secure_file(&path)?;
-    Ok(())
-}
-
-fn token_cache_path() -> PathBuf {
-    relay_home().join("claude-token.json")
 }
 
 fn claude_settings_path() -> PathBuf {
@@ -193,17 +134,6 @@ fn token_helper_command() -> Result<String> {
         .to_str()
         .ok_or_else(|| anyhow!("Relay executable path is not valid UTF-8"))?;
     Ok(format!("'{}' claude-token", exe.replace('\'', "'\\''")))
-}
-
-fn secure_file(path: &PathBuf) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to secure {}", path.display()))?;
-    }
-    let _ = path;
-    Ok(())
 }
 
 #[cfg(test)]

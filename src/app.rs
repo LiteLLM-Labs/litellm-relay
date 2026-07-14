@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     cert::ensure_ca,
-    claude::{onboard, print_token, OnboardParams},
     config::RelayConfig,
+    onboarding::{onboard, print_token, OnboardParams},
     pac::build_pac,
     proxy::RelayProxy,
     setup::run_setup,
