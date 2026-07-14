@@ -6,14 +6,15 @@ software: manual pilot first, then Jamf, Intune, or Kandji.
 ## Manual pilot
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh \
+  | RELAY_ALLOW_UNPINNED_MAIN=1 bash
 ```
 
 To route Notion traffic immediately:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh \
-  | bash -s -- --set-system-proxy "Wi-Fi"
+  | RELAY_ALLOW_UNPINNED_MAIN=1 bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
 The installed dashboard is served locally at:

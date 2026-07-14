@@ -117,14 +117,28 @@ truncated and headers are redacted.
 
 ## Install
 
-Production deployments should pin the source tag and verify the source archive:
+Relay has no tagged release yet, so install it from GitHub. The installer
+builds Relay from source, so you need [Rust](https://rustup.rs/) (`cargo`)
+installed first. Relay currently supports macOS.
+
+Clone the repository and run the installer:
+
+```bash
+git clone https://github.com/LiteLLM-Labs/litellm-relay.git
+cd litellm-relay
+./src/install.sh
+```
+
+Or install directly from `main` without cloning:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh | \
-  RELAY_VERSION=v0.1.0 \
-  RELAY_SHA256=<release-tarball-sha256> \
-  bash
+  RELAY_ALLOW_UNPINNED_MAIN=1 bash
 ```
+
+The installer builds the `relay` command, adds it to your `PATH`, and trusts
+the local Relay CA so AI app payloads can be captured. Pass `--skip-trust-ca`
+to install without trusting the CA.
 
 Then open a new terminal and run:
 
@@ -132,8 +146,12 @@ Then open a new terminal and run:
 relay
 ```
 
-For local development from a checked-out repository:
+Once tagged releases are published, production deployments will be able to pin
+a version tag and verify the source archive checksum:
 
 ```bash
-./src/install.sh --skip-trust-ca
+curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src/install.sh | \
+  RELAY_VERSION=vX.Y.Z \
+  RELAY_SHA256=<release-tarball-sha256> \
+  bash
 ```
