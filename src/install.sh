@@ -2,6 +2,11 @@
 set -euo pipefail
 
 RELAY_HOME="${RELAY_HOME:-$HOME/.litellm-relay}"
+RELAY_VERSION="${RELAY_VERSION:-}"
+RELAY_SHA256="${RELAY_SHA256:-}"
+RELAY_SOURCE_URL="${RELAY_SOURCE_URL:-}"
+RELAY_ALLOW_UNPINNED_MAIN="${RELAY_ALLOW_UNPINNED_MAIN:-0}"
+RELAY_TRUST_CA="${RELAY_TRUST_CA:-1}"
 RELAY_PORT="4142"
 NETWORK_SERVICE=""
 BACKGROUND_SERVICE=0
@@ -14,18 +19,28 @@ usage() {
 Install LiteLLM Relay on macOS.
 
 Usage:
-  ./src/install.sh [--background] [--set-system-proxy "Wi-Fi"] [--gateway-url URL] [--api-key KEY]
+  ./src/install.sh [--version VERSION] [--sha256 SHA256] [--background]
+                   [--set-system-proxy "Wi-Fi"] [--gateway-url URL] [--api-key KEY]
 
 Options:
+  --version VERSION               Download and build the named GitHub release tag
+  --sha256 SHA256                 Verify the downloaded source archive checksum
+  --source-url URL                Download source from an explicit archive URL
+  --allow-unpinned-main           Allow remote install from mutable main.tar.gz
+  --skip-trust-ca                 Install without adding the Relay CA to login keychain
   --background                    Configure Gateway auth and start the LaunchAgent
   --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
   --gateway-url URL               Gateway URL for non-interactive setup
   --api-key KEY                   Gateway key for non-interactive setup
   --bin-dir DIR                   Install relay shims into DIR
 
-By default this builds the Rust Relay binary, installs the relay command, and
-trusts the Relay local CA in your login keychain so AI app payloads can be
-captured. Then run:
+When run from a checked-out repository, this builds the local source tree.
+When run as a standalone remote script, pass RELAY_VERSION/--version or
+RELAY_SOURCE_URL/--source-url. Mutable main.tar.gz installs require the explicit
+RELAY_ALLOW_UNPINNED_MAIN=1 or --allow-unpinned-main opt-in.
+
+By default this installs the relay command and trusts the Relay local CA in your
+login keychain so AI app payloads can be captured. Then run:
 
   relay
 
@@ -37,29 +52,70 @@ Pass --set-system-proxy "Wi-Fi" to route AI apps through the background service.
 
 Relay settings are stored in:
   ~/.litellm-relay/config.yaml
+
+Environment:
+  RELAY_VERSION                 Same as --version
+  RELAY_SHA256                  Same as --sha256
+  RELAY_SOURCE_URL              Same as --source-url
+  RELAY_ALLOW_UNPINNED_MAIN=1   Same as --allow-unpinned-main
+  RELAY_TRUST_CA=0              Same as --skip-trust-ca
 USAGE
+}
+
+require_value() {
+  if [[ $# -lt 2 || -z "$2" ]]; then
+    echo "$1 requires a value" >&2
+    exit 2
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --version)
+      require_value "$1" "${2:-}"
+      RELAY_VERSION="$2"
+      shift 2
+      ;;
+    --sha256)
+      require_value "$1" "${2:-}"
+      RELAY_SHA256="$2"
+      shift 2
+      ;;
+    --source-url)
+      require_value "$1" "${2:-}"
+      RELAY_SOURCE_URL="$2"
+      shift 2
+      ;;
+    --allow-unpinned-main)
+      RELAY_ALLOW_UNPINNED_MAIN=1
+      shift
+      ;;
+    --skip-trust-ca)
+      RELAY_TRUST_CA=0
+      shift
+      ;;
     --background)
       BACKGROUND_SERVICE=1
       shift
       ;;
     --set-system-proxy)
+      require_value "$1" "${2:-}"
       NETWORK_SERVICE="${2:-}"
       BACKGROUND_SERVICE=1
       shift 2
       ;;
     --gateway-url)
+      require_value "$1" "${2:-}"
       SETUP_GATEWAY_URL="${2:-}"
       shift 2
       ;;
     --api-key)
+      require_value "$1" "${2:-}"
       SETUP_API_KEY="${2:-}"
       shift 2
       ;;
     --bin-dir)
+      require_value "$1" "${2:-}"
       INSTALL_BIN_DIR_OVERRIDE="${2:-}"
       shift 2
       ;;
@@ -74,6 +130,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$RELAY_SHA256" && ! "$RELAY_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+  echo "RELAY_SHA256 must be a 64-character SHA-256 hex digest." >&2
+  exit 2
+fi
+
+if [[ "$RELAY_TRUST_CA" != "0" && "$RELAY_TRUST_CA" != "1" ]]; then
+  echo "RELAY_TRUST_CA must be 0 or 1." >&2
+  exit 2
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "install.sh v0 currently supports macOS only." >&2
@@ -150,6 +216,89 @@ stop_legacy_python_relay() {
   done < <(lsof -tiTCP:"$RELAY_PORT" -sTCP:LISTEN 2>/dev/null || true)
 }
 
+verify_source_archive() {
+  local archive_path="$1"
+
+  if [[ -z "$RELAY_SHA256" ]]; then
+    cat >&2 <<WARN
+warning: no source archive checksum was provided.
+Set RELAY_SHA256 or pass --sha256 to make this install checksum-verified.
+WARN
+    return 0
+  fi
+
+  echo "Verifying source archive SHA-256..." >&2
+  local actual_sha=""
+  if command -v shasum >/dev/null 2>&1; then
+    actual_sha="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    actual_sha="$(sha256sum "$archive_path" | awk '{print $1}')"
+  else
+    echo "shasum or sha256sum is required when RELAY_SHA256 is set." >&2
+    exit 1
+  fi
+
+  local expected_lc actual_lc
+  expected_lc="$(printf '%s' "$RELAY_SHA256" | tr '[:upper:]' '[:lower:]')"
+  actual_lc="$(printf '%s' "$actual_sha" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$actual_lc" || "$actual_lc" != "$expected_lc" ]]; then
+    cat >&2 <<MISMATCH
+source archive checksum mismatch; aborting install.
+  expected: $expected_lc
+  actual:   ${actual_lc:-<unavailable>}
+MISMATCH
+    exit 1
+  fi
+  echo "Source archive checksum verified." >&2
+}
+
+download_source_tree() {
+  local tmp_dir="$1"
+  local archive_path source_url source_root
+
+  archive_path="$tmp_dir/litellm-relay-source.tar.gz"
+  if [[ -n "$RELAY_SOURCE_URL" ]]; then
+    source_url="$RELAY_SOURCE_URL"
+  elif [[ -n "$RELAY_VERSION" ]]; then
+    source_url="https://github.com/BerriAI/litellm-relay/archive/refs/tags/$RELAY_VERSION.tar.gz"
+  elif [[ "$RELAY_ALLOW_UNPINNED_MAIN" == "1" ]]; then
+    source_url="https://github.com/BerriAI/litellm-relay/archive/refs/heads/main.tar.gz"
+    cat >&2 <<WARN
+warning: installing from mutable main because RELAY_ALLOW_UNPINNED_MAIN=1 was set.
+Prefer RELAY_VERSION plus RELAY_SHA256 for production deployments.
+WARN
+  else
+    cat >&2 <<ERROR
+Remote install requires a pinned source.
+
+Pass one of:
+  RELAY_VERSION=vX.Y.Z
+  --version vX.Y.Z
+  RELAY_SOURCE_URL=https://.../source.tar.gz
+
+For production, also set RELAY_SHA256 or pass --sha256.
+To intentionally build mutable main, rerun with --allow-unpinned-main.
+ERROR
+    exit 2
+  fi
+
+  echo "Downloading LiteLLM Relay source: $source_url" >&2
+  curl -fsSL "$source_url" -o "$archive_path"
+  verify_source_archive "$archive_path"
+
+  source_root="$(tar -tzf "$archive_path" | sed -n '1s#/.*##p')"
+  if [[ -z "$source_root" ]]; then
+    echo "source archive is empty or invalid." >&2
+    exit 1
+  fi
+  tar -xzf "$archive_path" -C "$tmp_dir"
+  if [[ ! -f "$tmp_dir/$source_root/Cargo.toml" ]]; then
+    echo "source archive did not contain Cargo.toml at the expected root." >&2
+    exit 1
+  fi
+  printf '%s\n' "$tmp_dir/$source_root"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR=""
 if [[ -f "$SCRIPT_DIR/../Cargo.toml" ]]; then
@@ -159,9 +308,7 @@ elif [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
 else
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"' EXIT
-  curl -fsSL "https://github.com/BerriAI/litellm-relay/archive/refs/heads/main.tar.gz" \
-    | tar -xz -C "$TMP_DIR"
-  BUILD_DIR="$TMP_DIR/litellm-relay-main"
+  BUILD_DIR="$(download_source_tree "$TMP_DIR")" || exit $?
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -186,13 +333,21 @@ ln -sf "$RELAY_HOME/bin/litellm-relay" "$INSTALL_BIN_DIR/litellm-relay"
 install_path_entry "$INSTALL_BIN_DIR"
 
 CA_PATH="$("$RELAY_HOME/bin/litellm-relay" ca-path)"
-security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_PATH" >/dev/null 2>&1 || {
-  cat >&2 <<WARN
+if [[ "$RELAY_TRUST_CA" == "1" ]]; then
+  security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_PATH" >/dev/null 2>&1 || {
+    cat >&2 <<WARN
 warning: could not add the Relay CA to the login keychain.
 Payload capture requires trusting this certificate:
   $CA_PATH
 WARN
-}
+  }
+else
+  cat >&2 <<WARN
+Skipping Relay CA trust because RELAY_TRUST_CA=0 or --skip-trust-ca was set.
+Payload capture requires trusting this certificate later:
+  $CA_PATH
+WARN
+fi
 
 if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
   cat <<DONE

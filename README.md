@@ -37,8 +37,13 @@ truncated and headers are redacted.
 
 ## Install
 
+Production deployments should pin the source tag and verify the source archive:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BerriAI/litellm-relay/main/src/install.sh | \
+  RELAY_VERSION=v0.1.0 \
+  RELAY_SHA256=<release-tarball-sha256> \
+  bash
 ```
 
 Then open a new terminal and run:
@@ -47,3 +52,8 @@ Then open a new terminal and run:
 relay
 ```
 
+For local development from a checked-out repository:
+
+```bash
+./src/install.sh --skip-trust-ca
+```
