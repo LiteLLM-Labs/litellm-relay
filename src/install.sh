@@ -228,14 +228,28 @@ WARN
   fi
 
   echo "Verifying source archive SHA-256..." >&2
+  local actual_sha=""
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s  %s\n' "$RELAY_SHA256" "$archive_path" | shasum -a 256 -c - >&2
+    actual_sha="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s  %s\n' "$RELAY_SHA256" "$archive_path" | sha256sum -c - >&2
+    actual_sha="$(sha256sum "$archive_path" | awk '{print $1}')"
   else
     echo "shasum or sha256sum is required when RELAY_SHA256 is set." >&2
     exit 1
   fi
+
+  local expected_lc actual_lc
+  expected_lc="$(printf '%s' "$RELAY_SHA256" | tr '[:upper:]' '[:lower:]')"
+  actual_lc="$(printf '%s' "$actual_sha" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$actual_lc" || "$actual_lc" != "$expected_lc" ]]; then
+    cat >&2 <<MISMATCH
+source archive checksum mismatch; aborting install.
+  expected: $expected_lc
+  actual:   ${actual_lc:-<unavailable>}
+MISMATCH
+    exit 1
+  fi
+  echo "Source archive checksum verified." >&2
 }
 
 download_source_tree() {
@@ -294,7 +308,7 @@ elif [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
 else
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"' EXIT
-  BUILD_DIR="$(download_source_tree "$TMP_DIR")"
+  BUILD_DIR="$(download_source_tree "$TMP_DIR")" || exit $?
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
