@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::apps::{classify_known_app, default_ai_domains, default_notion_domains};
+use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
 use crate::system::home_dir;
 
 #[derive(Clone, Debug)]
@@ -213,29 +213,11 @@ pub fn normalize_host(host: &str) -> String {
 }
 
 pub fn is_ai_host(host: &str, config: &RelayConfig) -> bool {
-    is_domain_match(host, &config.ai_domains)
+    domain_matches_host(host, &config.ai_domains)
 }
 
 pub fn is_notion_host(host: &str, config: &RelayConfig) -> bool {
-    is_domain_match(host, &config.notion_domains)
-}
-
-pub fn classify_host(host: &str, config: &RelayConfig) -> String {
-    let normalized = normalize_host(host);
-    if let Some(app_id) = classify_known_app(&normalized) {
-        app_id.into()
-    } else if is_ai_host(&normalized, config) {
-        "ai".into()
-    } else {
-        "unknown".into()
-    }
-}
-
-fn is_domain_match(host: &str, domains: &[String]) -> bool {
-    let normalized = normalize_host(host);
-    domains
-        .iter()
-        .any(|domain| normalized == *domain || normalized.ends_with(&format!(".{domain}")))
+    domain_matches_host(host, &config.notion_domains)
 }
 
 fn load_legacy_env_settings() -> Result<Option<RelaySettings>> {

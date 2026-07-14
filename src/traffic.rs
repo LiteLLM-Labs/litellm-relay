@@ -87,16 +87,16 @@ pub fn classify_captured_traffic(capture: CapturedTraffic<'_>) -> TrafficClassif
         return TrafficClassification::telemetry("notion_realtime");
     }
 
-    if capture.app == "codex" && is_codex_ai_path(&path) {
-        return TrafficClassification::ai("codex_ai_path");
-    }
-
     if capture.app == "notion" && is_notion_ai_request(&path, &body_preview) {
         return TrafficClassification::ai("notion_ai_marker");
     }
 
     if is_openai_api_host(&host) && is_openai_ai_path(&path) {
         return TrafficClassification::ai("openai_api_path");
+    }
+
+    if capture.app == "codex" && is_codex_ai_path(&path) {
+        return TrafficClassification::ai("codex_ai_path");
     }
 
     if capture.method.eq_ignore_ascii_case("POST")
@@ -317,7 +317,7 @@ mod tests {
         ));
 
         assert!(classification.is_ai_request());
-        assert_eq!(classification.reason, "codex_ai_path");
+        assert_eq!(classification.reason, "openai_api_path");
     }
 
     #[test]

@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-use crate::{config::RelayConfig, system::hostname, traffic::TrafficClassification};
+use crate::{
+    apps::AppAttribution, config::RelayConfig, system::hostname, traffic::TrafficClassification,
+};
 
 pub struct GatewayClient {
     config: Arc<RelayConfig>,
@@ -88,48 +90,7 @@ impl GatewayClient {
                 error: Some("gateway.api_key is not set in config.yaml".into()),
             };
         };
-        let status_code = capture
-            .response_payload
-            .get("status_code")
-            .and_then(Value::as_u64);
-        let status = if status_code.is_some_and(|code| code >= 400) {
-            "failure"
-        } else {
-            "success"
-        };
-        let payload = json!({
-            "logs": [{
-                "request_id": format!("relay-{}", capture.event_id),
-                "call_type": "relay_capture",
-                "model": format!("{}-ai", if capture.app.is_empty() { "local-ai" } else { &capture.app }),
-                "api_base": format!("https://{}", capture.host),
-                "spend": 0,
-                "total_tokens": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "startTime": capture.started_at.to_rfc3339(),
-                "endTime": capture.ended_at.to_rfc3339(),
-                "request_duration_ms": capture.duration_ms,
-                "status": status,
-                "request_tags": ["litellm-relay", capture.app.as_str()],
-                "metadata": {
-                    "source": "litellm-relay",
-                    "runtime": "rust",
-                    "app": capture.app,
-                    "traffic_kind": capture.classification.kind,
-                    "traffic_reason": capture.classification.reason,
-                    "host": capture.host,
-                    "method": capture.method,
-                    "path": capture.path,
-                    "status_code": status_code,
-                    "device_id": hostname(),
-                    "local_user": std::env::var("USER").unwrap_or_default(),
-                    "relay_event_id": capture.event_id,
-                },
-                "proxy_server_request": capture.request_payload,
-                "response": capture.response_payload,
-            }]
-        });
+        let payload = build_collector_payload(&capture);
         match self
             .http_client
             .post(format!(
@@ -171,11 +132,62 @@ impl GatewayClient {
     }
 }
 
+fn build_collector_payload(capture: &CaptureIngest) -> Value {
+    let app = capture.attribution.destination_app.as_str();
+    let status_code = capture
+        .response_payload
+        .get("status_code")
+        .and_then(Value::as_u64);
+    let status = if status_code.is_some_and(|code| code >= 400) {
+        "failure"
+    } else {
+        "success"
+    };
+    json!({
+            "logs": [{
+                "request_id": format!("relay-{}", capture.event_id),
+                "call_type": "relay_capture",
+                "model": format!("{}-ai", if app.is_empty() { "local-ai" } else { app }),
+                "api_base": format!("https://{}", capture.host),
+                "spend": 0,
+                "total_tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "startTime": capture.started_at.to_rfc3339(),
+                "endTime": capture.ended_at.to_rfc3339(),
+                "request_duration_ms": capture.duration_ms,
+                "status": status,
+                "request_tags": ["litellm-relay", app],
+                "metadata": {
+                    "source": "litellm-relay",
+                    "runtime": "rust",
+                    "app": app,
+                    "destination_app": app,
+                    "attribution_source": capture.attribution.attribution_source,
+                    "attribution_confidence": capture.attribution.attribution_confidence,
+                    "process_lookup_status": capture.attribution.process_lookup_status,
+                    "process_identity": capture.attribution.process_identity.as_deref(),
+                    "traffic_kind": capture.classification.kind,
+                    "traffic_reason": capture.classification.reason,
+                    "host": capture.host,
+                    "method": capture.method,
+                    "path": capture.path,
+                    "status_code": status_code,
+                    "device_id": hostname(),
+                    "local_user": std::env::var("USER").unwrap_or_default(),
+                    "relay_event_id": capture.event_id,
+                },
+                "proxy_server_request": capture.request_payload,
+                "response": capture.response_payload,
+            }]
+    })
+}
+
 #[derive(Debug)]
 pub struct CaptureIngest {
     pub event_id: String,
     pub host: String,
-    pub app: String,
+    pub attribution: AppAttribution,
     pub method: String,
     pub path: String,
     pub started_at: DateTime<Utc>,
@@ -232,4 +244,50 @@ fn build_shadow_payload(event: &Value, config: &RelayConfig, event_id: &str) -> 
             "timestamp": Utc::now().to_rfc3339(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        apps::classify_app_attribution,
+        traffic::{TrafficClassification, TrafficKind},
+    };
+
+    #[test]
+    fn should_include_destination_and_process_attribution_in_collector_metadata() {
+        let timestamp = DateTime::parse_from_rfc3339("2026-07-13T00:00:00Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+        let capture = CaptureIngest {
+            event_id: "event-1".into(),
+            host: "api.openai.com".into(),
+            attribution: classify_app_attribution("api.openai.com", &[]),
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            started_at: timestamp,
+            ended_at: timestamp,
+            request_payload: json!({"body_preview": "{\"model\":\"gpt-5\"}"}),
+            response_payload: json!({"status_code": 200}),
+            duration_ms: 25,
+            classification: TrafficClassification {
+                kind: TrafficKind::AiRequest,
+                reason: "openai_api_path",
+            },
+        };
+
+        let payload = build_collector_payload(&capture);
+        let metadata = &payload["logs"][0]["metadata"];
+
+        assert_eq!(metadata["app"], "codex");
+        assert_eq!(metadata["destination_app"], "codex");
+        assert_eq!(metadata["attribution_source"], "known_app_catalog");
+        assert_eq!(metadata["attribution_confidence"], "high");
+        assert_eq!(metadata["process_lookup_status"], "not_attempted");
+        assert!(metadata["process_identity"].is_null());
+        assert_eq!(metadata["traffic_reason"], "openai_api_path");
+    }
 }
