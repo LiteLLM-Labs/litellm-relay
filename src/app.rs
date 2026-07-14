@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     ai_tools::{
-        onboard, onboard_codex, print_codex_token, print_token, CodexOnboardParams, OnboardParams,
+        onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
+        CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
     cert::ensure_ca,
     config::RelayConfig,
@@ -46,6 +47,27 @@ enum CommandKind {
         team: Option<String>,
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Wire Claude Desktop (third-party mode) to route through the Gateway.
+    ///
+    /// Pass --oidc-client-id and --oidc-issuer for single sign-on (each
+    /// developer signs in with their corporate account; no key on the
+    /// device), or --api-key for a static Gateway key.
+    OnboardClaudeDesktop {
+        #[arg(long)]
+        gateway_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        oidc_client_id: Option<String>,
+        #[arg(long)]
+        oidc_issuer: Option<String>,
+        #[arg(long)]
+        oidc_scopes: Option<String>,
+        #[arg(long)]
+        oidc_redirect_port: Option<u16>,
     },
     /// Print a valid IdP bearer token for Claude Code's apiKeyHelper.
     ClaudeToken,
@@ -116,6 +138,23 @@ async fn run_command(command: CommandKind) -> Result<()> {
             authorize_url,
             team,
             model,
+        }),
+        CommandKind::OnboardClaudeDesktop {
+            gateway_url,
+            api_key,
+            model,
+            oidc_client_id,
+            oidc_issuer,
+            oidc_scopes,
+            oidc_redirect_port,
+        } => onboard_desktop(OnboardDesktopParams {
+            gateway_url,
+            api_key,
+            model,
+            oidc_client_id,
+            oidc_issuer,
+            oidc_scopes,
+            oidc_redirect_port,
         }),
         CommandKind::ClaudeToken => print_token(),
         CommandKind::OnboardCodex {

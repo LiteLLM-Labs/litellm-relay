@@ -47,6 +47,28 @@
     }
   },
   {
+    "id": "claude_desktop",
+    "label": "Claude Desktop",
+    "description": "Claude Desktop app traffic (claude.ai) routed through Relay.",
+    "logo": {
+      "text": "CD",
+      "background": "#d97757",
+      "foreground": "#ffffff",
+      "border": "#b45309"
+    },
+    "matchers": {
+      "domains": [
+        "claude.ai",
+        "www.claude.ai",
+        "a.claude.ai"
+      ],
+      "refs": [
+        "claude-desktop",
+        "claude-ai"
+      ]
+    }
+  },
+  {
     "id": "codex",
     "label": "Codex",
     "description": "Codex, ChatGPT, and OpenAI API traffic routed through Relay.",
