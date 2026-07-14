@@ -22,8 +22,8 @@ Relay onboards each AI tool onto the Gateway with no provider key on the device.
 | Tool | Setup guide |
 | --- | --- |
 | Claude Code CLI | [docs/claude-code.md](docs/claude-code.md) |
+| Codex CLI | [docs/codex.md](docs/codex.md) |
 | Claude Desktop | [docs/claude-desktop.md](docs/claude-desktop.md) |
-| Codex | Coming next |
 
 ## Supported MDMs
 

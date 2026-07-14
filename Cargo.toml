@@ -24,6 +24,7 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1.40", features = ["full"] }
 tokio-rustls = "0.26"
+toml_edit = "0.22"
 url = "2.5"
 uuid = { version = "1.10", features = ["v4"] }
 webpki-roots = "0.26"

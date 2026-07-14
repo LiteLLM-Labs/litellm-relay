@@ -4,8 +4,10 @@
 
 pub mod claude_cli;
 pub mod claude_desktop;
+pub mod codex;
 pub mod idp;
 pub mod token;
 
 pub use claude_cli::{onboard, print_token, OnboardParams};
 pub use claude_desktop::{onboard_desktop, OnboardDesktopParams};
+pub use codex::{onboard as onboard_codex, print_token as print_codex_token, CodexOnboardParams};
