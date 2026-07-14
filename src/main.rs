@@ -1,3 +1,4 @@
+mod ai_tools;
 mod app;
 mod apps;
 mod auth;
@@ -6,7 +7,6 @@ mod config;
 mod events;
 mod gateway;
 mod http;
-mod onboarding;
 mod pac;
 mod proxy;
 mod setup;

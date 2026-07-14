@@ -2,9 +2,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::{
+    ai_tools::{onboard, print_token, OnboardParams},
     cert::ensure_ca,
     config::RelayConfig,
-    onboarding::{onboard, print_token, OnboardParams},
     pac::build_pac,
     proxy::RelayProxy,
     setup::run_setup,

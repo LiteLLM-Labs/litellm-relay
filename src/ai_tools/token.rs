@@ -5,8 +5,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    ai_tools::idp::{sign_in, token_expiry},
     config::relay_home,
-    onboarding::idp::{sign_in, token_expiry},
 };
 
 const TOKEN_REFRESH_SKEW_SECONDS: i64 = 60;

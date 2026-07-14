@@ -4,8 +4,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::{
+    ai_tools::token::ensure_token,
     config::{load_settings, save_settings, RelaySettings},
-    onboarding::token::ensure_token,
     system::home_dir,
 };
 
