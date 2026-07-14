@@ -11,6 +11,59 @@ LiteLLM Relay is a proxy you install on employee machines. It detects AI traffic
  3. Every request, response, and usage event is captured in LiteLLM.
     <img width="2200" height="1327" alt="Xnapper-2026-07-09-18 47 14" src="https://github.com/user-attachments/assets/dfe69818-ba4d-4874-b386-d3d7a061be39" />
 
+## Claude Code onboarding with IdP sign-in
+
+Relay onboards Claude Code onto your LiteLLM AI Gateway with no manual setup. Employees never receive a provider API key and never export environment variables. Their existing corporate identity authenticates each request, and the Gateway maps that identity to a per-user virtual key with its own budget, model access, and spend tracking. Codex and other coding tools follow the same pattern and are coming next
+
+This is the step-by-step guide for setting it up. See [docs/claude-code.md](docs/claude-code.md) for the full Gateway configuration and MDM detail
+
+### Step 1: Enable JWT auth on the Gateway (admin, once)
+
+Turn on JWT auth with `auto_register` so each SSO identity maps to its own virtual key and limits with no manual key handoff
+
+```yaml
+general_settings:
+  enable_jwt_auth: True
+  litellm_jwtauth:
+    user_id_jwt_field: "sub"
+    user_id_upsert: True
+    team_id_jwt_field: "team_id"
+    team_id_upsert: True
+    virtual_key_claim_field: "email"
+    unregistered_jwt_client_behavior: "auto_register"
+```
+
+### Step 2: Run `relay onboard` on the device
+
+The MDM package (Jamf/Intune) installs Claude Code from your internal registry and Relay, then runs `relay onboard`. It writes `~/.claude/settings.json` pointing `ANTHROPIC_BASE_URL` at the Gateway, adds the team header, and wires an `apiKeyHelper` that supplies the identity token. Note there is no `ANTHROPIC_API_KEY` on the machine
+
+```bash
+relay onboard \
+  --gateway-url https://gateway.yourco.com \
+  --authorize-url https://login.yourco.com/authorize \
+  --team engineering
+```
+
+![relay onboard writing Claude settings](docs/img/claude-onboard.png)
+
+### Step 3: Start Claude Code and sign in
+
+The developer runs `claude` with no key and no exports. Relay opens the corporate IdP sign-in in the browser. A local mock IdP is shown here; in production this is your Okta, Entra, or Google tenant, set through `--authorize-url`
+
+![corporate IdP sign-in](docs/img/claude-idp-signin.png)
+
+### Step 4: Use Claude Code through the Gateway
+
+After sign-in, Relay hands Claude Code a short-lived bearer token and Claude Code answers through the Gateway, with no key on the device
+
+![Claude Code answering through the Gateway](docs/img/claude-code-answer.png)
+
+### Step 5: Track spend in LiteLLM
+
+The Gateway auto-registers a per-user virtual key from the SSO identity and tracks spend by user and team. Offboarding is removing the identity from the SSO group, after which its tokens stop validating
+
+![auto-registered per-user virtual keys](docs/img/claude-virtual-keys.png)
+
 ## Supported MDMs
 
 Deploy LiteLLM Relay with your existing device-management process:
