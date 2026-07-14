@@ -36,6 +36,9 @@ Deploy LiteLLM Relay with your existing device-management process:
 - Addigy
 - Custom shell scripts or internal deployment workflows
 
+See the [MDM rollout guide](docs/mdm.md) for the deployable `.pkg`, the PAC
+configuration profile, and step-by-step Jamf and Intune runbooks.
+
 ## Features
 
 - Detect shadow AI usage across employee devices and company traffic sources

@@ -6,12 +6,16 @@ RELAY_VERSION="${RELAY_VERSION:-}"
 RELAY_SHA256="${RELAY_SHA256:-}"
 RELAY_SOURCE_URL="${RELAY_SOURCE_URL:-}"
 RELAY_ALLOW_UNPINNED_MAIN="${RELAY_ALLOW_UNPINNED_MAIN:-0}"
+RELAY_PREBUILT_BINARY="${RELAY_PREBUILT_BINARY:-}"
+RELAY_MANAGED_CONFIG="${RELAY_MANAGED_CONFIG:-}"
+RELAY_SKIP_SETUP="${RELAY_SKIP_SETUP:-0}"
 RELAY_TRUST_CA="${RELAY_TRUST_CA:-1}"
 RELAY_PORT="4142"
 NETWORK_SERVICE=""
 BACKGROUND_SERVICE=0
 SETUP_GATEWAY_URL=""
 SETUP_API_KEY=""
+SKIP_SETUP=0
 INSTALL_BIN_DIR_OVERRIDE=""
 
 usage() {
@@ -27,6 +31,9 @@ Options:
   --sha256 SHA256                 Verify the downloaded source archive checksum
   --source-url URL                Download source from an explicit archive URL
   --allow-unpinned-main           Allow remote install from mutable main.tar.gz
+  --prebuilt-binary PATH          Install this prebuilt relay binary instead of building
+  --config-file PATH              Seed ~/.litellm-relay/config.yaml from this managed file
+  --skip-setup                    Skip the interactive gateway setup wizard (managed deploys)
   --skip-trust-ca                 Install without adding the Relay CA to login keychain
   --background                    Configure Gateway auth and start the LaunchAgent
   --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
@@ -58,6 +65,9 @@ Environment:
   RELAY_SHA256                  Same as --sha256
   RELAY_SOURCE_URL              Same as --source-url
   RELAY_ALLOW_UNPINNED_MAIN=1   Same as --allow-unpinned-main
+  RELAY_PREBUILT_BINARY         Same as --prebuilt-binary
+  RELAY_MANAGED_CONFIG          Same as --config-file
+  RELAY_SKIP_SETUP=1            Same as --skip-setup
   RELAY_TRUST_CA=0              Same as --skip-trust-ca
 USAGE
 }
@@ -90,8 +100,22 @@ while [[ $# -gt 0 ]]; do
       RELAY_ALLOW_UNPINNED_MAIN=1
       shift
       ;;
+    --prebuilt-binary)
+      require_value "$1" "${2:-}"
+      RELAY_PREBUILT_BINARY="$2"
+      shift 2
+      ;;
+    --config-file)
+      require_value "$1" "${2:-}"
+      RELAY_MANAGED_CONFIG="$2"
+      shift 2
+      ;;
     --skip-trust-ca)
       RELAY_TRUST_CA=0
+      shift
+      ;;
+    --skip-setup)
+      SKIP_SETUP=1
       shift
       ;;
     --background)
@@ -299,31 +323,52 @@ ERROR
   printf '%s\n' "$tmp_dir/$source_root"
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR=""
-if [[ -f "$SCRIPT_DIR/../Cargo.toml" ]]; then
-  BUILD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-elif [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
-  BUILD_DIR="$SCRIPT_DIR"
+if [[ -n "$RELAY_PREBUILT_BINARY" ]]; then
+  if [[ ! -f "$RELAY_PREBUILT_BINARY" ]]; then
+    echo "prebuilt binary not found: $RELAY_PREBUILT_BINARY" >&2
+    exit 1
+  fi
+  stop_legacy_python_relay
+  echo "Installing prebuilt LiteLLM Relay binary..."
+  mkdir -p "$RELAY_HOME/bin"
+  cp "$RELAY_PREBUILT_BINARY" "$RELAY_HOME/bin/litellm-relay"
 else
-  TMP_DIR="$(mktemp -d)"
-  trap 'rm -rf "$TMP_DIR"' EXIT
-  BUILD_DIR="$(download_source_tree "$TMP_DIR")" || exit $?
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  BUILD_DIR=""
+  if [[ -f "$SCRIPT_DIR/../Cargo.toml" ]]; then
+    BUILD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+  elif [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
+    BUILD_DIR="$SCRIPT_DIR"
+  else
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TMP_DIR"' EXIT
+    BUILD_DIR="$(download_source_tree "$TMP_DIR")" || exit $?
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo is required to install LiteLLM Relay from source." >&2
+    echo "Install Rust from https://rustup.rs/ and rerun install.sh." >&2
+    exit 1
+  fi
+
+  stop_legacy_python_relay
+
+  echo "Building LiteLLM Relay..."
+  cargo build --quiet --release --manifest-path "$BUILD_DIR/Cargo.toml"
+  mkdir -p "$RELAY_HOME/bin"
+  cp "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
 fi
-
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo is required to install LiteLLM Relay from source." >&2
-  echo "Install Rust from https://rustup.rs/ and rerun install.sh." >&2
-  exit 1
-fi
-
-stop_legacy_python_relay
-
-echo "Building LiteLLM Relay..."
-cargo build --quiet --release --manifest-path "$BUILD_DIR/Cargo.toml"
-mkdir -p "$RELAY_HOME/bin"
-cp "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
 chmod 700 "$RELAY_HOME/bin/litellm-relay"
+
+if [[ -n "$RELAY_MANAGED_CONFIG" ]]; then
+  if [[ ! -f "$RELAY_MANAGED_CONFIG" ]]; then
+    echo "managed config file not found: $RELAY_MANAGED_CONFIG" >&2
+    exit 1
+  fi
+  echo "Seeding managed Relay config from $RELAY_MANAGED_CONFIG"
+  cp "$RELAY_MANAGED_CONFIG" "$RELAY_HOME/config.yaml"
+  chmod 600 "$RELAY_HOME/config.yaml"
+fi
 
 INSTALL_BIN_DIR="$(choose_bin_dir)"
 PATH_UPDATED_PROFILE=""
@@ -373,15 +418,29 @@ DONE
   exit 0
 fi
 
-SETUP_ARGS=()
-if [[ -n "$SETUP_GATEWAY_URL" ]]; then
-  SETUP_ARGS+=(--gateway-url "$SETUP_GATEWAY_URL")
-fi
-if [[ -n "$SETUP_API_KEY" ]]; then
-  SETUP_ARGS+=(--api-key "$SETUP_API_KEY")
+if [[ "$RELAY_SKIP_SETUP" == "1" ]]; then
+  SKIP_SETUP=1
 fi
 
-"$RELAY_HOME/bin/litellm-relay" setup "${SETUP_ARGS[@]}"
+if [[ "$SKIP_SETUP" == "1" ]]; then
+  echo "Skipping interactive gateway setup (--skip-setup)."
+  if [[ ! -f "$RELAY_HOME/config.yaml" ]]; then
+    cat >&2 <<WARN
+warning: --skip-setup was set but $RELAY_HOME/config.yaml does not exist.
+Seed a managed config with --config-file so Relay can reach your Gateway.
+WARN
+  fi
+else
+  SETUP_ARGS=()
+  if [[ -n "$SETUP_GATEWAY_URL" ]]; then
+    SETUP_ARGS+=(--gateway-url "$SETUP_GATEWAY_URL")
+  fi
+  if [[ -n "$SETUP_API_KEY" ]]; then
+    SETUP_ARGS+=(--api-key "$SETUP_API_KEY")
+  fi
+
+  "$RELAY_HOME/bin/litellm-relay" setup "${SETUP_ARGS[@]}"
+fi
 
 mkdir -p "$RELAY_HOME/bin"
 cat > "$RELAY_HOME/bin/run-relay" <<RUNNER

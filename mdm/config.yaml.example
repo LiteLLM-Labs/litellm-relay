@@ -1,0 +1,35 @@
+# Managed LiteLLM Relay config for MDM deployment.
+#
+# Deploy this file to each device and point the installer at it with
+# --config-file (or RELAY_MANAGED_CONFIG). The installer copies it to
+# ~/.litellm-relay/config.yaml with 0600 permissions and Relay reads it
+# when the LaunchAgent starts. Unset sections fall back to Relay defaults.
+#
+# Prefer browser SSO for developer Gateway auth. Only set gateway.api_key
+# here if your rollout uses a shared, non-user Gateway key, since this file
+# lands on every managed device.
+
+relay:
+  host: 127.0.0.1
+  port: 4142
+
+gateway:
+  # Your LiteLLM AI Gateway base URL.
+  url: https://litellm-gateway.your-company.com
+  # api_key: sk-...  # optional; omit to use per-user browser SSO
+
+# Shadow-AI interception (Notion AI, Perplexity, etc.) routed to the Gateway.
+shadow:
+  enabled: true
+  model: gpt-4o-mini
+  min_interval_seconds: 60
+
+# Metadata-only by default. Enable payloads only if your policy allows it;
+# Relay still redacts headers and never logs cookies or authorization.
+capture:
+  payloads: false
+  payload_preview_bytes: 0
+  payload_body_bytes: 0
+
+timeouts:
+  request_seconds: 10.0

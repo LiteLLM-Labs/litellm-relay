@@ -40,9 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate installer scripts
-        run: bash -n src/install.sh src/uninstall.sh
+        run: bash -n src/install.sh src/uninstall.sh scripts/build-macos-pkg.sh scripts/macos-pkg/postinstall
       - name: Check installer help path
         run: bash src/install.sh --help
+      - name: Check pkg builder help path
+        run: bash scripts/build-macos-pkg.sh --help
 
   proxy-smoke:
     name: Proxy/TLS smoke

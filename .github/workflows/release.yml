@@ -44,6 +44,18 @@ jobs:
           cp README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+      - name: Build macOS installer package
+        env:
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          pkg="dist/litellm-relay-${TAG_NAME}-${{ matrix.artifact }}.pkg"
+          ./scripts/build-macos-pkg.sh \
+            --version "$version" \
+            --binary target/release/litellm-relay \
+            --output "$pkg"
+          shasum -a 256 "$pkg" > "$pkg.sha256"
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
