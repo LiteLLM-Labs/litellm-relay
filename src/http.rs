@@ -4,8 +4,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::config::normalize_host;
 
@@ -30,9 +31,75 @@ pub struct HttpMessage {
 }
 
 #[derive(Debug)]
+pub struct HttpHead {
+    pub raw_headers: Vec<u8>,
+    pub header_text: String,
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+pub struct HttpBody {
+    pub raw: Vec<u8>,
+    pub decoded: Vec<u8>,
+}
+
+#[derive(Debug)]
 pub struct RequestLine {
     pub method: String,
     pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolCompatibilityMode {
+    BufferedCapture,
+    MetadataOnlyTunnel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolCompatibilityReason {
+    Http1Buffered,
+    ServerSentEvents,
+    WebSocketUpgrade,
+    HttpUpgrade,
+}
+
+impl ProtocolCompatibilityReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http1Buffered => "http1_buffered",
+            Self::ServerSentEvents => "server_sent_events",
+            Self::WebSocketUpgrade => "websocket_upgrade",
+            Self::HttpUpgrade => "http_upgrade",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ProtocolCompatibilityDecision {
+    pub mode: ProtocolCompatibilityMode,
+    pub reason: ProtocolCompatibilityReason,
+}
+
+impl ProtocolCompatibilityDecision {
+    pub fn buffered() -> Self {
+        Self {
+            mode: ProtocolCompatibilityMode::BufferedCapture,
+            reason: ProtocolCompatibilityReason::Http1Buffered,
+        }
+    }
+
+    pub fn metadata_only(reason: ProtocolCompatibilityReason) -> Self {
+        Self {
+            mode: ProtocolCompatibilityMode::MetadataOnlyTunnel,
+            reason,
+        }
+    }
+
+    pub fn is_metadata_only(self) -> bool {
+        self.mode == ProtocolCompatibilityMode::MetadataOnlyTunnel
+    }
 }
 
 pub async fn write_response<T>(
@@ -93,42 +160,70 @@ pub async fn read_http_message<T>(stream: &mut T) -> Result<Option<HttpMessage>>
 where
     T: AsyncRead + Unpin,
 {
-    let header = match read_until_headers(stream).await {
-        Ok(header) => header,
-        Err(_) => return Ok(None),
+    let head = match read_http_head(stream).await? {
+        Some(head) => head,
+        None => return Ok(None),
     };
-    let header_text = String::from_utf8_lossy(&header).to_string();
-    let headers = parse_headers(&header_text);
-    let mut raw_body = Vec::new();
-    let mut body = Vec::new();
-    if headers
-        .get("transfer-encoding")
-        .is_some_and(|value| value.to_ascii_lowercase().contains("chunked"))
-    {
-        let (raw, decoded) = read_chunked_body(stream).await?;
-        raw_body = raw;
-        body = decoded;
-    } else if let Some(content_length) = headers.get("content-length") {
-        let content_length = content_length
-            .parse::<usize>()
-            .context("invalid content-length")?;
-        body.resize(content_length, 0);
-        stream.read_exact(&mut body).await?;
-        raw_body = body.clone();
-    }
-    let mut raw = header;
-    raw.extend_from_slice(&raw_body);
+    let body = read_http_body(stream, &head.headers).await?;
+    let mut raw = head.raw_headers;
+    raw.extend_from_slice(&body.raw);
     Ok(Some(HttpMessage {
         raw,
-        header_text,
-        headers,
-        body,
+        header_text: head.header_text,
+        headers: head.headers,
+        body: body.decoded,
     }))
 }
 
-pub async fn copy_bidirectional_counted<T>(left: &mut T, right: &mut T) -> Result<(u64, u64)>
+pub async fn read_http_head<T>(stream: &mut T) -> Result<Option<HttpHead>>
 where
-    T: AsyncRead + AsyncWriteExt + Unpin,
+    T: AsyncRead + Unpin,
+{
+    let raw_headers = match read_until_headers(stream).await {
+        Ok(header) => header,
+        Err(_) => return Ok(None),
+    };
+    let header_text = String::from_utf8_lossy(&raw_headers).to_string();
+    let headers = parse_headers(&header_text);
+    Ok(Some(HttpHead {
+        raw_headers,
+        header_text,
+        headers,
+    }))
+}
+
+pub async fn read_http_body<T>(
+    stream: &mut T,
+    headers: &HashMap<String, String>,
+) -> Result<HttpBody>
+where
+    T: AsyncRead + Unpin,
+{
+    if has_chunked_transfer_encoding(headers) {
+        let (raw, decoded) = read_chunked_body(stream).await?;
+        return Ok(HttpBody { raw, decoded });
+    }
+    if let Some(content_length) = headers.get("content-length") {
+        let content_length = content_length
+            .parse::<usize>()
+            .context("invalid content-length")?;
+        let mut body = vec![0; content_length];
+        stream.read_exact(&mut body).await?;
+        return Ok(HttpBody {
+            raw: body.clone(),
+            decoded: body,
+        });
+    }
+    Ok(HttpBody {
+        raw: Vec::new(),
+        decoded: Vec::new(),
+    })
+}
+
+pub async fn copy_bidirectional_counted<L, R>(left: &mut L, right: &mut R) -> Result<(u64, u64)>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
 {
     Ok(tokio::io::copy_bidirectional(left, right).await?)
 }
@@ -217,6 +312,70 @@ pub fn should_close(headers: &HashMap<String, String>) -> bool {
     headers
         .get("connection")
         .is_some_and(|value| value.eq_ignore_ascii_case("close"))
+}
+
+pub fn request_protocol_decision(
+    headers: &HashMap<String, String>,
+) -> ProtocolCompatibilityDecision {
+    upgrade_protocol_decision(headers).unwrap_or_else(ProtocolCompatibilityDecision::buffered)
+}
+
+pub fn response_protocol_decision(
+    status_code: Option<u16>,
+    headers: &HashMap<String, String>,
+) -> ProtocolCompatibilityDecision {
+    if status_code == Some(101) {
+        return upgrade_protocol_decision(headers).unwrap_or_else(|| {
+            ProtocolCompatibilityDecision::metadata_only(ProtocolCompatibilityReason::HttpUpgrade)
+        });
+    }
+    if let Some(decision) = upgrade_protocol_decision(headers) {
+        return decision;
+    }
+    if is_server_sent_events(headers) {
+        return ProtocolCompatibilityDecision::metadata_only(
+            ProtocolCompatibilityReason::ServerSentEvents,
+        );
+    }
+    ProtocolCompatibilityDecision::buffered()
+}
+
+pub fn build_metadata_only_http_payload(
+    headers: &HashMap<String, String>,
+    extra: Value,
+    decision: ProtocolCompatibilityDecision,
+) -> Value {
+    let mut payload = match extra {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    payload.insert("body_bytes".into(), json!(0));
+    payload.insert("body".into(), Value::Null);
+    payload.insert(
+        "body_preview".into(),
+        json!(format!(
+            "[{} response body tunneled without capture]",
+            decision.reason.as_str()
+        )),
+    );
+    payload.insert("decoded_body_bytes".into(), json!(0));
+    payload.insert("body_truncated".into(), json!(false));
+    payload.insert("preview_truncated".into(), json!(false));
+    payload.insert("truncated".into(), json!(false));
+    payload.insert(
+        "body_unavailable_reason".into(),
+        json!(format!(
+            "{} body tunneled without capture",
+            decision.reason.as_str()
+        )),
+    );
+    payload.insert("capture_mode".into(), json!("metadata_only_tunnel"));
+    payload.insert(
+        "protocol_compatibility_reason".into(),
+        json!(decision.reason.as_str()),
+    );
+    payload.insert("headers".into(), redact_headers(headers));
+    Value::Object(payload)
 }
 
 pub fn redact_headers(headers: &HashMap<String, String>) -> Value {
@@ -370,6 +529,47 @@ fn parse_headers(header_text: &str) -> HashMap<String, String> {
         }
     }
     headers
+}
+
+fn upgrade_protocol_decision(
+    headers: &HashMap<String, String>,
+) -> Option<ProtocolCompatibilityDecision> {
+    if !header_contains_token(headers, "connection", "upgrade") {
+        return None;
+    }
+    if header_contains_token(headers, "upgrade", "websocket") {
+        Some(ProtocolCompatibilityDecision::metadata_only(
+            ProtocolCompatibilityReason::WebSocketUpgrade,
+        ))
+    } else {
+        Some(ProtocolCompatibilityDecision::metadata_only(
+            ProtocolCompatibilityReason::HttpUpgrade,
+        ))
+    }
+}
+
+fn is_server_sent_events(headers: &HashMap<String, String>) -> bool {
+    header_contains_token(headers, "content-type", "text/event-stream")
+        || (has_chunked_transfer_encoding(headers)
+            && headers.get("content-type").is_some_and(|content_type| {
+                let content_type = content_type.to_ascii_lowercase();
+                content_type.contains("text/event-stream")
+                    || content_type.contains("application/x-ndjson")
+                    || content_type.contains("application/json-seq")
+                    || content_type.contains("application/stream+json")
+            }))
+}
+
+fn has_chunked_transfer_encoding(headers: &HashMap<String, String>) -> bool {
+    header_contains_token(headers, "transfer-encoding", "chunked")
+}
+
+fn header_contains_token(headers: &HashMap<String, String>, key: &str, token: &str) -> bool {
+    headers.get(key).is_some_and(|value| {
+        value
+            .split([',', ';'])
+            .any(|part| part.trim().eq_ignore_ascii_case(token))
+    })
 }
 
 async fn read_chunked_body<T>(stream: &mut T) -> Result<(Vec<u8>, Vec<u8>)>
@@ -528,5 +728,76 @@ mod tests {
         );
         assert!(!scrubbed.contains("sk-secret"));
         assert!(!scrubbed.contains("abc"));
+    }
+
+    #[test]
+    fn request_protocol_decision_detects_websocket_upgrade() {
+        let headers = HashMap::from([
+            ("connection".to_string(), "keep-alive, Upgrade".to_string()),
+            ("upgrade".to_string(), "websocket".to_string()),
+        ]);
+
+        let decision = request_protocol_decision(&headers);
+
+        assert_eq!(decision.mode, ProtocolCompatibilityMode::MetadataOnlyTunnel);
+        assert_eq!(
+            decision.reason,
+            ProtocolCompatibilityReason::WebSocketUpgrade
+        );
+    }
+
+    #[test]
+    fn response_protocol_decision_tunnels_chunked_sse() {
+        let headers = HashMap::from([
+            ("transfer-encoding".to_string(), "chunked".to_string()),
+            (
+                "content-type".to_string(),
+                "text/event-stream; charset=utf-8".to_string(),
+            ),
+        ]);
+
+        let decision = response_protocol_decision(Some(200), &headers);
+
+        assert_eq!(decision.mode, ProtocolCompatibilityMode::MetadataOnlyTunnel);
+        assert_eq!(
+            decision.reason,
+            ProtocolCompatibilityReason::ServerSentEvents
+        );
+    }
+
+    #[test]
+    fn response_protocol_decision_allows_buffered_chunked_json() {
+        let headers = HashMap::from([
+            ("transfer-encoding".to_string(), "chunked".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+
+        let decision = response_protocol_decision(Some(200), &headers);
+
+        assert_eq!(decision, ProtocolCompatibilityDecision::buffered());
+    }
+
+    #[test]
+    fn metadata_only_payload_does_not_claim_body_capture() {
+        let headers = HashMap::from([
+            ("transfer-encoding".to_string(), "chunked".to_string()),
+            ("content-type".to_string(), "text/event-stream".to_string()),
+        ]);
+        let decision = response_protocol_decision(Some(200), &headers);
+
+        let payload =
+            build_metadata_only_http_payload(&headers, json!({"status_code": 200}), decision);
+
+        assert_eq!(payload["capture_mode"], "metadata_only_tunnel");
+        assert_eq!(
+            payload["protocol_compatibility_reason"],
+            "server_sent_events"
+        );
+        assert_eq!(payload["body"], Value::Null);
+        assert_eq!(payload["body_bytes"], 0);
+        assert!(payload["body_unavailable_reason"]
+            .as_str()
+            .unwrap()
+            .contains("tunneled without capture"));
     }
 }
