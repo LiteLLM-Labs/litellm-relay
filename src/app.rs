@@ -2,7 +2,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    cert::ensure_ca, config::RelayConfig, pac::build_pac, proxy::RelayProxy, setup::run_setup,
+    cert::ensure_ca,
+    claude::{onboard, print_token, OnboardParams},
+    config::RelayConfig,
+    pac::build_pac,
+    proxy::RelayProxy,
+    setup::run_setup,
 };
 
 #[derive(Parser)]
@@ -29,6 +34,19 @@ enum CommandKind {
         #[arg(long)]
         api_key: Option<String>,
     },
+    /// Wire Claude Code to route through the Gateway via IdP sign-in.
+    Onboard {
+        #[arg(long)]
+        gateway_url: Option<String>,
+        #[arg(long)]
+        authorize_url: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Print a valid IdP bearer token for Claude Code's apiKeyHelper.
+    ClaudeToken,
 }
 
 pub async fn run() -> Result<()> {
@@ -66,5 +84,17 @@ async fn run_command(command: CommandKind) -> Result<()> {
             gateway_url,
             api_key,
         } => run_setup(gateway_url, api_key).await,
+        CommandKind::Onboard {
+            gateway_url,
+            authorize_url,
+            team,
+            model,
+        } => onboard(OnboardParams {
+            gateway_url,
+            authorize_url,
+            team,
+            model,
+        }),
+        CommandKind::ClaudeToken => print_token(),
     }
 }
