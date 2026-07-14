@@ -5,9 +5,21 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  rust:
+    name: Rust checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -15,8 +27,70 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Format
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
       - name: Test
         run: cargo test
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  shell:
+    name: Installer shell checks
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate installer scripts
+        run: bash -n src/install.sh src/uninstall.sh
+      - name: Check installer help path
+        run: bash src/install.sh --help
+
+  proxy-smoke:
+    name: Proxy/TLS smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build relay
+        run: cargo build
+      - name: Run CONNECT/TLS smoke test
+        run: ./scripts/ci/proxy_smoke.sh
+
+  protocol-regression:
+    name: Protocol regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run streaming and upgrade tests
+        run: |
+          cargo test request_protocol_decision_detects_websocket_upgrade
+          cargo test response_protocol_decision_tunnels_chunked_sse
+          cargo test metadata_only_payload_does_not_claim_body_capture
+
+  security-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
+
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: litellm-relay:ci

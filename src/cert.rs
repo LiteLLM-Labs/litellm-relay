@@ -1,12 +1,17 @@
 use std::{
     fs,
-    io::Cursor,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use anyhow::{anyhow, Result};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rustls::{
+    pki_types::{
+        CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+    },
+    ClientConfig, RootCertStore, ServerConfig,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AlpnProtocol {
@@ -78,10 +83,8 @@ pub fn server_tls_config(host: &str, ca_dir: &Path) -> Result<ServerConfig> {
     let (cert_path, key_path) = ensure_leaf_cert(host, ca_dir)?;
     let cert_file = fs::read(&cert_path)?;
     let key_file = fs::read(&key_path)?;
-    let certs = rustls_pemfile::certs(&mut Cursor::new(cert_file))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let key = rustls_pemfile::private_key(&mut Cursor::new(key_file))?
-        .ok_or_else(|| anyhow!("leaf private key not found"))?;
+    let certs = load_cert_chain(&cert_file)?;
+    let key = load_private_key(&key_file)?;
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
@@ -175,6 +178,55 @@ fn run_quiet(command: &mut Command) -> Result<()> {
     } else {
         Err(anyhow!("command failed with status {status}"))
     }
+}
+
+fn load_cert_chain(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
+    let certs = decode_pem_blocks(pem, "CERTIFICATE")?;
+    if certs.is_empty() {
+        return Err(anyhow!("leaf certificate not found"));
+    }
+    Ok(certs.into_iter().map(CertificateDer::from).collect())
+}
+
+fn load_private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
+    if let Some(key) = decode_first_pem_block(pem, "PRIVATE KEY")? {
+        return Ok(PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key)));
+    }
+    if let Some(key) = decode_first_pem_block(pem, "RSA PRIVATE KEY")? {
+        return Ok(PrivateKeyDer::from(PrivatePkcs1KeyDer::from(key)));
+    }
+    if let Some(key) = decode_first_pem_block(pem, "EC PRIVATE KEY")? {
+        return Ok(PrivateKeyDer::from(PrivateSec1KeyDer::from(key)));
+    }
+    Err(anyhow!("leaf private key not found"))
+}
+
+fn decode_first_pem_block(pem: &[u8], label: &str) -> Result<Option<Vec<u8>>> {
+    Ok(decode_pem_blocks(pem, label)?.into_iter().next())
+}
+
+fn decode_pem_blocks(pem: &[u8], label: &str) -> Result<Vec<Vec<u8>>> {
+    let text = std::str::from_utf8(pem)?;
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let mut rest = text;
+    let mut blocks = Vec::new();
+
+    while let Some(begin_index) = rest.find(&begin) {
+        let block_start = begin_index + begin.len();
+        let after_begin = &rest[block_start..];
+        let end_index = after_begin
+            .find(&end)
+            .ok_or_else(|| anyhow!("unterminated PEM block: {label}"))?;
+        let encoded: String = after_begin[..end_index]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        blocks.push(STANDARD.decode(encoded)?);
+        rest = &after_begin[end_index + end.len()..];
+    }
+
+    Ok(blocks)
 }
 
 fn safe_cert_name(host: &str) -> String {
