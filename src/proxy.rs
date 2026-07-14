@@ -12,9 +12,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
 use crate::{
-    apps::known_apps,
+    apps::{classify_app_attribution, known_apps, AppAttribution},
     cert::{client_tls_config, ensure_ca, server_tls_config},
-    config::{classify_host, is_ai_host, is_notion_host, RelayConfig},
+    config::{is_ai_host, is_notion_host, RelayConfig},
     events::{append_event, clear_events, read_events},
     gateway::{CaptureIngest, GatewayClient, IngestResult},
     http::{
@@ -215,20 +215,22 @@ impl RelayProxy {
         let target = parse_connect_target(&target)?;
         let started_at = Instant::now();
         let event_id = Uuid::new_v4().to_string();
-        let app = classify_host(&target.host, &self.config);
+        let attribution = classify_app_attribution(&target.host, &self.config.ai_domains);
         let ai_match = is_ai_host(&target.host, &self.config);
         let notion_match = is_notion_host(&target.host, &self.config);
-        let mut event = json!({
-            "event_id": event_id,
-            "event": "connect",
-            "method": "CONNECT",
-            "host": target.host,
-            "port": target.port,
-            "peer": peer.to_string(),
-            "app": app,
-            "ai_match": ai_match,
-            "notion_match": notion_match,
-        });
+        let mut event = event_with_attribution(
+            json!({
+                "event_id": event_id,
+                "event": "connect",
+                "method": "CONNECT",
+                "host": target.host,
+                "port": target.port,
+                "peer": peer.to_string(),
+                "ai_match": ai_match,
+                "notion_match": notion_match,
+            }),
+            &attribution,
+        );
 
         if ai_match {
             event["shadow"] = self.gateway.maybe_shadow(&event).await;
@@ -264,19 +266,21 @@ impl RelayProxy {
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
         let (bytes_out, bytes_in) = copy_bidirectional_counted(&mut client, &mut upstream).await?;
-        self.log_event(json!({
-            "event_id": event_id,
-            "event": "connect_closed",
-            "method": "CONNECT",
-            "host": target.host,
-            "port": target.port,
-            "app": app,
-            "ai_match": ai_match,
-            "notion_match": notion_match,
-            "duration_ms": started_at.elapsed().as_millis() as u64,
-            "bytes_out": bytes_out,
-            "bytes_in": bytes_in,
-        }))?;
+        self.log_event(event_with_attribution(
+            json!({
+                "event_id": event_id,
+                "event": "connect_closed",
+                "method": "CONNECT",
+                "host": target.host,
+                "port": target.port,
+                "ai_match": ai_match,
+                "notion_match": notion_match,
+                "duration_ms": started_at.elapsed().as_millis() as u64,
+                "bytes_out": bytes_out,
+                "bytes_in": bytes_in,
+            }),
+            &attribution,
+        ))?;
         Ok(())
     }
 
@@ -391,7 +395,8 @@ impl RelayProxy {
                     }),
                     tunnel_decision,
                 );
-                let app = classify_host(&host, &self.config);
+                let attribution = classify_app_attribution(&host, &self.config.ai_domains);
+                let app = attribution.destination_app.clone();
                 let classification = classify_captured_traffic(CapturedTraffic {
                     app: &app,
                     host: &host,
@@ -401,14 +406,13 @@ impl RelayProxy {
                     request_payload: &request_payload,
                     response_payload: &response_payload,
                 });
-                self.log_event(json!({
+                self.log_event(event_with_attribution(json!({
                     "event_id": capture_event_id,
                     "connection_event_id": event_id,
                     "event": "http_request",
                     "method": request_line.method,
                     "path": request_path,
                     "host": host,
-                    "app": app,
                     "ai_match": is_ai_host(&host, &self.config),
                     "notion_match": is_notion_host(&host, &self.config),
                     "traffic_kind": classification.kind,
@@ -420,15 +424,14 @@ impl RelayProxy {
                     "request_bytes": request.body.len(),
                     "request_preview": request_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
                     "request_truncated": request_payload.get("preview_truncated").cloned().unwrap_or(Value::Bool(false)),
-                }))?;
-                self.log_event(json!({
+                }), &attribution))?;
+                self.log_event(event_with_attribution(json!({
                     "event_id": capture_event_id,
                     "connection_event_id": event_id,
                     "event": "http_response",
                     "method": request_line.method,
                     "path": request_path,
                     "host": host,
-                    "app": app,
                     "traffic_kind": classification.kind,
                     "traffic_reason": classification.reason,
                     "collector_eligible": false,
@@ -439,12 +442,13 @@ impl RelayProxy {
                     "response_bytes": 0,
                     "response_preview": response_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
                     "response_truncated": false,
-                }))?;
+                }), &attribution))?;
                 self.log_collector_skipped(
                     &capture_event_id,
                     &event_id,
                     &host,
                     &request_path,
+                    &attribution,
                     &classification,
                 )?;
                 client_tls.write_all(&response_head.raw_headers).await?;
@@ -453,20 +457,22 @@ impl RelayProxy {
                     copy_bidirectional_counted(&mut client_tls, &mut upstream_tls).await?;
                 bytes_out += tunnel_bytes_out as usize;
                 bytes_in += tunnel_bytes_in as usize;
-                self.log_event(json!({
-                    "event_id": capture_event_id,
-                    "connection_event_id": event_id,
-                    "event": "protocol_tunnel_closed",
-                    "method": request_line.method,
-                    "path": request_path,
-                    "host": host,
-                    "app": app,
-                    "duration_ms": request_started.elapsed().as_millis() as u64,
-                    "bytes_out": tunnel_bytes_out,
-                    "bytes_in": tunnel_bytes_in,
-                    "capture_mode": "metadata_only_tunnel",
-                    "protocol_compatibility_reason": tunnel_decision.reason.as_str(),
-                }))?;
+                self.log_event(event_with_attribution(
+                    json!({
+                        "event_id": capture_event_id,
+                        "connection_event_id": event_id,
+                        "event": "protocol_tunnel_closed",
+                        "method": request_line.method,
+                        "path": request_path,
+                        "host": host,
+                        "duration_ms": request_started.elapsed().as_millis() as u64,
+                        "bytes_out": tunnel_bytes_out,
+                        "bytes_in": tunnel_bytes_in,
+                        "capture_mode": "metadata_only_tunnel",
+                        "protocol_compatibility_reason": tunnel_decision.reason.as_str(),
+                    }),
+                    &attribution,
+                ))?;
                 break;
             }
 
@@ -486,7 +492,8 @@ impl RelayProxy {
                     "protocol_compatibility_reason": response_protocol.reason.as_str(),
                 }),
             );
-            let app = classify_host(&host, &self.config);
+            let attribution = classify_app_attribution(&host, &self.config.ai_domains);
+            let app = attribution.destination_app.clone();
             let classification = classify_captured_traffic(CapturedTraffic {
                 app: &app,
                 host: &host,
@@ -496,14 +503,13 @@ impl RelayProxy {
                 request_payload: &request_payload,
                 response_payload: &response_payload,
             });
-            self.log_event(json!({
+            self.log_event(event_with_attribution(json!({
                 "event_id": capture_event_id,
                 "connection_event_id": event_id,
                 "event": "http_request",
                 "method": request_line.method,
                 "path": request_path,
                 "host": host,
-                "app": app,
                 "ai_match": is_ai_host(&host, &self.config),
                 "notion_match": is_notion_host(&host, &self.config),
                 "traffic_kind": classification.kind,
@@ -515,15 +521,14 @@ impl RelayProxy {
                 "request_bytes": request.body.len(),
                 "request_preview": request_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
                 "request_truncated": request_payload.get("preview_truncated").cloned().unwrap_or(Value::Bool(false)),
-            }))?;
-            self.log_event(json!({
+            }), &attribution))?;
+            self.log_event(event_with_attribution(json!({
                 "event_id": capture_event_id,
                 "connection_event_id": event_id,
                 "event": "http_response",
                 "method": request_line.method,
                 "path": request_path,
                 "host": host,
-                "app": app,
                 "traffic_kind": classification.kind,
                 "traffic_reason": classification.reason,
                 "collector_eligible": classification.is_ai_request(),
@@ -534,14 +539,14 @@ impl RelayProxy {
                 "response_bytes": response_body.decoded.len(),
                 "response_preview": response_payload.get("body_preview").cloned().unwrap_or(Value::String(String::new())),
                 "response_truncated": response_payload.get("preview_truncated").cloned().unwrap_or(Value::Bool(false)),
-            }))?;
+            }), &attribution))?;
             if classification.is_ai_request() {
                 let ingest = self
                     .gateway
                     .ingest_capture(CaptureIngest {
                         event_id: capture_event_id.clone(),
                         host: host.clone(),
-                        app,
+                        attribution: attribution.clone(),
                         method: request_line.method.clone(),
                         path: request_path.clone(),
                         started_at: request_started_at,
@@ -557,6 +562,7 @@ impl RelayProxy {
                     &event_id,
                     &host,
                     &request_path,
+                    &attribution,
                     ingest,
                 )?;
             } else {
@@ -565,6 +571,7 @@ impl RelayProxy {
                     &event_id,
                     &host,
                     &request_path,
+                    &attribution,
                     &classification,
                 )?;
             }
@@ -579,20 +586,23 @@ impl RelayProxy {
 
         let _ = upstream_tls.shutdown().await;
         let _ = client_tls.shutdown().await;
-        self.log_event(json!({
-            "event_id": event_id,
-            "event": "connect_closed",
-            "method": "CONNECT",
-            "host": host,
-            "port": port,
-            "app": classify_host(&host, &self.config),
-            "ai_match": is_ai_host(&host, &self.config),
-            "notion_match": is_notion_host(&host, &self.config),
-            "capture_payloads": true,
-            "duration_ms": started_at.elapsed().as_millis() as u64,
-            "bytes_out": bytes_out,
-            "bytes_in": bytes_in,
-        }))?;
+        let attribution = classify_app_attribution(&host, &self.config.ai_domains);
+        self.log_event(event_with_attribution(
+            json!({
+                "event_id": event_id,
+                "event": "connect_closed",
+                "method": "CONNECT",
+                "host": host,
+                "port": port,
+                "ai_match": is_ai_host(&host, &self.config),
+                "notion_match": is_notion_host(&host, &self.config),
+                "capture_payloads": true,
+                "duration_ms": started_at.elapsed().as_millis() as u64,
+                "bytes_out": bytes_out,
+                "bytes_in": bytes_in,
+            }),
+            &attribution,
+        ))?;
         Ok(())
     }
 
@@ -623,6 +633,14 @@ impl RelayProxy {
             "gateway_url": self.config.gateway_url,
             "events_loaded": read_events(&self.config.log_path, 1000).len(),
             "known_apps": known_apps(),
+            "attribution": {
+                "destination_field": "destination_app",
+                "compatibility_field": "app",
+                "process_identity_field": "process_identity",
+                "process_lookup_status_field": "process_lookup_status",
+                "sources": ["known_app_catalog", "configured_ai_domain", "unmatched"],
+                "confidences": ["high", "medium", "none"],
+            },
             "runtime": "rust",
         }))
     }
@@ -633,20 +651,23 @@ impl RelayProxy {
         connection_event_id: &str,
         host: &str,
         path: &str,
+        attribution: &AppAttribution,
         ingest: IngestResult,
     ) -> Result<()> {
-        self.log_event(json!({
-            "event_id": capture_event_id,
-            "connection_event_id": connection_event_id,
-            "event": "collector_spend_logs",
-            "host": host,
-            "app": classify_host(host, &self.config),
-            "path": path,
-            "attempted": ingest.attempted,
-            "ok": ingest.ok,
-            "status": ingest.status,
-            "error": ingest.error,
-        }))
+        self.log_event(event_with_attribution(
+            json!({
+                "event_id": capture_event_id,
+                "connection_event_id": connection_event_id,
+                "event": "collector_spend_logs",
+                "host": host,
+                "path": path,
+                "attempted": ingest.attempted,
+                "ok": ingest.ok,
+                "status": ingest.status,
+                "error": ingest.error,
+            }),
+            attribution,
+        ))
     }
 
     fn log_collector_skipped(
@@ -655,18 +676,21 @@ impl RelayProxy {
         connection_event_id: &str,
         host: &str,
         path: &str,
+        attribution: &AppAttribution,
         classification: &TrafficClassification,
     ) -> Result<()> {
-        self.log_event(json!({
-            "event_id": capture_event_id,
-            "connection_event_id": connection_event_id,
-            "event": "collector_skipped",
-            "host": host,
-            "app": classify_host(host, &self.config),
-            "path": path,
-            "traffic_kind": classification.kind,
-            "traffic_reason": classification.reason,
-        }))
+        self.log_event(event_with_attribution(
+            json!({
+                "event_id": capture_event_id,
+                "connection_event_id": connection_event_id,
+                "event": "collector_skipped",
+                "host": host,
+                "path": path,
+                "traffic_kind": classification.kind,
+                "traffic_reason": classification.reason,
+            }),
+            attribution,
+        ))
     }
 
     fn log_event(&self, event: Value) -> Result<()> {
@@ -684,4 +708,39 @@ fn metadata_tunnel_decision(
     } else {
         response
     }
+}
+
+fn event_with_attribution(mut event: Value, attribution: &AppAttribution) -> Value {
+    if let Value::Object(map) = &mut event {
+        map.insert(
+            "app".into(),
+            Value::String(attribution.destination_app.clone()),
+        );
+        map.insert(
+            "destination_app".into(),
+            Value::String(attribution.destination_app.clone()),
+        );
+        map.insert(
+            "attribution_source".into(),
+            serde_json::to_value(attribution.attribution_source)
+                .expect("attribution source should serialize"),
+        );
+        map.insert(
+            "attribution_confidence".into(),
+            serde_json::to_value(attribution.attribution_confidence)
+                .expect("attribution confidence should serialize"),
+        );
+        map.insert(
+            "process_lookup_status".into(),
+            serde_json::to_value(attribution.process_lookup_status)
+                .expect("process lookup status should serialize"),
+        );
+        if let Some(process_identity) = &attribution.process_identity {
+            map.insert(
+                "process_identity".into(),
+                Value::String(process_identity.clone()),
+            );
+        }
+    }
+    event
 }
