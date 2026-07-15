@@ -1,9 +1,13 @@
 use std::{env, fs, path::PathBuf};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
+use uuid::Uuid;
 
-use crate::config::{load_settings, save_settings, RelaySettings};
+use crate::{
+    config::{load_settings, save_settings, RelaySettings},
+    system::home_dir,
+};
 
 /// Inputs for wiring Claude Desktop (third-party mode) to route through the
 /// Gateway. Supplied by the MDM package or interactively; any field left unset
@@ -23,16 +27,26 @@ pub struct OnboardDesktopParams {
     pub oidc_issuer: Option<String>,
     pub oidc_scopes: Option<String>,
     pub oidc_redirect_port: Option<u16>,
+    /// Write the fleet-managed, root-owned settings file
+    /// (`/etc/claude-desktop/managed-settings.json`, for MDM deploys) instead
+    /// of the per-user config. Requires root. Defaults to false — on macOS the
+    /// default is the user-writable `Claude-3p/configLibrary` path (no sudo).
+    pub managed: bool,
     /// Suppress success output (used by autoconfigure, which prints its own
     /// summary). Standalone `relay onboard-claude-desktop` leaves this false.
     pub quiet: bool,
 }
 
-/// Writes `/etc/claude-desktop/managed-settings.json` so Claude Desktop routes
-/// inference through the Gateway. The app reads this root-owned file on launch
-/// (see the Anthropic "LLM gateway" third-party docs), switches into gateway
-/// mode, and — in SSO mode — prompts the developer to sign in through their
-/// browser on first use.
+/// Configures Claude Desktop to route inference through the Gateway.
+///
+/// By default (personal machine) this writes the **user-writable** local
+/// config that the app's "Apply locally" action uses — no root required:
+///   `~/Library/Application Support/Claude-3p/configLibrary/<appliedId>.json`
+/// plus `_meta.json` (which records the applied config). Claude Desktop reads
+/// it on launch and switches into gateway mode.
+///
+/// With `managed: true` (MDM / fleet deploy) it writes the root-owned
+/// `/etc/claude-desktop/managed-settings.json` enforced-settings file instead.
 pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
@@ -63,8 +77,16 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
         );
     }
 
-    let document = build_managed_settings(&settings, sso.as_ref());
-    let path = write_managed_settings(&document)?;
+    let document = build_inference_settings(&settings, sso.as_ref());
+
+    // Default to the per-user config on macOS (no sudo). Use the root-owned
+    // managed file only when explicitly requested, or on other platforms.
+    let use_managed = params.managed || !cfg!(target_os = "macos");
+    let path = if use_managed {
+        write_managed_settings(&document)?
+    } else {
+        write_config_library(&document)?
+    };
     save_settings(&settings)?;
 
     if !params.quiet {
@@ -80,7 +102,7 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
             None => println!("Credential: static Gateway API key"),
         }
         println!("Wrote {}", path.display());
-        println!("Restart Claude Desktop to pick up the managed configuration.");
+        println!("Restart Claude Desktop to pick up the configuration.");
     }
     Ok(())
 }
@@ -92,10 +114,13 @@ struct SsoConfig {
     redirect_port: Option<u16>,
 }
 
-/// Builds the top-level JSON object Claude Desktop reads from
-/// `/etc/claude-desktop/managed-settings.json`. Keys match the Anthropic
-/// third-party configuration reference exactly.
-fn build_managed_settings(settings: &RelaySettings, sso: Option<&SsoConfig>) -> Map<String, Value> {
+/// Builds the inference-config object Claude Desktop reads (same keys for the
+/// per-user `configLibrary` entry and the managed-settings file). Keys match
+/// the Anthropic third-party configuration reference.
+fn build_inference_settings(
+    settings: &RelaySettings,
+    sso: Option<&SsoConfig>,
+) -> Map<String, Value> {
     let mut root = Map::new();
     root.insert("inferenceProvider".into(), Value::String("gateway".into()));
     root.insert(
@@ -106,9 +131,11 @@ fn build_managed_settings(settings: &RelaySettings, sso: Option<&SsoConfig>) -> 
         "inferenceGatewayAuthScheme".into(),
         Value::String("bearer".into()),
     );
+    root.insert("modelDiscoveryEnabled".into(), Value::Bool(true));
+    // Model entries are objects keyed by `name` (the exact id `/v1/models` returns).
     root.insert(
         "inferenceModels".into(),
-        Value::Array(vec![Value::String(settings.claude.model.clone())]),
+        json!([{ "name": settings.claude.model.clone() }]),
     );
 
     match sso {
@@ -144,6 +171,90 @@ fn build_managed_settings(settings: &RelaySettings, sso: Option<&SsoConfig>) -> 
 
     root
 }
+
+// MARK: - Per-user config (macOS, no sudo)
+
+fn config_library_dir() -> PathBuf {
+    if let Ok(path) = env::var("CLAUDE_3P_CONFIG_LIBRARY") {
+        return PathBuf::from(path);
+    }
+    home_dir()
+        .join("Library")
+        .join("Application Support")
+        .join("Claude-3p")
+        .join("configLibrary")
+}
+
+/// Writes the per-user config that Claude Desktop's "Apply locally" uses:
+/// `configLibrary/<appliedId>.json` (the inference settings) plus `_meta.json`
+/// (which records the applied config id and the entry list). Reuses the
+/// existing applied id when present (merging into that entry), otherwise
+/// creates a new "Default" entry and marks it applied. No root required.
+fn write_config_library(inference: &Map<String, Value>) -> Result<PathBuf> {
+    write_config_library_in(&config_library_dir(), inference)
+}
+
+/// Testable core of [`write_config_library`] with the target directory injected
+/// (so tests don't race on the `CLAUDE_3P_CONFIG_LIBRARY` env var).
+fn write_config_library_in(
+    dir: &std::path::Path,
+    inference: &Map<String, Value>,
+) -> Result<PathBuf> {
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+
+    let meta_path = dir.join("_meta.json");
+    let mut meta = read_json_object(&meta_path);
+
+    let applied_id = meta
+        .get("appliedId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // Merge the inference settings into the applied config entry, preserving
+    // any unrelated keys already there.
+    let config_path = dir.join(format!("{applied_id}.json"));
+    let mut config = read_json_object(&config_path);
+    for (key, value) in inference {
+        config.insert(key.clone(), value.clone());
+    }
+    write_json(&config_path, &config)?;
+
+    // Ensure _meta.json points at this entry and lists it.
+    let mut entries = meta
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !entries
+        .iter()
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(applied_id.as_str()))
+    {
+        entries.push(json!({ "id": applied_id, "name": "Default" }));
+    }
+    meta.insert("appliedId".into(), Value::String(applied_id.clone()));
+    meta.insert("entries".into(), Value::Array(entries));
+    write_json(&meta_path, &meta)?;
+
+    Ok(config_path)
+}
+
+fn read_json_object(path: &std::path::Path) -> Map<String, Value> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_json(path: &std::path::Path, object: &Map<String, Value>) -> Result<()> {
+    let serialized = serde_json::to_string_pretty(&Value::Object(object.clone()))?;
+    fs::write(path, format!("{serialized}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+// MARK: - Managed settings (MDM / non-macOS, root-owned)
 
 fn managed_settings_path() -> PathBuf {
     if let Ok(path) = env::var("CLAUDE_DESKTOP_MANAGED_SETTINGS") {
@@ -189,13 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn should_write_static_gateway_config() {
+    fn should_build_static_gateway_config() {
         let settings = settings_with(
             "http://127.0.0.1:4000",
             Some("sk-test"),
             "claude-sonnet-4-5",
         );
-        let doc = build_managed_settings(&settings, None);
+        let doc = build_inference_settings(&settings, None);
 
         assert_eq!(doc["inferenceProvider"], Value::String("gateway".into()));
         assert_eq!(
@@ -211,11 +322,15 @@ mod tests {
             Value::String("sk-test".into())
         );
         assert!(!doc.contains_key("inferenceGatewayOidc"));
-        assert_eq!(doc["inferenceModels"], json!(["claude-sonnet-4-5"]));
+        assert_eq!(doc["modelDiscoveryEnabled"], Value::Bool(true));
+        assert_eq!(
+            doc["inferenceModels"],
+            json!([{ "name": "claude-sonnet-4-5" }])
+        );
     }
 
     #[test]
-    fn should_write_interactive_sso_config_without_api_key() {
+    fn should_build_interactive_sso_config_without_api_key() {
         let settings = settings_with("https://gw.corp", Some("sk-secret"), "claude-sonnet-4-5");
         let sso = SsoConfig {
             client_id: "client-123".into(),
@@ -223,7 +338,7 @@ mod tests {
             scopes: None,
             redirect_port: Some(53180),
         };
-        let doc = build_managed_settings(&settings, Some(&sso));
+        let doc = build_inference_settings(&settings, Some(&sso));
 
         assert_eq!(
             doc["inferenceCredentialKind"],
@@ -240,5 +355,62 @@ mod tests {
             Value::String("https://login.corp/v2.0".into())
         );
         assert_eq!(oidc["redirectPort"], json!(53180));
+    }
+
+    #[test]
+    fn should_write_user_config_library_and_meta() {
+        let dir = env::temp_dir().join(format!("relay-cfglib-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let settings = settings_with("https://gw.example", Some("sk-abc"), "claude-x");
+        let doc = build_inference_settings(&settings, None);
+        let written = write_config_library_in(&dir, &doc).unwrap();
+
+        let meta = read_json_object(&dir.join("_meta.json"));
+        let applied = meta["appliedId"].as_str().unwrap().to_string();
+        assert!(!applied.is_empty());
+        assert_eq!(written, dir.join(format!("{applied}.json")));
+        assert!(meta["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"].as_str() == Some(applied.as_str())));
+
+        let config = read_json_object(&written);
+        assert_eq!(config["inferenceProvider"], Value::String("gateway".into()));
+        assert_eq!(
+            config["inferenceGatewayBaseUrl"],
+            Value::String("https://gw.example".into())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_reuse_existing_applied_id_and_preserve_keys() {
+        let dir = env::temp_dir().join(format!("relay-cfglib-reuse-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("_meta.json"),
+            r#"{"appliedId":"abc-123","entries":[{"id":"abc-123","name":"Default"}]}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("abc-123.json"), r#"{"keepMe":true}"#).unwrap();
+
+        let settings = settings_with("https://gw.example", Some("sk-abc"), "claude-x");
+        let doc = build_inference_settings(&settings, None);
+        let written = write_config_library_in(&dir, &doc).unwrap();
+
+        assert_eq!(written, dir.join("abc-123.json"));
+        let config = read_json_object(&written);
+        assert_eq!(
+            config["keepMe"],
+            Value::Bool(true),
+            "must preserve existing keys"
+        );
+        assert_eq!(config["inferenceProvider"], Value::String("gateway".into()));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

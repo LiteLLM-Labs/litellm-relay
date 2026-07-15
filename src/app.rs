@@ -101,6 +101,11 @@ enum CommandKind {
         oidc_scopes: Option<String>,
         #[arg(long)]
         oidc_redirect_port: Option<u16>,
+        /// Write the root-owned managed-settings file (MDM / fleet deploy)
+        /// instead of the per-user config. Requires sudo. Defaults to the
+        /// per-user config (no sudo).
+        #[arg(long)]
+        managed: bool,
     },
     /// Print a valid IdP bearer token for Claude Code's apiKeyHelper.
     ClaudeToken,
@@ -211,6 +216,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
             oidc_issuer,
             oidc_scopes,
             oidc_redirect_port,
+            managed,
         } => onboard_desktop(OnboardDesktopParams {
             gateway_url,
             api_key,
@@ -219,6 +225,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
             oidc_issuer,
             oidc_scopes,
             oidc_redirect_port,
+            managed,
             quiet: false,
         }),
         CommandKind::ClaudeToken => print_token(),

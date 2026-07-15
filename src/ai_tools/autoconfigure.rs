@@ -193,6 +193,9 @@ fn configure_tool(tool: AiTool, params: &AutoConfigureParams) -> Result<()> {
             oidc_issuer: params.oidc_issuer.clone(),
             oidc_scopes: params.oidc_scopes.clone(),
             oidc_redirect_port: params.oidc_redirect_port,
+            // Per-user pass: on macOS this writes the user-owned configLibrary
+            // (no sudo); managed/MDM deploys use the root path explicitly.
+            managed: false,
             quiet: true,
         }),
     }
