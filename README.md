@@ -63,6 +63,8 @@ Relay onboards each AI coding tool onto the LiteLLM AI Gateway with zero develop
 - [Codex CLI](docs/codex-cli.md)
 - [Codex with VS Code](docs/codex-vscode.md)
 
+Setting this up with an AI coding agent? See [Instructions for AI agents](docs/ai-agent-install.md) — a runbook to install Relay and bring up the Mac menu bar usage app.
+
 ## Supported MDMs
 
 Deploy LiteLLM Relay with your existing device-management process:
