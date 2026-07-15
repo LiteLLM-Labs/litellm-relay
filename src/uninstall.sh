@@ -177,6 +177,11 @@ launchctl bootout "gui/$(id -u)" "$AUTOCONFIGURE_PLIST" >/dev/null 2>&1 || true
 rm -f "$AUTOCONFIGURE_PLIST"
 $SUDO launchctl bootout system "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
 $SUDO rm -f "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
+# Managed preferences plist Relay wrote for Claude Desktop (macOS). Removing it
+# reverts the app to its default (non-gateway) inference on next launch.
+CLAUDE_DESKTOP_MANAGED_PLIST="/Library/Managed Preferences/com.anthropic.claudefordesktop.plist"
+$SUDO rm -f "$CLAUDE_DESKTOP_MANAGED_PLIST" >/dev/null 2>&1 || true
+$SUDO killall -HUP cfprefsd >/dev/null 2>&1 || true
 
 if [[ -n "$NETWORK_SERVICE" ]]; then
   networksetup -setautoproxystate "$NETWORK_SERVICE" off

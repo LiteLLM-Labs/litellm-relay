@@ -16,7 +16,9 @@ use crate::system::home_dir;
 pub enum AiTool {
     /// Claude Code CLI (`~/.claude/settings.json`).
     ClaudeCode,
-    /// Claude Desktop app (`/etc/claude-desktop/managed-settings.json`).
+    /// Claude Desktop app. Managed config lives in the OS-native managed
+    /// settings source: `/Library/Managed Preferences/…` on macOS,
+    /// `/etc/claude-desktop/managed-settings.json` on Linux.
     ClaudeDesktop,
     /// Codex — the CLI, the VS Code extension, and the macOS app all read the
     /// same `~/.codex/config.toml`, so one onboard wires every surface.

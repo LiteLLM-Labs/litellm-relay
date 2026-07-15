@@ -24,7 +24,7 @@ Gateway in a single pass — you never enumerate tools per machine.
 | Tool | Detected by | Config Relay writes |
 | --- | --- | --- |
 | Claude Code CLI | `claude` on `PATH` or `~/.claude` | `~/.claude/settings.json` |
-| Claude Desktop | `/Applications/Claude.app` or its app-support dir | `/etc/claude-desktop/managed-settings.json` |
+| Claude Desktop | `/Applications/Claude.app` or its app-support dir | `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` (macOS); `/etc/claude-desktop/managed-settings.json` (Linux) |
 | Codex (CLI, VS Code, macOS app) | `codex` on `PATH`, `Codex.app`, the `openai.chatgpt` VS Code extension, or `~/.codex` | `~/.codex/config.toml` |
 
 Detection also runs on a schedule, so a tool installed *after* Relay gets wired

@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     ai_tools::{
-        autoconfigure, detect::AiTool, onboard, onboard_codex, onboard_desktop, print_codex_token,
-        print_token, AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
+        autoconfigure, detect::AiTool, export_desktop_profile, onboard, onboard_codex,
+        onboard_desktop, print_codex_token, print_token, AutoConfigureParams, CodexOnboardParams,
+        OnboardDesktopParams, OnboardParams,
     },
     cert::ensure_ca,
     config::RelayConfig,
@@ -102,6 +103,11 @@ enum CommandKind {
         #[arg(long)]
         oidc_redirect_port: Option<u16>,
     },
+    /// Print a macOS configuration profile (.mobileconfig) that wires Claude
+    /// Desktop through the Gateway when deployed via MDM. Uses the saved static
+    /// Gateway key. Redirect to a file, then upload as a Custom Settings profile
+    /// in Jamf/Intune/Kandji.
+    ExportClaudeDesktopProfile,
     /// Print a valid IdP bearer token for Claude Code's apiKeyHelper.
     ClaudeToken,
     /// Wire Codex CLI to route through the Gateway via IdP sign-in.
@@ -221,6 +227,10 @@ async fn run_command(command: CommandKind) -> Result<()> {
             oidc_redirect_port,
             quiet: false,
         }),
+        CommandKind::ExportClaudeDesktopProfile => {
+            print!("{}", export_desktop_profile()?);
+            Ok(())
+        }
         CommandKind::ClaudeToken => print_token(),
         CommandKind::OnboardCodex {
             gateway_url,
