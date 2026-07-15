@@ -324,15 +324,25 @@ mod tests {
         let root = merge_claude_settings(existing, &settings, &Credential::TokenHelper).unwrap();
 
         assert!(
-            root["apiKeyHelper"].as_str().unwrap().ends_with("claude-token"),
+            root["apiKeyHelper"]
+                .as_str()
+                .unwrap()
+                .ends_with("claude-token"),
             "token helper mode must set apiKeyHelper"
         );
         assert!(
-            root["env"].as_object().unwrap().get("ANTHROPIC_AUTH_TOKEN").is_none(),
+            root["env"]
+                .as_object()
+                .unwrap()
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .is_none(),
             "token helper mode must remove a stale static ANTHROPIC_AUTH_TOKEN"
         );
         assert!(
-            !root["env"].as_object().unwrap().contains_key("ANTHROPIC_CUSTOM_HEADERS"),
+            !root["env"]
+                .as_object()
+                .unwrap()
+                .contains_key("ANTHROPIC_CUSTOM_HEADERS"),
             "no team means no custom headers"
         );
     }

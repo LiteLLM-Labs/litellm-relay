@@ -15,6 +15,7 @@ base64 = "0.22"
 brotli = "7.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+console = "0.15"
 flate2 = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 rustls = "0.23"

@@ -159,7 +159,8 @@ fn write_managed_settings(document: &Map<String, Value>) -> Result<PathBuf> {
     }
 
     let serialized = serde_json::to_string_pretty(&Value::Object(document.clone()))?;
-    fs::write(&path, format!("{serialized}\n")).map_err(|error| managed_write_error(error, &path))?;
+    fs::write(&path, format!("{serialized}\n"))
+        .map_err(|error| managed_write_error(error, &path))?;
     Ok(path)
 }
 
