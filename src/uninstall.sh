@@ -88,7 +88,15 @@ fi
 
 PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.plist"
 AUTOCONFIGURE_PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.autoconfigure.plist"
+DESKTOP_DAEMON_LABEL="ai.litellm.relay.autoconfigure-desktop"
+DESKTOP_DAEMON_PLIST="/Library/LaunchDaemons/$DESKTOP_DAEMON_LABEL.plist"
 RELAY_BINARY="$RELAY_HOME/bin/litellm-relay"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  SUDO=""
+else
+  SUDO="sudo"
+fi
 RELAY_RUNNER="$RELAY_HOME/bin/run-relay"
 CA_PATH="$RELAY_HOME/mitm/litellm-relay-ca.pem"
 PAC_PATH="$RELAY_HOME/relay.pac"
@@ -167,6 +175,8 @@ launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 rm -f "$PLIST"
 launchctl bootout "gui/$(id -u)" "$AUTOCONFIGURE_PLIST" >/dev/null 2>&1 || true
 rm -f "$AUTOCONFIGURE_PLIST"
+$SUDO launchctl bootout system "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
+$SUDO rm -f "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
 
 if [[ -n "$NETWORK_SERVICE" ]]; then
   networksetup -setautoproxystate "$NETWORK_SERVICE" off
@@ -194,6 +204,8 @@ LiteLLM Relay uninstall complete.
 
 Removed:
   LaunchAgent: $PLIST
+  LaunchAgent: $AUTOCONFIGURE_PLIST
+  LaunchDaemon: $DESKTOP_DAEMON_PLIST
 DONE
 
 if [[ "$REMOVE_BIN" == "1" ]]; then

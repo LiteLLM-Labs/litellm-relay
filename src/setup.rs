@@ -53,7 +53,7 @@ pub async fn run_setup(gateway_url: Option<String>, api_key: Option<String>) -> 
     // Detect and wire up every AI tool on this device. `autoconfigure` reads
     // the config just saved and prefers the IdP, falling back to the Gateway
     // key on non-SSO setups.
-    if let Err(error) = autoconfigure(AutoConfigureParams::default()) {
+    if let Err(error) = autoconfigure(AutoConfigureParams::default(), &[]) {
         eprintln!("  Skipping AI tool auto-configuration: {error:#}");
     }
     Ok(())

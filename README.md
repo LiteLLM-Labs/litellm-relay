@@ -27,14 +27,27 @@ Gateway in a single pass — you never enumerate tools per machine.
 | Claude Desktop | `/Applications/Claude.app` or its app-support dir | `/etc/claude-desktop/managed-settings.json` |
 | Codex (CLI, VS Code, macOS app) | `codex` on `PATH`, `Codex.app`, the `openai.chatgpt` VS Code extension, or `~/.codex` | `~/.codex/config.toml` |
 
-Detection also runs on a schedule. The installer registers a
-`ai.litellm.relay.autoconfigure` LaunchAgent that re-runs `autoconfigure` at
-login and every `RELAY_AUTOCONFIGURE_INTERVAL` seconds (default 3600), so a tool
-installed *after* Relay gets wired to the Gateway automatically — no manual
-re-run. You can still run it on demand:
+Detection also runs on a schedule, so a tool installed *after* Relay gets wired
+to the Gateway automatically — no manual re-run. Because each tool's config
+lives in a different place, the installer registers two periodic jobs (both at
+login and every `RELAY_AUTOCONFIGURE_INTERVAL` seconds, default 3600):
+
+| Job | Runs as | Tools | Why |
+| --- | --- | --- | --- |
+| `ai.litellm.relay.autoconfigure` (LaunchAgent) | you | Claude Code, Codex | configs are user-writable (`~/.claude`, `~/.codex`) |
+| `ai.litellm.relay.autoconfigure-desktop` (LaunchDaemon) | root | Claude Desktop | its managed file is the root-owned `/etc/claude-desktop/managed-settings.json` |
+
+The root daemon pins `HOME` to the installing user so it reads that user's Relay
+config while running as root. Installing it needs root; `install.sh` uses `sudo`
+when not already root (the macOS `.pkg` postinstall already runs as root). If it
+can't get root, Claude Code and Codex still auto-configure and Relay prints a
+warning for Claude Desktop.
+
+You can still run detection on demand, and scope it with `--only`:
 
 ```bash
-relay autoconfigure
+relay autoconfigure                       # every detected tool
+relay autoconfigure --only claude-desktop # just one (repeatable)
 ```
 
 Unset flags fall back to the saved Relay config, so a managed `config.yaml`

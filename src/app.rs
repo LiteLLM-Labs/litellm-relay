@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     ai_tools::{
-        autoconfigure, onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
-        AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
+        autoconfigure, detect::AiTool, onboard, onboard_codex, onboard_desktop, print_codex_token,
+        print_token, AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
     cert::ensure_ca,
     config::RelayConfig,
@@ -61,6 +61,11 @@ enum CommandKind {
         oidc_scopes: Option<String>,
         #[arg(long)]
         oidc_redirect_port: Option<u16>,
+        /// Restrict the pass to specific tools (repeatable), e.g.
+        /// `--only claude-desktop`. Accepts `claude-code`, `claude-desktop`,
+        /// `codex`. Omit to configure every detected tool.
+        #[arg(long, value_name = "TOOL")]
+        only: Vec<String>,
     },
     /// Wire Claude Code to route through the Gateway via IdP sign-in.
     Onboard {
@@ -163,17 +168,24 @@ async fn run_command(command: CommandKind) -> Result<()> {
             oidc_issuer,
             oidc_scopes,
             oidc_redirect_port,
-        } => autoconfigure(AutoConfigureParams {
-            gateway_url,
-            authorize_url,
-            team,
-            api_key,
-            env_key,
-            oidc_client_id,
-            oidc_issuer,
-            oidc_scopes,
-            oidc_redirect_port,
-        }),
+            only,
+        } => {
+            let only = parse_only(&only)?;
+            autoconfigure(
+                AutoConfigureParams {
+                    gateway_url,
+                    authorize_url,
+                    team,
+                    api_key,
+                    env_key,
+                    oidc_client_id,
+                    oidc_issuer,
+                    oidc_scopes,
+                    oidc_redirect_port,
+                },
+                &only,
+            )
+        }
         CommandKind::Onboard {
             gateway_url,
             authorize_url,
@@ -220,4 +232,20 @@ async fn run_command(command: CommandKind) -> Result<()> {
         }),
         CommandKind::CodexToken => print_codex_token(),
     }
+}
+
+/// Parse `--only` tool slugs into `AiTool`s, erroring on an unknown value so a
+/// typo in an MDM/LaunchDaemon invocation fails loudly instead of silently
+/// configuring nothing.
+fn parse_only(values: &[String]) -> Result<Vec<AiTool>> {
+    values
+        .iter()
+        .map(|value| {
+            AiTool::from_slug(value).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --only tool '{value}' (expected claude-code, claude-desktop, or codex)"
+                )
+            })
+        })
+        .collect()
 }

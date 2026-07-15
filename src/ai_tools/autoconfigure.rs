@@ -40,9 +40,18 @@ pub struct AutoConfigureParams {
 /// Detect installed tools and onboard each one, continuing past any single
 /// tool's failure so one misconfigured tool never blocks the rest. Returns an
 /// error only if every detected tool failed to configure.
-pub fn autoconfigure(mut params: AutoConfigureParams) -> Result<()> {
+///
+/// `only` restricts the pass to specific tools (empty means every tool). This
+/// lets the root-owned periodic agent handle just Claude Desktop (its managed
+/// file lives under `/etc`) while the per-user agent handles the rest.
+pub fn autoconfigure(mut params: AutoConfigureParams, only: &[AiTool]) -> Result<()> {
     apply_credential_fallback(&mut params)?;
-    autoconfigure_with(&DetectContext::from_env(), params, &mut configure_tool)
+    autoconfigure_with(
+        &DetectContext::from_env(),
+        params,
+        only,
+        &mut configure_tool,
+    )
 }
 
 /// When the caller supplies no explicit credential and no IdP authorize URL is
@@ -75,9 +84,13 @@ struct Configured {
 fn autoconfigure_with(
     ctx: &DetectContext,
     params: AutoConfigureParams,
+    only: &[AiTool],
     configure: &mut dyn FnMut(AiTool, &AutoConfigureParams) -> Result<()>,
 ) -> Result<()> {
-    let detected = detect_all(ctx);
+    let mut detected = detect_all(ctx);
+    if !only.is_empty() {
+        detected.retain(|detection| only.contains(&detection.tool));
+    }
     if detected.is_empty() {
         println!(
             "No supported AI tools detected on this device. Relay will route them through the \
@@ -189,6 +202,7 @@ mod tests {
         autoconfigure_with(
             &ctx(&home),
             AutoConfigureParams::default(),
+            &[],
             &mut |tool, _| {
                 seen.push(tool);
                 Ok(())
@@ -197,6 +211,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(seen, vec![AiTool::ClaudeCode, AiTool::Codex]);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn should_configure_only_the_requested_tools() {
+        let home = temp_home("only");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+
+        let mut seen: Vec<AiTool> = Vec::new();
+        autoconfigure_with(
+            &ctx(&home),
+            AutoConfigureParams::default(),
+            &[AiTool::Codex],
+            &mut |tool, _| {
+                seen.push(tool);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(seen, vec![AiTool::Codex]);
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -210,6 +246,7 @@ mod tests {
         let result = autoconfigure_with(
             &ctx(&home),
             AutoConfigureParams::default(),
+            &[],
             &mut |tool, _| {
                 attempted += 1;
                 match tool {
@@ -229,10 +266,12 @@ mod tests {
         let home = temp_home("allfail");
         fs::create_dir_all(home.join(".codex")).unwrap();
 
-        let result =
-            autoconfigure_with(&ctx(&home), AutoConfigureParams::default(), &mut |_, _| {
-                Err(anyhow!("boom"))
-            });
+        let result = autoconfigure_with(
+            &ctx(&home),
+            AutoConfigureParams::default(),
+            &[],
+            &mut |_, _| Err(anyhow!("boom")),
+        );
 
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&home);
@@ -241,10 +280,12 @@ mod tests {
     #[test]
     fn should_succeed_with_no_tools_detected() {
         let home = temp_home("none");
-        let result =
-            autoconfigure_with(&ctx(&home), AutoConfigureParams::default(), &mut |_, _| {
-                Ok(())
-            });
+        let result = autoconfigure_with(
+            &ctx(&home),
+            AutoConfigureParams::default(),
+            &[],
+            &mut |_, _| Ok(()),
+        );
         assert!(result.is_ok());
         let _ = fs::remove_dir_all(&home);
     }

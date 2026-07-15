@@ -517,9 +517,70 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl enable "gui/$(id -u)/ai.litellm.relay"
 
 # Periodic auto-configuration: re-detect installed AI tools on an interval so a
-# tool installed after Relay (a new Claude Code / Codex / Claude Desktop) gets
-# wired to the Gateway automatically, with no re-run by the developer.
+# tool installed after Relay gets wired to the Gateway automatically, with no
+# re-run by the developer. Split across two agents by where each tool's config
+# lives:
+#   - a per-user LaunchAgent for the user-writable tools (Claude Code, Codex)
+#   - a root LaunchDaemon for Claude Desktop, whose managed settings live under
+#     the root-owned /etc/claude-desktop and cannot be written as the user
 AUTOCONFIGURE_PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.autoconfigure.plist"
+DESKTOP_DAEMON_LABEL="ai.litellm.relay.autoconfigure-desktop"
+DESKTOP_DAEMON_PLIST="/Library/LaunchDaemons/$DESKTOP_DAEMON_LABEL.plist"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  SUDO=""
+else
+  SUDO="sudo"
+fi
+
+# Register the root LaunchDaemon that re-configures Claude Desktop as root. HOME
+# is pinned to the installing user's home so Relay reads that user's config and
+# detects user-scoped evidence, while running as root to write the managed file.
+install_desktop_daemon() {
+  local tmp_plist
+  tmp_plist="$(mktemp)"
+  cat > "$tmp_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$DESKTOP_DAEMON_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$RELAY_HOME/bin/litellm-relay</string>
+    <string>autoconfigure</string>
+    <string>--only</string>
+    <string>claude-desktop</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$HOME</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>$RELAY_AUTOCONFIGURE_INTERVAL</integer>
+  <key>StandardOutPath</key>
+  <string>$RELAY_HOME/autoconfigure-desktop.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$RELAY_HOME/autoconfigure-desktop.err.log</string>
+</dict>
+</plist>
+PLIST
+  $SUDO install -m 644 -o root -g wheel "$tmp_plist" "$DESKTOP_DAEMON_PLIST" || return 1
+  rm -f "$tmp_plist"
+  $SUDO launchctl bootout system "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
+  $SUDO launchctl bootstrap system "$DESKTOP_DAEMON_PLIST" || return 1
+  $SUDO launchctl enable "system/$DESKTOP_DAEMON_LABEL" || return 1
+}
+
+remove_desktop_daemon() {
+  $SUDO launchctl bootout system "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
+  $SUDO rm -f "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
+}
+
 if [[ "$RELAY_AUTOCONFIGURE" == "1" ]]; then
   cat > "$AUTOCONFIGURE_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -532,6 +593,10 @@ if [[ "$RELAY_AUTOCONFIGURE" == "1" ]]; then
   <array>
     <string>$RELAY_HOME/bin/litellm-relay</string>
     <string>autoconfigure</string>
+    <string>--only</string>
+    <string>claude-code</string>
+    <string>--only</string>
+    <string>codex</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -547,9 +612,17 @@ PLIST
   launchctl bootout "gui/$(id -u)" "$AUTOCONFIGURE_PLIST" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$AUTOCONFIGURE_PLIST"
   launchctl enable "gui/$(id -u)/ai.litellm.relay.autoconfigure"
+
+  if install_desktop_daemon; then
+    echo "Registered root LaunchDaemon $DESKTOP_DAEMON_LABEL for Claude Desktop."
+  else
+    echo "warning: could not register the Claude Desktop auto-configure daemon (needs root)." >&2
+    echo "         Claude CLI and Codex still auto-configure; run install.sh with sudo to enable Claude Desktop." >&2
+  fi
 else
   launchctl bootout "gui/$(id -u)" "$AUTOCONFIGURE_PLIST" >/dev/null 2>&1 || true
   rm -f "$AUTOCONFIGURE_PLIST"
+  remove_desktop_daemon
 fi
 
 if [[ -n "$NETWORK_SERVICE" ]]; then
