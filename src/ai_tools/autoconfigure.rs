@@ -6,11 +6,14 @@
 
 use anyhow::Result;
 
-use crate::ai_tools::{
-    claude_cli::{onboard, OnboardParams},
-    claude_desktop::{onboard_desktop, OnboardDesktopParams},
-    codex::{onboard as onboard_codex, CodexOnboardParams},
-    detect::{detect_all, AiTool, DetectContext, Detection},
+use crate::{
+    ai_tools::{
+        claude_cli::{onboard, OnboardParams},
+        claude_desktop::{onboard_desktop, OnboardDesktopParams},
+        codex::{onboard as onboard_codex, CodexOnboardParams},
+        detect::{detect_all, AiTool, DetectContext, Detection},
+    },
+    config::load_settings,
 };
 
 /// Overrides forwarded to each tool's onboarder. Every field is optional; when
@@ -37,8 +40,27 @@ pub struct AutoConfigureParams {
 /// Detect installed tools and onboard each one, continuing past any single
 /// tool's failure so one misconfigured tool never blocks the rest. Returns an
 /// error only if every detected tool failed to configure.
-pub fn autoconfigure(params: AutoConfigureParams) -> Result<()> {
+pub fn autoconfigure(mut params: AutoConfigureParams) -> Result<()> {
+    apply_credential_fallback(&mut params)?;
     autoconfigure_with(&DetectContext::from_env(), params, &mut configure_tool)
+}
+
+/// When the caller supplies no explicit credential and no IdP authorize URL is
+/// configured, reuse the saved Gateway key so tools that accept a static
+/// credential (Codex, Claude Desktop) still get wired up on non-SSO setups. A
+/// configured IdP is always preferred and left untouched.
+fn apply_credential_fallback(params: &mut AutoConfigureParams) -> Result<()> {
+    if params.api_key.is_some() || params.env_key.is_some() || params.authorize_url.is_some() {
+        return Ok(());
+    }
+    let settings = load_settings()?;
+    if settings.idp.authorize_url.trim().is_empty() {
+        params.api_key = settings
+            .gateway
+            .api_key
+            .filter(|key| !key.trim().is_empty());
+    }
+    Ok(())
 }
 
 /// Result of attempting to configure one detected tool.

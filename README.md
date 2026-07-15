@@ -27,7 +27,11 @@ Gateway in a single pass — you never enumerate tools per machine.
 | Claude Desktop | `/Applications/Claude.app` or its app-support dir | `/etc/claude-desktop/managed-settings.json` |
 | Codex (CLI, VS Code, macOS app) | `codex` on `PATH`, `Codex.app`, the `openai.chatgpt` VS Code extension, or `~/.codex` | `~/.codex/config.toml` |
 
-Run it any time to pick up newly installed tools:
+Detection also runs on a schedule. The installer registers a
+`ai.litellm.relay.autoconfigure` LaunchAgent that re-runs `autoconfigure` at
+login and every `RELAY_AUTOCONFIGURE_INTERVAL` seconds (default 3600), so a tool
+installed *after* Relay gets wired to the Gateway automatically — no manual
+re-run. You can still run it on demand:
 
 ```bash
 relay autoconfigure

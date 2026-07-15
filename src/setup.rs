@@ -50,20 +50,10 @@ pub async fn run_setup(gateway_url: Option<String>, api_key: Option<String>) -> 
 
     println!();
     print_step(4, 4, "Configure installed AI tools");
-    // Prefer the corporate IdP when one is configured; otherwise fall back to
-    // the Gateway key we just saved so tools that support a static credential
-    // (Codex, Claude Desktop) still get wired up on non-SSO setups.
-    let static_fallback = settings
-        .idp
-        .authorize_url
-        .trim()
-        .is_empty()
-        .then(|| settings.gateway.api_key.clone())
-        .flatten();
-    if let Err(error) = autoconfigure(AutoConfigureParams {
-        api_key: static_fallback,
-        ..AutoConfigureParams::default()
-    }) {
+    // Detect and wire up every AI tool on this device. `autoconfigure` reads
+    // the config just saved and prefers the IdP, falling back to the Gateway
+    // key on non-SSO setups.
+    if let Err(error) = autoconfigure(AutoConfigureParams::default()) {
         eprintln!("  Skipping AI tool auto-configuration: {error:#}");
     }
     Ok(())

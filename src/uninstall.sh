@@ -87,6 +87,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.plist"
+AUTOCONFIGURE_PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.autoconfigure.plist"
 RELAY_BINARY="$RELAY_HOME/bin/litellm-relay"
 RELAY_RUNNER="$RELAY_HOME/bin/run-relay"
 CA_PATH="$RELAY_HOME/mitm/litellm-relay-ca.pem"
@@ -164,6 +165,8 @@ WARN
 
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 rm -f "$PLIST"
+launchctl bootout "gui/$(id -u)" "$AUTOCONFIGURE_PLIST" >/dev/null 2>&1 || true
+rm -f "$AUTOCONFIGURE_PLIST"
 
 if [[ -n "$NETWORK_SERVICE" ]]; then
   networksetup -setautoproxystate "$NETWORK_SERVICE" off
