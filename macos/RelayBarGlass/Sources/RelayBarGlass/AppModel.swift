@@ -105,6 +105,11 @@ final class AppModel: ObservableObject {
 
     init() {
         self.agents = AppModel.seedAgents()
+        // Drive polling from the model, not from a view modifier: the
+        // MenuBarExtra label's .onAppear does not fire under
+        // .menuBarExtraStyle(.window), which left the timer uncreated and the
+        // popover stuck on its seed values.
+        start()
     }
 
     // MARK: - Seed data
