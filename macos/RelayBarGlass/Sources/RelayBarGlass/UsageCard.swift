@@ -30,18 +30,18 @@ struct UsageCard: View {
 
             if !selected.routedViaRelay {
                 notRoutedState
+                if model.keyBudget > 0 { budgetSection }
             } else if hasNoData {
                 emptyState
+                if model.keyBudget > 0 { budgetSection }
             } else {
                 hero
+                // Budget sits directly under the big spend number.
+                if model.keyBudget > 0 { budgetSection }
                 chartSection
                 modelMix
                 insights
                 footer
-            }
-
-            if model.keyBudget > 0 {
-                budgetSection
             }
         }
         .padding(16)
