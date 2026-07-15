@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     ai_tools::{
-        onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
-        CodexOnboardParams, OnboardDesktopParams, OnboardParams,
+        autoconfigure, onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
+        AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
     cert::ensure_ca,
     config::RelayConfig,
@@ -36,6 +36,31 @@ enum CommandKind {
         gateway_url: Option<String>,
         #[arg(long)]
         api_key: Option<String>,
+    },
+    /// Detect the AI tools installed on this device and wire each one through
+    /// the Gateway in one pass. Run automatically after `relay setup`; also
+    /// usable standalone (e.g. from an MDM postinstall) with `--api-key` /
+    /// `--authorize-url` / OIDC overrides. Unset fields fall back to the saved
+    /// Relay config.
+    Autoconfigure {
+        #[arg(long)]
+        gateway_url: Option<String>,
+        #[arg(long)]
+        authorize_url: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        env_key: Option<String>,
+        #[arg(long)]
+        oidc_client_id: Option<String>,
+        #[arg(long)]
+        oidc_issuer: Option<String>,
+        #[arg(long)]
+        oidc_scopes: Option<String>,
+        #[arg(long)]
+        oidc_redirect_port: Option<u16>,
     },
     /// Wire Claude Code to route through the Gateway via IdP sign-in.
     Onboard {
@@ -128,6 +153,27 @@ async fn run_command(command: CommandKind) -> Result<()> {
             gateway_url,
             api_key,
         } => run_setup(gateway_url, api_key).await,
+        CommandKind::Autoconfigure {
+            gateway_url,
+            authorize_url,
+            team,
+            api_key,
+            env_key,
+            oidc_client_id,
+            oidc_issuer,
+            oidc_scopes,
+            oidc_redirect_port,
+        } => autoconfigure(AutoConfigureParams {
+            gateway_url,
+            authorize_url,
+            team,
+            api_key,
+            env_key,
+            oidc_client_id,
+            oidc_issuer,
+            oidc_scopes,
+            oidc_redirect_port,
+        }),
         CommandKind::Onboard {
             gateway_url,
             authorize_url,

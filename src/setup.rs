@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use anyhow::{anyhow, Result};
 
 use crate::{
+    ai_tools::{autoconfigure, AutoConfigureParams},
     auth::GatewaySsoClient,
     config::{load_settings, save_settings},
     terminal::{print_setup_complete, print_setup_intro, print_step},
@@ -13,7 +14,7 @@ pub async fn run_setup(gateway_url: Option<String>, api_key: Option<String>) -> 
 
     let mut settings = load_settings()?;
     let default_gateway_url = settings.gateway.url.clone();
-    print_step(1, 3, "Choose your LiteLLM Gateway");
+    print_step(1, 4, "Choose your LiteLLM Gateway");
     let gateway_url = match gateway_url {
         Some(gateway_url) => {
             println!("  Gateway URL: {}", gateway_url.trim_end_matches('/'));
@@ -23,7 +24,7 @@ pub async fn run_setup(gateway_url: Option<String>, api_key: Option<String>) -> 
     };
 
     println!();
-    print_step(2, 3, "Sign in");
+    print_step(2, 4, "Sign in");
     let (api_key, user_id, team_id) = match api_key {
         Some(api_key) => {
             println!("  Using API key from command line.");
@@ -41,11 +42,30 @@ pub async fn run_setup(gateway_url: Option<String>, api_key: Option<String>) -> 
     }
 
     println!();
-    print_step(3, 3, "Save local Relay config");
+    print_step(3, 4, "Save local Relay config");
     settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
     settings.gateway.api_key = Some(api_key.trim().to_string());
     let config_path = save_settings(&settings)?;
     print_setup_complete(&config_path, user_id.as_deref(), team_id.as_deref());
+
+    println!();
+    print_step(4, 4, "Configure installed AI tools");
+    // Prefer the corporate IdP when one is configured; otherwise fall back to
+    // the Gateway key we just saved so tools that support a static credential
+    // (Codex, Claude Desktop) still get wired up on non-SSO setups.
+    let static_fallback = settings
+        .idp
+        .authorize_url
+        .trim()
+        .is_empty()
+        .then(|| settings.gateway.api_key.clone())
+        .flatten();
+    if let Err(error) = autoconfigure(AutoConfigureParams {
+        api_key: static_fallback,
+        ..AutoConfigureParams::default()
+    }) {
+        eprintln!("  Skipping AI tool auto-configuration: {error:#}");
+    }
     Ok(())
 }
 

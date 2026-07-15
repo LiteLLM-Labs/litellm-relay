@@ -9,6 +9,7 @@ RELAY_ALLOW_UNPINNED_MAIN="${RELAY_ALLOW_UNPINNED_MAIN:-0}"
 RELAY_PREBUILT_BINARY="${RELAY_PREBUILT_BINARY:-}"
 RELAY_MANAGED_CONFIG="${RELAY_MANAGED_CONFIG:-}"
 RELAY_SKIP_SETUP="${RELAY_SKIP_SETUP:-0}"
+RELAY_AUTOCONFIGURE="${RELAY_AUTOCONFIGURE:-1}"
 RELAY_TRUST_CA="${RELAY_TRUST_CA:-1}"
 RELAY_PORT="4142"
 NETWORK_SERVICE=""
@@ -34,6 +35,7 @@ Options:
   --prebuilt-binary PATH          Install this prebuilt relay binary instead of building
   --config-file PATH              Seed ~/.litellm-relay/config.yaml from this managed file
   --skip-setup                    Skip the interactive gateway setup wizard (managed deploys)
+  --skip-autoconfigure            Do not auto-detect and wire installed AI tools to the Gateway
   --skip-trust-ca                 Install without adding the Relay CA to login keychain
   --background                    Configure Gateway auth and start the LaunchAgent
   --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
@@ -68,8 +70,22 @@ Environment:
   RELAY_PREBUILT_BINARY         Same as --prebuilt-binary
   RELAY_MANAGED_CONFIG          Same as --config-file
   RELAY_SKIP_SETUP=1            Same as --skip-setup
+  RELAY_AUTOCONFIGURE=0         Same as --skip-autoconfigure
   RELAY_TRUST_CA=0              Same as --skip-trust-ca
 USAGE
+}
+
+autoconfigure_ai_tools() {
+  if [[ "$RELAY_AUTOCONFIGURE" != "1" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$RELAY_HOME/config.yaml" ]]; then
+    return 0
+  fi
+  echo "Auto-configuring installed AI tools to route through the Gateway..."
+  "$RELAY_HOME/bin/litellm-relay" autoconfigure || {
+    echo "warning: AI tool auto-configuration did not complete." >&2
+  }
 }
 
 require_value() {
@@ -116,6 +132,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-setup)
       SKIP_SETUP=1
+      shift
+      ;;
+    --autoconfigure)
+      RELAY_AUTOCONFIGURE=1
+      shift
+      ;;
+    --skip-autoconfigure)
+      RELAY_AUTOCONFIGURE=0
       shift
       ;;
     --background)
@@ -395,6 +419,7 @@ WARN
 fi
 
 if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
+  autoconfigure_ai_tools
   cat <<DONE
 LiteLLM Relay installed.
 
@@ -430,6 +455,9 @@ warning: --skip-setup was set but $RELAY_HOME/config.yaml does not exist.
 Seed a managed config with --config-file so Relay can reach your Gateway.
 WARN
   fi
+  # `relay setup` runs auto-configuration itself; managed (skip-setup) deploys
+  # do not, so wire up detected AI tools here from the seeded config.
+  autoconfigure_ai_tools
 else
   SETUP_ARGS=()
   if [[ -n "$SETUP_GATEWAY_URL" ]]; then
