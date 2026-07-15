@@ -12,5 +12,5 @@ pub mod token;
 
 pub use autoconfigure::{autoconfigure, AutoConfigureParams};
 pub use claude_cli::{onboard, print_token, OnboardParams};
-pub use claude_desktop::{onboard_desktop, OnboardDesktopParams};
+pub use claude_desktop::{export_desktop_profile, onboard_desktop, OnboardDesktopParams};
 pub use codex::{onboard as onboard_codex, print_token as print_codex_token, CodexOnboardParams};

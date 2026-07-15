@@ -23,6 +23,7 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 | --- | --- | --- |
 | `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
+| Claude Desktop profile *(optional)* | Wires Claude Desktop to the Gateway fleet-wide via managed preferences | [`mdm/litellm-relay-claude-desktop.mobileconfig.example`](../mdm/litellm-relay-claude-desktop.mobileconfig.example) |
 | Managed `config.yaml` | Gateway URL, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
 
 The managed config can be baked into the `.pkg` at build time
@@ -113,6 +114,27 @@ PAC profile so macOS stops using Auto Proxy:
 ```bash
 /usr/local/litellm-relay/uninstall.sh --unset-system-proxy "Wi-Fi" --remove-data
 ```
+
+## Claude Desktop (managed preferences)
+
+Relay's installed root LaunchDaemon already writes the Claude Desktop managed
+preferences plist (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`)
+on each auto-configure pass, so a device that has Relay installed gets Claude
+Desktop wired with no extra profile. For fleets that prefer to push it through
+MDM directly (or to configure machines before Relay's first pass), deploy a
+Custom Settings profile instead:
+
+```bash
+relay export-claude-desktop-profile > litellm-relay-claude-desktop.mobileconfig
+```
+
+This prints a `com.apple.ManagedClient.preferences` profile (see
+[`mdm/litellm-relay-claude-desktop.mobileconfig.example`](../mdm/litellm-relay-claude-desktop.mobileconfig.example))
+that forces the inference keys into the same managed-preferences domain the app
+reads. Upload it as a **Custom Settings** / **Custom Profile** payload in Jamf,
+Intune, or Kandji, scoped to the same group as the PAC profile. On macOS the app
+honors inference config only from this managed-preferences source, so the Linux
+`/etc/claude-desktop/managed-settings.json` path and user defaults have no effect.
 
 ## Notes
 

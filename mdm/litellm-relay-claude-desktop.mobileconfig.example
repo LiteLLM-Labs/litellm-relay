@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadType</key>
+      <string>com.apple.ManagedClient.preferences</string>
+      <key>PayloadIdentifier</key>
+      <string>ai.litellm.relay.claude-desktop</string>
+      <key>PayloadUUID</key>
+      <string>5F1E9A00-0000-4000-8000-000000000001</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadEnabled</key>
+      <true/>
+      <key>PayloadContent</key>
+      <dict>
+        <key>com.anthropic.claudefordesktop</key>
+        <dict>
+          <key>Forced</key>
+          <array>
+            <dict>
+              <key>mcx_preference_settings</key>
+              <dict>
+                <key>inferenceProvider</key>
+                <string>gateway</string>
+                <key>inferenceGatewayBaseUrl</key>
+                <string>https://gateway.yourco.com</string>
+                <key>inferenceGatewayAuthScheme</key>
+                <string>bearer</string>
+                <key>inferenceCredentialKind</key>
+                <string>static</string>
+                <key>inferenceGatewayApiKey</key>
+                <string>sk-your-gateway-key</string>
+                <key>inferenceModels</key>
+                <array>
+                  <string>claude-sonnet-4-5</string>
+                </array>
+              </dict>
+            </dict>
+          </array>
+        </dict>
+      </dict>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key>
+  <string>LiteLLM Relay — Claude Desktop Gateway</string>
+  <key>PayloadIdentifier</key>
+  <string>ai.litellm.relay.claude-desktop</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>5F1E9A00-0000-4000-8000-000000000000</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>

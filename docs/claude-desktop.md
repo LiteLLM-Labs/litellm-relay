@@ -2,7 +2,11 @@
 
 Relay wires the Claude Desktop app (third-party gateway mode) onto your LiteLLM AI Gateway so it boots straight into gateway mode with no Claude.ai account and no key handling by the developer.
 
-`relay onboard-claude-desktop` writes the OS-native managed configuration Claude Desktop reads on launch — `/etc/claude-desktop/managed-settings.json` on Linux — pointing inference at the Gateway. The Gateway must implement the Anthropic Messages API (`POST /v1/messages`), which LiteLLM does.
+`relay onboard-claude-desktop` writes the OS-native managed configuration Claude Desktop reads on launch, pointing inference at the Gateway. The Gateway must implement the Anthropic Messages API (`POST /v1/messages`), which LiteLLM does.
+
+On **macOS**, the app honors inference config only from a *managed preferences* source (a deliberate security measure so malware can't silently redirect inference) — not user defaults and not the Linux `/etc` path. Relay writes it as a property list at `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` (keyed by the app's bundle id `com.anthropic.claudefordesktop`) and nudges `cfprefsd` so it takes effect on the next launch. On **Linux** the same keys go to the root-owned `/etc/claude-desktop/managed-settings.json`.
+
+For a managed fleet, prefer the MDM route: `relay export-claude-desktop-profile` prints a `.mobileconfig` (a `com.apple.ManagedClient.preferences` "Forced" payload) you push through Jamf/Intune/Kandji, which lands the same keys in `/Library/Managed Preferences/` fleet-wide with no per-device action. See [mdm.md](mdm.md).
 
 ## Single sign-on (recommended)
 
