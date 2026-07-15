@@ -35,6 +35,21 @@ impl AiTool {
             AiTool::Codex => "Codex (CLI, VS Code, macOS app)",
         }
     }
+
+    /// Stable machine-readable id used for the `--only` filter.
+    pub fn slug(self) -> &'static str {
+        match self {
+            AiTool::ClaudeCode => "claude-code",
+            AiTool::ClaudeDesktop => "claude-desktop",
+            AiTool::Codex => "codex",
+        }
+    }
+
+    /// Parse a tool from its [`slug`](Self::slug), case-insensitively.
+    pub fn from_slug(value: &str) -> Option<AiTool> {
+        let value = value.trim().to_ascii_lowercase();
+        ALL_TOOLS.into_iter().find(|tool| tool.slug() == value)
+    }
 }
 
 /// Filesystem/`PATH` view used to decide whether a tool is installed. Built
