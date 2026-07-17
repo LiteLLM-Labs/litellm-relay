@@ -69,15 +69,14 @@ pub fn print_setup_complete(config_path: &Path, user_id: Option<&str>, team_id: 
     );
 }
 
-pub fn print_usage_access_warning(denied_routes: &[&str], suggestion: &str) {
+pub fn print_usage_access_warning(denied_routes: &[&str]) {
     println!();
     println!(
-        "{}Heads up:{} this key can't read usage yet, so the RelayBar menu bar app will show empty tabs.",
+        "{}This key doesn't have access to usage,{} so the RelayBar menu bar app will show empty tabs.",
         color(YELLOW),
         color(RESET)
     );
-    println!("  Denied: {}", denied_routes.join(", "));
-    println!("  {suggestion}");
+    println!("  Missing access to: {}", denied_routes.join(", "));
 }
 
 pub fn print_runtime_panel(config: &RelayConfig) {
