@@ -74,6 +74,11 @@ final class AppModel: ObservableObject {
     @Published var keyAlias: String = ""
     @Published var lastError: String = ""
 
+    /// True once a spend fetch has succeeded at least once. Until then the card
+    /// shows a loading (or error) state instead of the seeded placeholder data,
+    /// so a failed fetch is never mistaken for a genuinely idle relay key.
+    @Published var didLoadOnce: Bool = false
+
     // MARK: - Per-key budget (from /key/info)
 
     @Published var keySpend: Double = 0       // info.spend
@@ -331,7 +336,8 @@ final class AppModel: ObservableObject {
                     self.apply(snap)
                 }
             } catch {
-                await MainActor.run { self?.lastError = "\(error)" }
+                let message = AppModel.userFacingError(error)
+                await MainActor.run { self?.lastError = message }
             }
         }
     }
@@ -357,6 +363,7 @@ final class AppModel: ObservableObject {
         costPerRequest = snap.costPerRequest
         costPerMTok = snap.costPerMTok
         lastError = ""
+        didLoadOnce = true
 
         let maxToolSpend = snap.toolMonthSpend.values.max() ?? 0
         for i in agents.indices {
@@ -631,10 +638,30 @@ final class AppModel: ObservableObject {
         case http(Int)
         var description: String {
             switch self {
-            case .missingConfig: return "gateway url or api_key missing from config.yaml"
-            case .http(let code): return "gateway returned HTTP \(code)"
+            case .missingConfig:
+                return "gateway url or api_key missing from config.yaml"
+            case .http(401), .http(403):
+                // /key/info and /user/daily/activity are info/management routes,
+                // not llm_api_routes, so a default virtual key can't read them.
+                return "This relay key can't read usage from the gateway. "
+                    + "Ask your admin to allow the /key/info and /user/daily/activity "
+                    + "routes on the key (allowed_routes)."
+            case .http(let code):
+                return "gateway returned HTTP \(code)"
             }
         }
+    }
+
+    /// Maps a thrown fetch error to a short, human-readable line for the card.
+    /// `SpendError` already carries actionable copy; `URLError` (no route to the
+    /// gateway, TLS, timeout) is collapsed to its localized description instead
+    /// of the noisy `Error Domain=…` interpolation.
+    nonisolated private static func userFacingError(_ error: Error) -> String {
+        if let spend = error as? SpendError { return spend.description }
+        if let urlError = error as? URLError {
+            return "Can't reach the gateway: \(urlError.localizedDescription)"
+        }
+        return error.localizedDescription
     }
 
     /// Fetches `/key/info` + `/user/daily/activity` and reduces them into a
