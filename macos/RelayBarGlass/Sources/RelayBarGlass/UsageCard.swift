@@ -28,7 +28,11 @@ struct UsageCard: View {
         VStack(alignment: .leading, spacing: 16) {
             header
 
-            if !selected.routedViaRelay {
+            if !model.didLoadOnce && model.lastError.isEmpty {
+                loadingState
+            } else if !model.didLoadOnce {
+                errorState
+            } else if !selected.routedViaRelay {
                 notRoutedState
             } else if hasNoData {
                 emptyState
@@ -87,6 +91,42 @@ struct UsageCard: View {
             .font(.system(size: 10, weight: .semibold))
             .tracking(0.9)
             .foregroundColor(Color.white.opacity(0.40))
+    }
+
+    // MARK: - Loading state
+
+    /// Shown before the first spend fetch completes, so the card isn't stuck on
+    /// seeded placeholder chrome that looks like a genuinely idle key.
+    private var loadingState: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading usage…")
+                .font(GlassTheme.body)
+                .foregroundColor(GlassTheme.muted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Error state
+
+    /// Shown when the first spend fetch fails (bad config, unreachable gateway,
+    /// or — most commonly — a key that lacks the info/management routes). The
+    /// old UI swallowed these and rendered an empty card indistinguishable from
+    /// an idle key, which is exactly what made it "look empty for no reason".
+    private var errorState: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Can't load usage")
+                .font(GlassTheme.body)
+                .foregroundColor(GlassTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(model.lastError)
+                .font(GlassTheme.caption)
+                .foregroundColor(GlassTheme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Empty state

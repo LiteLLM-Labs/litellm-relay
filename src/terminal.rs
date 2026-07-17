@@ -69,6 +69,17 @@ pub fn print_setup_complete(config_path: &Path, user_id: Option<&str>, team_id: 
     );
 }
 
+pub fn print_usage_access_warning(denied_routes: &[&str], suggestion: &str) {
+    println!();
+    println!(
+        "{}Heads up:{} this key can't read usage yet, so the RelayBar menu bar app will show empty tabs.",
+        color(YELLOW),
+        color(RESET)
+    );
+    println!("  Denied: {}", denied_routes.join(", "));
+    println!("  {suggestion}");
+}
+
 pub fn print_runtime_panel(config: &RelayConfig) {
     print_banner();
     println!("{}Relay is running{}", color(BOLD), color(RESET));
