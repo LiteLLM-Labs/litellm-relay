@@ -9,7 +9,6 @@ struct RelayBarGlassApp: App {
             PopoverView(model: model)
         } label: {
             Text("✨🚅")
-                .onAppear { model.start() }
         }
         .menuBarExtraStyle(.window)
     }

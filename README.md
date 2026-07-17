@@ -67,6 +67,8 @@ Relay also ships an optional **macOS menu bar app** so each developer can see **
 
 Each tool (Claude Code, Codex CLI, Cursor, Gemini, …) gets its own tab with its own color. Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`).
 
+The menu bar app reads usage over two Gateway routes: `/key/info` and `/user/daily/activity`. These are info/management routes, not `llm_api_routes`, so a default virtual key can't call them and the Gateway returns 403. Give the relay key access to both routes (for example `allowed_routes: ["llm_api_routes", "info_routes", "management_routes"]` on the key, or a scoped equivalent) or the tabs stay empty. `relay setup` probes both routes right after sign-in and prints a warning with the fix if the key can't read usage, so an under-scoped key is caught before the tabs ever look empty; RelayBar also surfaces the 403 (and any bad-config / unreachable-gateway error) in the card instead of showing a blank tab, so if a tab is empty read the message it prints. Also make sure `~/.litellm-relay/config.yaml` points `gateway.url` and `gateway.api_key` at your real Gateway; `gateway.url` defaults to `http://127.0.0.1:4000` and `gateway.api_key` is unset, which yields an empty app when the Gateway lives elsewhere or the key is missing.
+
 ## AI Tool Guides
 
 Relay onboards each AI coding tool onto the LiteLLM AI Gateway with zero developer setup — the developer just launches the tool. Pick your tool for the step-by-step guide:
