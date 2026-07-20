@@ -151,12 +151,14 @@ fn managed_settings_path() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        return PathBuf::from(env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into()))
+        PathBuf::from(env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into()))
             .join("ClaudeDesktop")
-            .join("managed-settings.json");
+            .join("managed-settings.json")
     }
     #[cfg(not(windows))]
-    PathBuf::from("/etc/claude-desktop/managed-settings.json")
+    {
+        PathBuf::from("/etc/claude-desktop/managed-settings.json")
+    }
 }
 
 fn write_managed_settings(document: &Map<String, Value>) -> Result<PathBuf> {
