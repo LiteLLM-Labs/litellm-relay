@@ -128,6 +128,20 @@ The installer builds the `relay` command, adds it to your `PATH`, and trusts
 the local Relay CA so AI app payloads can be captured. Pass `--skip-trust-ca`
 to install without trusting the CA.
 
+### Homebrew
+
+```bash
+brew install relay
+```
+
+The [`Formula/relay.rb`](Formula/relay.rb) formula builds Relay from source (so
+Homebrew installs Rust as a build dependency) and installs the `relay` command.
+
+Unlike `install.sh`, Homebrew installs only the binary — it does **not** trust
+the Relay CA, start the background service, or change your system proxy. Run
+`relay` to finish setup, and see the caveats printed after install (or
+`brew info relay`) for the CA-trust command.
+
 Then open a new terminal and run:
 
 ```bash
