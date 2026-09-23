@@ -53,7 +53,7 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
     }
     if let Some(api_key) = params.api_key {
-        settings.gateway.api_key = Some(api_key);
+        settings.gateway.enroll_if_changed(api_key);
     }
     if let Some(model) = params.model {
         settings.claude.model = model;
@@ -1013,6 +1013,53 @@ mod tests {
                 .as_ref()
                 .map(|sso| sso.client_id.as_str()),
             Some("client-1")
+        );
+
+        restore_env("HOME", old_home);
+        restore_env(MANAGED_SETTINGS_PATH_ENV, old_override);
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(managed.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn should_keep_the_setup_enrollment_timestamps_on_an_unattended_rerun() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = scratch_dir("keep-expiry-home");
+        let managed = scratch_dir("keep-expiry").join("managed.plist");
+        let old_home = env::var_os("HOME");
+        let old_override = env::var_os(MANAGED_SETTINGS_PATH_ENV);
+        env::set_var("HOME", &home);
+        env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
+        let enrolled_at = chrono::DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let expires_at = chrono::DateTime::parse_from_rfc3339("2026-09-23T21:27:58Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut enrolled = settings_with("https://gw.corp", Some("sk-saved"), "claude-sonnet-4-5");
+        enrolled.gateway.enrolled_at = Some(enrolled_at);
+        enrolled.gateway.expires_at = Some(expires_at);
+        save_settings(&enrolled).unwrap();
+
+        onboard_desktop(OnboardDesktopParams {
+            api_key: Some("sk-saved".into()),
+            reuse_saved_sso: true,
+            quiet: true,
+            ..OnboardDesktopParams::default()
+        })
+        .unwrap();
+
+        let saved = load_settings().unwrap();
+        assert_eq!(saved.gateway.api_key.as_deref(), Some("sk-saved"));
+        assert_eq!(
+            saved.gateway.enrolled_at,
+            Some(enrolled_at),
+            "handing the saved key back must not move the enrollment stamp"
+        );
+        assert_eq!(
+            saved.gateway.expires_at,
+            Some(expires_at),
+            "handing the saved key back must keep the expiry setup recorded"
         );
 
         restore_env("HOME", old_home);

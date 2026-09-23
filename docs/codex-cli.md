@@ -73,6 +73,12 @@ The `auth` hook is the default and keeps no key on the device. Codex treats `aut
   relay onboard-codex --gateway-url https://gateway.yourco.com --api-key sk-...
   ```
 
+A static key that `autoconfigure` writes, whether passed with `--api-key` or
+saved by `litellm-relay setup`, is verified against the Gateway before each
+write. The session credential that `setup` stores expires, so a key the Gateway
+rejects aborts the run with `Run litellm-relay setup to sign in again` rather
+than landing in `config.toml` as `experimental_bearer_token`
+
 ## Usage
 
 The developer only runs `codex`. It answers through the Gateway — here it returns a deterministic phrase, and the request lands on the Gateway's Responses API:

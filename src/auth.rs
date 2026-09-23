@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,12 +16,14 @@ const CLI_SOURCE: &str = "litellm-cli";
 const CLI_POLL_SECRET_HEADER: &str = "x-litellm-cli-poll-secret";
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const PYTHON_DATETIME_FORMATS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.f%:z", "%Y-%m-%d %H:%M:%S%.f%z"];
 
 #[derive(Debug)]
 pub struct GatewayAuth {
     pub api_key: String,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 pub struct GatewaySsoClient {
@@ -173,6 +176,7 @@ struct PollResponse {
     key: Option<String>,
     user_id: Option<String>,
     team_id: Option<String>,
+    expires: Option<Value>,
     teams: Option<Vec<Value>>,
     team_details: Option<Vec<TeamDetail>>,
     requires_team_selection: Option<bool>,
@@ -201,7 +205,21 @@ fn auth_from_poll_result(poll_response: PollResponse) -> Result<GatewayAuth> {
         api_key,
         user_id: poll_response.user_id,
         team_id: poll_response.team_id,
+        expires_at: poll_response.expires.as_ref().and_then(parse_expiry),
     })
+}
+
+/// Credential expiry as the Gateway reports it, RFC 3339 or Python `str(datetime)` text.
+fn parse_expiry(value: &Value) -> Option<DateTime<Utc>> {
+    let text = value.as_str()?.trim();
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .or_else(|| {
+            PYTHON_DATETIME_FORMATS
+                .iter()
+                .find_map(|format| DateTime::parse_from_str(text, format).ok())
+        })
+        .map(|parsed| parsed.with_timezone(&Utc))
 }
 
 fn normalize_gateway_url(gateway_url: &str) -> Result<String> {
@@ -343,6 +361,49 @@ mod tests {
         assert_eq!(
             normalize_gateway_url("gateway.example.com/").unwrap(),
             "https://gateway.example.com"
+        );
+    }
+
+    #[test]
+    fn should_parse_rfc3339_expiry() {
+        let expiry = parse_expiry(&Value::String("2026-09-21T22:27:58.096Z".into())).unwrap();
+        assert_eq!(expiry.to_rfc3339(), "2026-09-21T22:27:58.096+00:00");
+    }
+
+    #[test]
+    fn should_parse_python_datetime_expiry() {
+        let expiry =
+            parse_expiry(&Value::String("2026-09-21 22:27:58.096000+00:00".into())).unwrap();
+        assert_eq!(expiry.to_rfc3339(), "2026-09-21T22:27:58.096+00:00");
+
+        let offset = parse_expiry(&Value::String("2026-09-22 00:27:58+02:00".into())).unwrap();
+        assert_eq!(offset.to_rfc3339(), "2026-09-21T22:27:58+00:00");
+    }
+
+    #[test]
+    fn should_treat_missing_or_unparseable_expiry_as_unknown() {
+        assert_eq!(parse_expiry(&Value::Null), None);
+        assert_eq!(parse_expiry(&Value::String("never".into())), None);
+        assert_eq!(parse_expiry(&serde_json::json!(1_790_000_000)), None);
+
+        let poll_response: PollResponse =
+            serde_json::from_str(r#"{"status":"ready","key":"sk-test"}"#).unwrap();
+        assert_eq!(
+            auth_from_poll_result(poll_response).unwrap().expires_at,
+            None
+        );
+    }
+
+    #[test]
+    fn should_carry_expiry_from_poll_response_into_auth() {
+        let poll_response: PollResponse = serde_json::from_str(
+            r#"{"status":"ready","key":"sk-test","expires":"2026-09-21 22:27:58.096000+00:00"}"#,
+        )
+        .unwrap();
+        let auth = auth_from_poll_result(poll_response).unwrap();
+        assert_eq!(
+            auth.expires_at.map(|at| at.to_rfc3339()),
+            Some("2026-09-21T22:27:58.096+00:00".to_string())
         );
     }
 

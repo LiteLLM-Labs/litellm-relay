@@ -189,6 +189,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
                 },
                 &only,
             )
+            .await
         }
         CommandKind::Onboard {
             gateway_url,

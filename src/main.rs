@@ -4,6 +4,7 @@ mod apps;
 mod auth;
 mod cert;
 mod config;
+mod credential;
 mod events;
 mod gateway;
 mod http;

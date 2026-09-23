@@ -122,4 +122,17 @@ profile.
 
 Using `--api-key` (or `gateway.api_key` in the managed config) writes a static
 Gateway key to every device. Prefer per-user browser SSO where your Gateway
-supports it.
+supports it. The credential check also runs when `--api-key` is combined with
+`--authorize-url`, since Codex and Claude Code prefer the explicit key over the
+IdP.
+
+The per-user LaunchAgent re-runs `autoconfigure` at login and on its interval.
+Each run checks the stored Gateway credential first. If the Gateway rejects it,
+the run leaves the Codex, Claude Code, and Claude Desktop configs untouched and
+exits non-zero, so an expired SSO session shows up in the LaunchAgent's exit
+status and in the `credential` block of `/api/status` instead of being rewritten
+into the tools every hour. The check also covers the saved key Claude Desktop
+falls back to when it is not given OIDC flags, so an IdP setup cannot copy a
+rejected key into the desktop app. `/api/status` reflects the credential
+currently saved in `config.yaml`, so re-running `litellm-relay setup` updates
+the dashboard without restarting Relay
