@@ -167,7 +167,10 @@ impl RelayProxy {
         }
 
         if method == "GET" && route.path == "/api/status" {
-            return self.write_json(&mut stream, self.status_payload()?).await;
+            let credential = self.gateway.credential_status().await.to_json();
+            return self
+                .write_json(&mut stream, self.status_payload(credential)?)
+                .await;
         }
 
         if method == "GET" && route.path == "/api/events" {
@@ -611,7 +614,7 @@ impl RelayProxy {
         write_response(stream, 200, "application/json; charset=utf-8", &body, true).await
     }
 
-    fn status_payload(&self) -> Result<Value> {
+    fn status_payload(&self, credential: Value) -> Result<Value> {
         let ca_path = if self.config.mitm_enabled {
             Some(
                 ensure_ca(&self.config.mitm_ca_dir)?
@@ -642,6 +645,7 @@ impl RelayProxy {
                 "confidences": ["high", "medium", "none"],
             },
             "runtime": "rust",
+            "credential": credential,
         }))
     }
 
@@ -743,4 +747,49 @@ fn event_with_attribution(mut event: Value, attribution: &AppAttribution) -> Val
         }
     }
     event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RelaySettings;
+
+    #[test]
+    fn should_add_credential_to_status_payload_and_keep_every_existing_key() {
+        let mut config = RelaySettings::default().to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let proxy = RelayProxy::new(config);
+
+        let payload = proxy
+            .status_payload(json!({"state": "rejected"}))
+            .expect("status payload should build");
+        let mut keys: Vec<&str> = payload
+            .as_object()
+            .expect("status payload should be an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+
+        assert_eq!(
+            keys,
+            [
+                "ai_domains",
+                "attribution",
+                "capture_payloads",
+                "credential",
+                "events_loaded",
+                "gateway_url",
+                "known_apps",
+                "listen",
+                "log_path",
+                "mitm_ca_path",
+                "notion_domains",
+                "runtime",
+                "shadow_enabled",
+            ]
+        );
+        assert_eq!(payload["credential"], json!({"state": "rejected"}));
+    }
 }

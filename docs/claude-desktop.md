@@ -2,7 +2,7 @@
 
 Relay wires the Claude Desktop app (third-party gateway mode) onto your LiteLLM AI Gateway so it boots straight into gateway mode with no Claude.ai account and no key handling by the developer.
 
-`relay onboard-claude-desktop` writes the OS-native managed configuration Claude Desktop reads on launch — `/etc/claude-desktop/managed-settings.json` on Linux — pointing inference at the Gateway. The Gateway must implement the Anthropic Messages API (`POST /v1/messages`), which LiteLLM does.
+`relay onboard-claude-desktop` writes the OS-native managed configuration Claude Desktop reads on launch, pointing inference at the Gateway: on macOS the `com.anthropic.claudefordesktop` managed preferences domain (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`), on Linux `/etc/claude-desktop/managed-settings.json`. The Gateway must implement the Anthropic Messages API (`POST /v1/messages`), which LiteLLM does.
 
 ## Single sign-on (recommended)
 
@@ -25,11 +25,15 @@ sudo relay onboard-claude-desktop \
   --api-key sk-your-gateway-key
 ```
 
-The managed file must be root-owned (Claude Desktop ignores a user-writable one), so run the command with `sudo`. Restart Claude Desktop to pick up the configuration. Because the managed settings are OS-native, this is the surface you push through your MDM — see [mdm.md](mdm.md).
+The managed location is root-owned and Claude Desktop ignores a user-writable copy, so run the command with `sudo`. Run it as the account that installed Relay and with plain `sudo`, not `sudo -H` or a different admin account: the saved Gateway key and SSO settings live in that account's `~/.litellm-relay/config.yaml`, which is the config the daemon loads, and a config saved under another home never reaches the daemon. Relay reads the file back after writing and fails instead of reporting success when Claude Desktop could not pick it up, including when a per-user managed plist (`/Library/Managed Preferences/<account>/com.anthropic.claudefordesktop.plist`, which the app reads over the host-level one) already sets the inference keys. On macOS it also deletes the `/etc/claude-desktop/managed-settings.json` that earlier Relay versions wrote there, a file the macOS app never reads. Restart Claude Desktop to pick up the managed configuration. On an MDM-enrolled Mac a managed-preferences refresh (login, a profile push) regenerates `/Library/Managed Preferences` from the installed profiles and drops the plist; the root LaunchDaemon `install.sh` registers (`ai.litellm.relay.autoconfigure-desktop`) watches that directory and writes the plist back within seconds, so keep it installed on a managed fleet. The OIDC settings from `onboard-claude-desktop --oidc-*` are saved in the Relay config, so the daemon's reruns keep single sign-on, and a later `onboard-claude-desktop --api-key` switches the device back to a static key, as does `relay autoconfigure --api-key`, while the daemon's `autoconfigure --only claude-desktop` runs without a key flag and keeps the saved single sign-on. That daemon owns the host-level plist as a whole document: a configuration profile that also manages `com.anthropic.claudefordesktop` at the computer level, even one that only adds a key such as `disableDeploymentModeChooser`, gets overwritten a few seconds after every refresh. Deliver extra keys through a user-scoped profile (`/Library/Managed Preferences/<account>/com.anthropic.claudefordesktop.plist`) that leaves the inference keys alone, and do not ship a computer-level profile for this domain alongside Relay. `uninstall.sh` removes the plist whenever it points at a gateway, including a profile-delivered one for another gateway, and leaves a plist for anything else alone. Because the managed settings are OS-native, this is the surface you push through your MDM, see [mdm.md](mdm.md).
+
+A static key is stored in that file in clear, readable by every local account like any managed preference (the app reads it as the developer). Keep static keys to proofs of concept and use SSO for a rollout.
 
 ## Usage
 
 The developer only launches Claude Desktop. It opens on the gateway welcome screen ("Your organization has set up Claude to run through a custom inference gateway. No Claude.ai account needed.") and answers through the Gateway.
+
+That welcome screen also offers "Or sign in with Claude.ai", and the app remembers that choice: a developer who picked it once keeps booting on Claude.ai even though the managed configuration is in place, until they quit the app and delete the `deploymentMode` key from `~/Library/Application Support/Claude-3p/claude_desktop_config.json`, or a user-scoped MDM profile sets `disableDeploymentModeChooser` to true, which hides the option.
 
 ![Claude Desktop gateway welcome screen](img/claude-desktop-welcome.png)
 

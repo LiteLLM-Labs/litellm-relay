@@ -197,9 +197,11 @@ async fn run_command(command: CommandKind) -> Result<()> {
                     api_key,
                     env_key,
                     idp: oidc.into(),
+                    explicit_api_key: false,
                 },
                 &only,
             )
+            .await
         }
         CommandKind::Onboard {
             gateway_url,
@@ -232,6 +234,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
             oidc_scopes,
             oidc_redirect_port,
             quiet: false,
+            reuse_saved_sso: false,
         }),
         CommandKind::ClaudeToken => print_token(),
         CommandKind::OnboardCodex {

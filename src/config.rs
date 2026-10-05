@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
@@ -16,6 +17,8 @@ pub struct RelayConfig {
     pub shadow_enabled: bool,
     pub gateway_url: String,
     pub gateway_api_key: Option<String>,
+    pub gateway_enrolled_at: Option<DateTime<Utc>>,
+    pub gateway_expires_at: Option<DateTime<Utc>>,
     pub shadow_model: String,
     pub shadow_min_interval_seconds: u64,
     pub request_timeout_seconds: f64,
@@ -60,6 +63,8 @@ impl RelaySettings {
                 .api_key
                 .clone()
                 .filter(|value| !value.is_empty()),
+            gateway_enrolled_at: self.gateway.enrolled_at,
+            gateway_expires_at: self.gateway.expires_at,
             shadow_model: self.shadow.model.clone(),
             shadow_min_interval_seconds: self.shadow.min_interval_seconds,
             request_timeout_seconds: self.timeouts.request_seconds,
@@ -98,6 +103,10 @@ pub struct GatewaySection {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrolled_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl Default for GatewaySection {
@@ -105,7 +114,24 @@ impl Default for GatewaySection {
         Self {
             url: "http://127.0.0.1:4000".into(),
             api_key: None,
+            enrolled_at: None,
+            expires_at: None,
         }
+    }
+}
+
+impl GatewaySection {
+    pub fn enroll(&mut self, api_key: String, expires_at: Option<DateTime<Utc>>) {
+        self.api_key = Some(api_key);
+        self.enrolled_at = Some(Utc::now());
+        self.expires_at = expires_at;
+    }
+
+    pub fn enroll_if_changed(&mut self, api_key: String) {
+        if self.api_key.as_deref() == Some(api_key.as_str()) {
+            return;
+        }
+        self.enroll(api_key, None);
     }
 }
 
@@ -226,6 +252,8 @@ pub struct ClaudeSection {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_sso: Option<DesktopSso>,
 }
 
 impl Default for ClaudeSection {
@@ -233,8 +261,21 @@ impl Default for ClaudeSection {
         Self {
             model: "claude-sonnet-4-5".into(),
             team: None,
+            desktop_sso: None,
         }
     }
+}
+
+/// OIDC settings Claude Desktop was enrolled with, kept so unattended
+/// autoconfigure reruns can rebuild the same single sign-on document.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct DesktopSso {
+    pub client_id: String,
+    pub issuer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -441,6 +482,105 @@ capture:
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.shadow_model, "gpt-4o-mini");
         assert!(!config.ai_domains.is_empty());
+    }
+
+    #[test]
+    fn should_load_gateway_section_without_credential_timestamps() {
+        let settings: RelaySettings = serde_yaml::from_str(
+            r#"
+gateway:
+  url: https://gateway.example.com
+  api_key: sk-test
+"#,
+        )
+        .expect("settings yaml should parse");
+
+        assert_eq!(settings.gateway.enrolled_at, None);
+        assert_eq!(settings.gateway.expires_at, None);
+        let config = settings.to_config();
+        assert_eq!(config.gateway_enrolled_at, None);
+        assert_eq!(config.gateway_expires_at, None);
+    }
+
+    #[test]
+    fn should_round_trip_credential_timestamps() {
+        let enrolled_at = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T21:27:58.096Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let settings = RelaySettings {
+            gateway: GatewaySection {
+                url: "https://gateway.example.com".into(),
+                api_key: Some("sk-test".into()),
+                enrolled_at: Some(enrolled_at),
+                expires_at: Some(expires_at),
+            },
+            ..RelaySettings::default()
+        };
+
+        let yaml = serde_yaml::to_string(&settings).unwrap();
+        let reloaded: RelaySettings = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(reloaded.gateway.enrolled_at, Some(enrolled_at));
+        assert_eq!(reloaded.gateway.expires_at, Some(expires_at));
+        assert_eq!(reloaded.to_config().gateway_expires_at, Some(expires_at));
+    }
+
+    #[test]
+    fn should_stamp_enrollment_when_a_new_key_replaces_the_saved_one() {
+        let stale = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut gateway = GatewaySection {
+            api_key: Some("sk-old".into()),
+            enrolled_at: Some(stale),
+            expires_at: Some(stale),
+            ..GatewaySection::default()
+        };
+        let before = Utc::now();
+
+        gateway.enroll("sk-new".into(), None);
+
+        assert_eq!(gateway.api_key.as_deref(), Some("sk-new"));
+        assert!(gateway.enrolled_at.is_some_and(|at| at >= before));
+        assert_eq!(gateway.expires_at, None);
+    }
+
+    #[test]
+    fn should_keep_enrollment_timestamps_when_the_saved_key_is_handed_back() {
+        let enrolled_at = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut gateway = GatewaySection {
+            api_key: Some("sk-saved".into()),
+            enrolled_at: Some(enrolled_at),
+            expires_at: Some(expires_at),
+            ..GatewaySection::default()
+        };
+
+        gateway.enroll_if_changed("sk-saved".into());
+
+        assert_eq!(gateway.enrolled_at, Some(enrolled_at));
+        assert_eq!(gateway.expires_at, Some(expires_at));
+
+        gateway.enroll_if_changed("sk-new".into());
+
+        assert_eq!(gateway.api_key.as_deref(), Some("sk-new"));
+        assert!(gateway.enrolled_at.is_some_and(|at| at > enrolled_at));
+        assert_eq!(gateway.expires_at, None);
+    }
+
+    #[test]
+    fn should_omit_unset_credential_timestamps_from_yaml() {
+        let yaml = serde_yaml::to_string(&RelaySettings::default()).unwrap();
+
+        assert!(!yaml.contains("enrolled_at"), "{yaml}");
+        assert!(!yaml.contains("expires_at"), "{yaml}");
     }
 
     #[test]

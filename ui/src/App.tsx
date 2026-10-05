@@ -49,6 +49,17 @@ type RelayStatus = {
   gateway_url?: string
   events_loaded?: number
   runtime?: string
+  credential?: RelayCredential
+}
+
+type RelayCredential = {
+  configured?: boolean
+  state?: string
+  detail?: string | null
+  checked_at?: string | null
+  enrolled_at?: string | null
+  expires_at?: string | null
+  expiry?: string
 }
 
 type RelayEvent = Record<string, unknown>
@@ -365,6 +376,7 @@ function App() {
                 <StatusLine label="Log path" value={status?.log_path} onCopy={() => copyText("log path", status?.log_path)} />
                 <StatusLine label="CA path" value={status?.mitm_ca_path ?? "payload capture disabled"} onCopy={() => copyText("CA path", status?.mitm_ca_path)} />
                 <StatusLine label="PAC URL" value={`${window.location.origin}/proxy.pac`} onCopy={() => copyText("PAC URL", `${window.location.origin}/proxy.pac`)} />
+                <CredentialLine credential={status?.credential} />
                 {copyState ? <p className="text-xs text-muted-foreground">Copied {copyState}</p> : null}
               </CardContent>
             </Card>
@@ -506,6 +518,43 @@ function StatusLine({
           <Clipboard className="size-4" />
         </Button>
       </div>
+    </div>
+  )
+}
+
+function CredentialLine({ credential }: { credential?: RelayCredential }) {
+  const state = credential?.state
+  const expiresAt = credential?.expires_at ? formatDateTime(credential.expires_at) : null
+  const summary =
+    state === "valid"
+      ? expiresAt
+        ? `valid, expires ${expiresAt}`
+        : "valid"
+      : state === "restricted"
+        ? "restricted"
+        : state === "rejected"
+          ? "rejected"
+          : state === "unverifiable"
+            ? "unverifiable"
+            : state === "missing"
+              ? "not configured"
+              : "-"
+  const tone =
+    state === "rejected"
+      ? "text-destructive"
+      : state === "restricted" || state === "unverifiable" || credential?.expiry === "expiring_soon"
+        ? "text-amber-600 dark:text-amber-400"
+        : state === "missing"
+          ? "text-muted-foreground"
+          : ""
+  const detail =
+    state === "restricted" || state === "rejected" || state === "unverifiable" ? credential?.detail : null
+  return (
+    <div className="grid gap-1">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">Gateway credential</div>
+      <div className={`text-sm ${tone}`}>{summary}</div>
+      {detail ? <div className={`text-xs ${tone}`}>{detail}</div> : null}
+      {state === "rejected" ? <div className="text-xs text-destructive">Run litellm-relay setup to sign in again</div> : null}
     </div>
   )
 }
@@ -692,13 +741,21 @@ function formatEventDateTime(event: RelayEvent) {
   if (!timestamp) {
     return "-"
   }
+  return formatDateTime(timestamp)
+}
+
+function formatDateTime(value: number | string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return "-"
+  }
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(timestamp))
+  }).format(date)
 }
 
 function asText(value: unknown) {
