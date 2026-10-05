@@ -475,8 +475,8 @@ fn save_store(store: &CredentialStore) -> Result<()> {
     write_private(&store_path(), &serde_json::to_string(store)?)
 }
 
-// Renewals spend a single-use refresh token, so concurrent token hooks take
-// turns: the loser re-reads the cache and finds the winner's credential.
+// Concurrent token hooks take turns so one renewal serves all of them: the
+// loser re-reads the cache and finds the winner's credential.
 fn lock_store() -> Result<fs::File> {
     lock_private(&relay_home().join(LOCK_FILE))
 }
