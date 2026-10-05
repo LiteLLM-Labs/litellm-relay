@@ -8,7 +8,7 @@ Codex reads `~/.codex/config.toml`. Relay defines a custom OpenAI-compatible pro
 
 ## Step 1: Enable JWT auth on the Gateway (admin, once)
 
-Same as [Claude Code](claude-code.md#gateway-configuration) — turn on JWT auth with `auto_register` so each SSO identity maps to its own virtual key and limits.
+Same as [Claude Code](claude-code.md#gateway-configuration) — turn on JWT auth so the Gateway exchanges each SSO identity for its own Gateway credential, attributed to the developer and their team.
 
 ```yaml
 general_settings:
@@ -16,13 +16,12 @@ general_settings:
   litellm_jwtauth:
     user_id_jwt_field: "sub"
     user_id_upsert: True
+    fallback_to_db_teams: True
     # team_id_jwt_field: "team_id"  # only when your IdP puts a team_id claim in the ID token
     # team_id_upsert: True
-    virtual_key_claim_field: "email"
-    unregistered_jwt_client_behavior: "auto_register"
 ```
 
-Leave the `team_id_*` lines out unless your IdP issues a `team_id` claim; the Gateway rejects tokens that lack a configured team claim (see [Claude Code](claude-code.md#gateway-configuration)).
+Leave the `team_id_*` lines out unless your IdP issues a `team_id` claim; the Gateway rejects tokens that lack a configured team claim. The `--team` below must be a team the Gateway grants the signed-in developer, through that claim or through their team membership on the Gateway under `fallback_to_db_teams`, or the exchange is refused (see [Claude Code](claude-code.md#gateway-configuration) for the error and the fix).
 
 ## Step 2: Run `relay onboard-codex` on the device
 

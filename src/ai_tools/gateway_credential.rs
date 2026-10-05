@@ -41,7 +41,7 @@ const CREDENTIAL_REFRESH_SKEW_SECONDS: i64 = 600;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Renewal {
     NearExpiry,
-    EveryRun,
+    HalfLife,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +204,8 @@ struct CachedCredential {
     refresh_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<i64>,
+    #[serde(default)]
+    issued_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,10 +219,12 @@ impl CachedCredential {
 
     fn is_fresh(&self, now: i64, renewal: Renewal) -> bool {
         match renewal {
-            Renewal::EveryRun => false,
             Renewal::NearExpiry => self
                 .expires_at
                 .is_none_or(|expires_at| expires_at > now + CREDENTIAL_REFRESH_SKEW_SECONDS),
+            Renewal::HalfLife => self
+                .expires_at
+                .is_none_or(|expires_at| expires_at - now > (expires_at - self.issued_at) / 2),
         }
     }
 
@@ -241,6 +245,7 @@ impl CachedCredential {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expires_at: tokens.expires_in.map(|ttl| now + ttl),
+            issued_at: now,
             user_id: tokens.user_id,
             team_id: tokens.team_id,
         }
@@ -408,7 +413,7 @@ fn attempt_exchange(
         TokenReply::Refused { status, error } => bail!(
             "the gateway refused the token exchange ({}){}",
             refusal_summary(status, &error),
-            team_hint(team)
+            team_hint(team, &error.error)
         ),
     }
 }
@@ -420,13 +425,18 @@ fn refusal_summary(status: u16, error: &OAuthError) -> String {
     format!("HTTP {status} {}: {}", error.error, error.error_description)
 }
 
-fn team_hint(team: Option<&str>) -> &'static str {
+fn team_hint(team: Option<&str>, refusal: &str) -> String {
+    if refusal != "invalid_request" && refusal != "invalid_grant" {
+        return String::new();
+    }
     match team {
-        Some(_) => "",
-        None => {
-            "; no team is set for this tool, so if you belong to a team on this gateway, \
-             onboard the tool again with `--team <team>`"
-        }
+        Some(team) => format!(
+            "; this tool is set to team `{team}`, so if the gateway does not accept that team \
+             for your sign-in, onboard the tool again with a `--team <team>` it does accept"
+        ),
+        None => "; no team is set for this tool, so if you belong to a team on this gateway, \
+                 onboard the tool again with `--team <team>`"
+            .to_string(),
     }
 }
 
@@ -796,6 +806,7 @@ mod tests {
             access_token: "sk-cached".to_string(),
             refresh_token: refresh_token.map(str::to_string),
             expires_at: Some(expires_at),
+            issued_at: NOW - 1,
             user_id: Some("dev".to_string()),
             team_id: team.map(str::to_string),
         }
@@ -994,17 +1005,20 @@ mod tests {
     }
 
     #[test]
-    fn should_renew_a_fresh_credential_when_asked_to_renew_on_every_run() {
+    fn should_renew_a_credential_past_half_its_lifetime_under_half_life_renewal() {
         let server = FakeServer::supported().replying(vec![issued("sk-new", "rt-2")]);
         let idp_calls = RefCell::new(0);
-        let store = vec![cached(Some("team-a"), NOW + 80_000, Some("rt-1"))];
-        let every_run = CredentialRequest {
-            renewal: Renewal::EveryRun,
+        let store = vec![CachedCredential {
+            issued_at: NOW - 50_000,
+            ..cached(Some("team-a"), NOW + 30_000, Some("rt-1"))
+        }];
+        let half_life = CredentialRequest {
+            renewal: Renewal::HalfLife,
             ..request(Some("team-a"))
         };
 
         let resolved =
-            resolve(&server, &mut idp_token(&idp_calls), &store, every_run, NOW).unwrap();
+            resolve(&server, &mut idp_token(&idp_calls), &store, half_life, NOW).unwrap();
 
         let Resolved::Issued {
             credential,
@@ -1016,6 +1030,33 @@ mod tests {
         assert!(changed);
         assert_eq!(credential.access_token, "sk-new");
         assert_eq!(credential.expires_at, Some(NOW + 86_400));
+        assert_eq!(*idp_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn should_keep_a_credential_with_more_than_half_its_lifetime_under_half_life_renewal() {
+        let server = FakeServer::supported().replying(vec![issued("sk-new", "rt-2")]);
+        let idp_calls = RefCell::new(0);
+        let store = vec![CachedCredential {
+            issued_at: NOW - 10_000,
+            ..cached(Some("team-a"), NOW + 70_000, Some("rt-1"))
+        }];
+        let half_life = CredentialRequest {
+            renewal: Renewal::HalfLife,
+            ..request(Some("team-a"))
+        };
+
+        let resolved =
+            resolve(&server, &mut idp_token(&idp_calls), &store, half_life, NOW).unwrap();
+
+        assert_eq!(
+            resolved,
+            Resolved::Issued {
+                credential: store[0].clone(),
+                changed: false
+            }
+        );
+        assert!(server.calls().is_empty());
         assert_eq!(*idp_calls.borrow(), 0);
     }
 
@@ -1085,6 +1126,7 @@ mod tests {
                     access_token: "sk-first".to_string(),
                     refresh_token: Some("rt-1".to_string()),
                     expires_at: Some(NOW + 86_400),
+                    issued_at: NOW,
                     user_id: Some("dev".to_string()),
                     team_id: Some("team-a".to_string()),
                 },
@@ -1293,11 +1335,12 @@ mod tests {
         let error =
             resolve(&server, &mut idp_token(&idp_calls), &[], request(None), NOW).unwrap_err();
 
+        assert!(error.to_string().contains("no team is set"));
         assert!(error.to_string().contains("--team <team>"));
     }
 
     #[test]
-    fn should_not_suggest_a_team_when_one_was_sent() {
+    fn should_name_the_configured_team_when_an_exchange_with_a_team_is_refused() {
         let server = FakeServer::supported()
             .registering("llm_dcrc_first")
             .replying(vec![refused(400, "invalid_grant")]);
@@ -1313,7 +1356,8 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("invalid_grant description"));
-        assert!(!error.to_string().contains("--team"));
+        assert!(error.to_string().contains("set to team `team-a`"));
+        assert!(!error.to_string().contains("no team is set"));
     }
 
     #[test]
@@ -1341,7 +1385,14 @@ mod tests {
             cached(None, NOW + CREDENTIAL_REFRESH_SKEW_SECONDS + 1, None)
                 .is_fresh(NOW, near_expiry)
         );
-        assert!(!cached(None, NOW + 80_000, None).is_fresh(NOW, Renewal::EveryRun));
+        let half_life = Renewal::HalfLife;
+        let lifetime = |issued_at: i64, expires_at: i64| CachedCredential {
+            issued_at,
+            ..cached(None, expires_at, None)
+        };
+        assert!(lifetime(NOW - 10_000, NOW + 10_001).is_fresh(NOW, half_life));
+        assert!(!lifetime(NOW - 10_000, NOW + 10_000).is_fresh(NOW, half_life));
+        assert!(!lifetime(0, NOW + 80_000).is_fresh(NOW, half_life));
         assert!(cached(None, NOW + 1, None).is_valid(NOW));
         assert!(!cached(None, NOW, None).is_valid(NOW));
     }

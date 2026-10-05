@@ -99,7 +99,7 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
             &settings,
             settings.claude.team.as_deref(),
             sign_in,
-            Renewal::EveryRun,
+            Renewal::HalfLife,
         )
     })?;
 
