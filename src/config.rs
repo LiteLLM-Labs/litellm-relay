@@ -194,7 +194,56 @@ impl Default for TimeoutSection {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IdpSection {
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_port: Option<u16>,
+    #[serde(skip_serializing)]
     pub authorize_url: String,
+}
+
+impl IdpSection {
+    pub fn is_configured(&self) -> bool {
+        !self.normalized_issuer().is_empty() && !self.client_id.trim().is_empty()
+    }
+
+    pub fn normalized_issuer(&self) -> &str {
+        self.issuer.trim().trim_end_matches('/')
+    }
+
+    pub fn setup_hint(&self) -> &'static str {
+        if self.authorize_url.trim().is_empty() {
+            "set --oidc-issuer and --oidc-client-id, or idp.issuer and idp.client_id in config.yaml"
+        } else {
+            "idp.authorize_url is no longer used: Relay signs in with OIDC authorization code plus \
+             PKCE, so set --oidc-issuer and --oidc-client-id instead"
+        }
+    }
+
+    pub fn apply(&mut self, overrides: &IdpOverrides) {
+        if let Some(issuer) = &overrides.issuer {
+            self.issuer = issuer.trim().trim_end_matches('/').to_string();
+        }
+        if let Some(client_id) = &overrides.client_id {
+            self.client_id = client_id.trim().to_string();
+        }
+        if overrides.scopes.is_some() {
+            self.scopes = overrides.scopes.clone();
+        }
+        if overrides.redirect_port.is_some() {
+            self.redirect_port = overrides.redirect_port;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdpOverrides {
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+    pub scopes: Option<String>,
+    pub redirect_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -581,5 +630,92 @@ capture:
             values.get("LITELLM_GATEWAY_URL").map(String::as_str),
             Some("https://gateway.example.com")
         );
+    }
+
+    fn idp(issuer: &str, client_id: &str) -> IdpSection {
+        IdpSection {
+            issuer: issuer.into(),
+            client_id: client_id.into(),
+            ..IdpSection::default()
+        }
+    }
+
+    #[test]
+    fn should_need_both_issuer_and_client_id_to_be_configured() {
+        assert!(idp("https://login.example.com", "client-1").is_configured());
+        assert!(!idp("https://login.example.com", " ").is_configured());
+        assert!(!idp(" / ", "client-1").is_configured());
+        assert!(!IdpSection::default().is_configured());
+    }
+
+    #[test]
+    fn should_normalize_the_issuer_the_same_way_everywhere() {
+        assert_eq!(
+            idp(" https://login.example.com/tenant/v2.0/ ", "client-1").normalized_issuer(),
+            "https://login.example.com/tenant/v2.0"
+        );
+    }
+
+    #[test]
+    fn should_apply_only_the_overrides_that_were_passed() {
+        let mut section = IdpSection {
+            scopes: Some("openid".into()),
+            redirect_port: Some(53180),
+            ..idp("https://old.example.com", "old-client")
+        };
+
+        section.apply(&IdpOverrides {
+            issuer: Some(" https://login.example.com/ ".into()),
+            client_id: Some(" new-client ".into()),
+            ..IdpOverrides::default()
+        });
+
+        assert_eq!(section.issuer, "https://login.example.com");
+        assert_eq!(section.client_id, "new-client");
+        assert_eq!(section.scopes.as_deref(), Some("openid"));
+        assert_eq!(section.redirect_port, Some(53180));
+
+        section.apply(&IdpOverrides {
+            scopes: Some("openid groups".into()),
+            redirect_port: Some(53999),
+            ..IdpOverrides::default()
+        });
+
+        assert_eq!(section.issuer, "https://login.example.com");
+        assert_eq!(section.client_id, "new-client");
+        assert_eq!(section.scopes.as_deref(), Some("openid groups"));
+        assert_eq!(section.redirect_port, Some(53999));
+    }
+
+    #[test]
+    fn should_point_a_legacy_authorize_url_config_at_the_oidc_flags() {
+        let legacy: RelaySettings =
+            serde_yaml::from_str("idp:\n  authorize_url: https://login.example.com/authorize\n")
+                .expect("legacy settings yaml should parse");
+
+        assert!(!legacy.idp.is_configured());
+        assert!(legacy
+            .idp
+            .setup_hint()
+            .contains("authorize_url is no longer used"));
+        assert!(!IdpSection::default().setup_hint().contains("authorize_url"));
+        assert!(IdpSection::default().setup_hint().contains("--oidc-issuer"));
+    }
+
+    #[test]
+    fn should_drop_the_legacy_authorize_url_when_saving() {
+        let legacy: RelaySettings = serde_yaml::from_str(
+            "idp:\n  authorize_url: https://login.example.com/authorize\n  issuer: https://login.example.com\n  client_id: client-1\n",
+        )
+        .expect("settings yaml should parse");
+
+        let saved = serde_yaml::to_string(&legacy).expect("settings should serialize");
+
+        assert!(!saved.contains("authorize_url"), "{saved}");
+        assert!(
+            saved.contains("issuer: https://login.example.com"),
+            "{saved}"
+        );
+        assert!(saved.contains("client_id: client-1"), "{saved}");
     }
 }

@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 
 use crate::{
     ai_tools::token::ensure_token,
-    config::{load_settings, save_settings, RelaySettings},
+    config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
 };
 
@@ -29,11 +29,11 @@ enum Credential<'a> {
 #[derive(Debug, Default)]
 pub struct OnboardParams {
     pub gateway_url: Option<String>,
-    pub authorize_url: Option<String>,
     pub team: Option<String>,
     pub model: Option<String>,
     /// Static gateway key fallback for environments without an IdP.
     pub api_key: Option<String>,
+    pub idp: IdpOverrides,
     /// Suppress success output (used by autoconfigure, which prints its own
     /// summary). Standalone `relay onboard` leaves this false.
     pub quiet: bool,
@@ -50,9 +50,7 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
     }
-    if let Some(authorize_url) = params.authorize_url {
-        settings.idp.authorize_url = authorize_url;
-    }
+    settings.idp.apply(&params.idp);
     if let Some(model) = params.model {
         settings.claude.model = model;
     }
@@ -67,7 +65,7 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
         .as_deref()
         .filter(|key| !key.trim().is_empty())
         .or_else(|| {
-            if settings.idp.authorize_url.trim().is_empty() {
+            if !settings.idp.is_configured() {
                 settings
                     .gateway
                     .api_key
@@ -80,10 +78,10 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
 
     let credential = match static_key {
         Some(key) => Credential::StaticKey(key),
-        None if !settings.idp.authorize_url.trim().is_empty() => Credential::TokenHelper,
+        None if settings.idp.is_configured() => Credential::TokenHelper,
         None => bail!(
-            "onboarding requires an IdP authorize URL (--authorize-url or idp.authorize_url) \
-             or a static Gateway key (--api-key or gateway.api_key)"
+            "onboarding requires an IdP ({}) or a static Gateway key (--api-key or gateway.api_key)",
+            settings.idp.setup_hint()
         ),
     };
 
@@ -109,7 +107,7 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
 /// Prints a valid IdP bearer token on stdout for Claude Code's `apiKeyHelper`.
 pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
-    let token = ensure_token(&settings.idp.authorize_url)?;
+    let token = ensure_token(&settings.idp)?;
     println!("{token}");
     Ok(())
 }

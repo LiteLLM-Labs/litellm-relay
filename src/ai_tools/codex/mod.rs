@@ -4,8 +4,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::{
-    ai_tools::token::ensure_token,
-    config::{load_settings, save_settings, RelaySettings},
+    ai_tools::{idp::SIGN_IN_CEILING, token::ensure_token},
+    config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
 };
 
@@ -17,6 +17,11 @@ const WIRE_API: &str = "responses";
 /// How often Codex proactively refreshes the bearer token, matching its own
 /// default of five minutes so the short-lived identity token stays valid.
 const TOKEN_REFRESH_INTERVAL_MS: i64 = 300_000;
+
+/// How long Codex waits for the token helper before killing it. Its default is
+/// five seconds, shorter than any browser sign-in, so the helper is given the
+/// whole sign-in ceiling.
+const TOKEN_COMMAND_TIMEOUT_MS: i64 = SIGN_IN_CEILING.as_millis() as i64;
 
 /// Environment variable that overrides where the Codex config is written. Used
 /// by tests so they never touch the developer's real `~/.codex/config.toml`.
@@ -43,7 +48,6 @@ enum Credential<'a> {
 #[derive(Debug, Default)]
 pub struct CodexOnboardParams {
     pub gateway_url: Option<String>,
-    pub authorize_url: Option<String>,
     pub team: Option<String>,
     pub model: Option<String>,
     /// Have Codex read the bearer key from this env var instead of the token
@@ -51,6 +55,7 @@ pub struct CodexOnboardParams {
     pub env_key: Option<String>,
     /// Static gateway key fallback for environments without an IdP.
     pub api_key: Option<String>,
+    pub idp: IdpOverrides,
     /// Suppress success output (used by autoconfigure, which prints its own
     /// summary). Standalone `relay onboard-codex` leaves this false.
     pub quiet: bool,
@@ -66,9 +71,7 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
     }
-    if let Some(authorize_url) = params.authorize_url {
-        settings.idp.authorize_url = authorize_url;
-    }
+    settings.idp.apply(&params.idp);
     if let Some(model) = params.model {
         settings.codex.model = model;
     }
@@ -94,10 +97,10 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     };
 
     let needs_idp = matches!(credential, Credential::TokenHelper);
-    if needs_idp && settings.idp.authorize_url.trim().is_empty() {
+    if needs_idp && !settings.idp.is_configured() {
         bail!(
-            "onboarding requires an IdP authorize URL (--authorize-url or idp.authorize_url), \
-             or pass --env-key / --api-key for a static credential"
+            "onboarding requires an IdP ({}), or pass --env-key / --api-key for a static credential",
+            settings.idp.setup_hint()
         );
     }
 
@@ -137,7 +140,7 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
 /// Prints a valid IdP bearer token on stdout for Codex's `auth` command hook.
 pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
-    let token = ensure_token(&settings.idp.authorize_url)?;
+    let token = ensure_token(&settings.idp)?;
     println!("{token}");
     Ok(())
 }
@@ -230,6 +233,7 @@ fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: 
             let mut args = Array::new();
             args.push("codex-token");
             auth["args"] = value(args);
+            auth["timeout_ms"] = value(TOKEN_COMMAND_TIMEOUT_MS);
             auth["refresh_interval_ms"] = value(TOKEN_REFRESH_INTERVAL_MS);
             provider["auth"] = Item::Table(auth);
         }
@@ -263,7 +267,8 @@ mod tests {
     fn settings_with_team(team: Option<&str>) -> RelaySettings {
         let mut settings = RelaySettings::default();
         settings.gateway.url = "https://gateway.example.com".into();
-        settings.idp.authorize_url = "https://login.example.com/authorize".into();
+        settings.idp.issuer = "https://login.example.com/tenant/v2.0".into();
+        settings.idp.client_id = "relay-test-client".into();
         settings.codex.model = "gpt-5-codex".into();
         settings.codex.team = team.map(str::to_string);
         settings
@@ -318,6 +323,11 @@ mod tests {
         );
         assert_eq!(provider["auth"]["args"][0].as_str(), Some("codex-token"));
         assert!(provider["auth"]["refresh_interval_ms"].is_integer());
+        assert_eq!(
+            provider["auth"]["timeout_ms"].as_integer(),
+            Some(SIGN_IN_CEILING.as_millis() as i64),
+            "Codex must wait out a whole browser sign-in before killing the helper"
+        );
         assert!(
             provider.get("experimental_bearer_token").is_none(),
             "SSO path must not embed a static provider key"

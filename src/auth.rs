@@ -1,6 +1,6 @@
 use std::{
     io::{self, Write},
-    process::Command,
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -316,13 +316,20 @@ fn prompt_team_selection(teams: &[TeamOption]) -> Result<String> {
 }
 
 pub(crate) fn open_browser(url: &str) {
-    let status = if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).status()
+    let mut launcher = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
     } else if cfg!(target_os = "windows") {
-        Command::new("cmd").args(["/C", "start", url]).status()
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", url]);
+        command
     } else {
-        Command::new("xdg-open").arg(url).status()
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
     };
+    let status = launcher.stdout(Stdio::null()).status();
 
     match status {
         Ok(status) if status.success() => {}

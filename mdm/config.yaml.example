@@ -18,6 +18,16 @@ gateway:
   url: https://litellm-gateway.your-company.com
   # api_key: sk-...  # optional; omit to use per-user browser SSO
 
+# Org IdP for the per-user OIDC sign-in (authorization code plus PKCE) that
+# Claude Code, Codex, and Claude Desktop use to reach the Gateway. Register
+# Relay as a public client with the loopback redirect URI
+# http://127.0.0.1/callback and enable ID tokens for it.
+idp:
+  issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+  client_id: <app-client-id>
+  # scopes: openid profile email offline_access  # optional; discovery trims the defaults
+  # redirect_port: 8765  # optional; the default is a random loopback port
+
 # Shadow-AI interception (Notion AI, Perplexity, etc.) routed to the Gateway.
 shadow:
   enabled: true

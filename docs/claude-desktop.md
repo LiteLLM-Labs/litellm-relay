@@ -6,7 +6,7 @@ Relay wires the Claude Desktop app (third-party gateway mode) onto your LiteLLM 
 
 ## Single sign-on (recommended)
 
-Each developer signs in with their corporate account; the resulting OIDC token is sent to the Gateway as the bearer credential, so no provider or gateway key lands on the device.
+Each developer signs in with their corporate account; the resulting OIDC token is sent to the Gateway as the bearer credential, so no provider or gateway key lands on the device. Use the same public app registration Relay uses for [Claude Code](claude-code.md#commands) and Codex, and keep Relay's `http://127.0.0.1/callback` redirect URI on it next to the one Claude Desktop uses.
 
 ```bash
 sudo relay onboard-claude-desktop \

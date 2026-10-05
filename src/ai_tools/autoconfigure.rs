@@ -18,7 +18,7 @@ use crate::{
         codex::{onboard as onboard_codex, CodexOnboardParams},
         detect::{detect_all, AiTool, DetectContext, Detection},
     },
-    config::load_settings,
+    config::{load_settings, IdpOverrides, RelaySettings},
     credential::{
         check_client, check_credential, expiry_state, CredentialCheck, ExpiryState, REENROLL_HINT,
     },
@@ -31,7 +31,6 @@ use crate::{
 #[derive(Debug, Default, Clone)]
 pub struct AutoConfigureParams {
     pub gateway_url: Option<String>,
-    pub authorize_url: Option<String>,
     pub team: Option<String>,
     /// Static Gateway key for tools without an IdP (Claude Desktop static mode,
     /// Codex static key).
@@ -39,10 +38,7 @@ pub struct AutoConfigureParams {
     /// Codex-only: read the bearer key from this env var instead of the token
     /// helper hook.
     pub env_key: Option<String>,
-    pub oidc_client_id: Option<String>,
-    pub oidc_issuer: Option<String>,
-    pub oidc_scopes: Option<String>,
-    pub oidc_redirect_port: Option<u16>,
+    pub idp: IdpOverrides,
     /// Set by `autoconfigure` when `--api-key` was passed on the command line,
     /// so a key filled in by the saved-credential fallback does not read as an
     /// explicit static-key run.
@@ -81,29 +77,37 @@ pub async fn autoconfigure(mut params: AutoConfigureParams, only: &[AiTool]) -> 
     .await
 }
 
-/// When the caller supplies no explicit credential and no IdP authorize URL is
-/// configured, reuse the saved Gateway key so tools that accept a static
-/// credential (Codex, Claude Desktop) still get wired up on non-SSO setups. A
-/// configured IdP is always preferred and left untouched.
+/// When the caller supplies no explicit credential and the IdP that results
+/// from the saved config plus the overrides is incomplete, reuse the saved
+/// Gateway key so tools that accept a static credential (Codex, Claude
+/// Desktop) still get wired up on non-SSO setups. A configured IdP is always
+/// preferred and left untouched.
 fn apply_credential_fallback(params: &mut AutoConfigureParams) -> Result<()> {
-    if params.api_key.is_some() || params.env_key.is_some() || params.authorize_url.is_some() {
+    if params.api_key.is_some() || params.env_key.is_some() {
         return Ok(());
     }
-    let settings = load_settings()?;
-    if settings.idp.authorize_url.trim().is_empty() {
-        params.api_key = settings
-            .gateway
-            .api_key
-            .filter(|key| !key.trim().is_empty());
-    }
+    params.api_key = saved_key_fallback(&params.idp, &load_settings()?);
     Ok(())
+}
+
+fn saved_key_fallback(overrides: &IdpOverrides, settings: &RelaySettings) -> Option<String> {
+    let mut idp = settings.idp.clone();
+    idp.apply(overrides);
+    if idp.is_configured() {
+        return None;
+    }
+    settings
+        .gateway
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
 }
 
 /// The static Gateway key this pass would write into some tool config, if any.
 /// An explicit --api-key is gated whenever any detected tool would write it:
 /// Codex and Claude Code prefer it over the IdP, and Claude Desktop falls back
 /// to the saved key whenever it is given no OIDC flags and has no saved SSO to
-/// reuse, even on IdP setups.
+/// reuse, even when the saved config names an IdP.
 fn static_key_in_play(
     params: &AutoConfigureParams,
     saved_key: Option<&str>,
@@ -112,8 +116,8 @@ fn static_key_in_play(
 ) -> Option<String> {
     let desktop_reuses_sso = saved_desktop_sso && desktop_reuse_saved_sso(params);
     let desktop_static = tools.contains(&AiTool::ClaudeDesktop)
-        && params.oidc_client_id.is_none()
-        && params.oidc_issuer.is_none()
+        && params.idp.client_id.is_none()
+        && params.idp.issuer.is_none()
         && !desktop_reuses_sso;
     let explicit_key_lands = desktop_static
         || tools
@@ -313,29 +317,29 @@ fn configure_tool(tool: AiTool, params: &AutoConfigureParams) -> Result<()> {
     match tool {
         AiTool::ClaudeCode => onboard(OnboardParams {
             gateway_url: params.gateway_url.clone(),
-            authorize_url: params.authorize_url.clone(),
             team: params.team.clone(),
             model: None,
             api_key: params.api_key.clone(),
+            idp: params.idp.clone(),
             quiet: true,
         }),
         AiTool::Codex => onboard_codex(CodexOnboardParams {
             gateway_url: params.gateway_url.clone(),
-            authorize_url: params.authorize_url.clone(),
             team: params.team.clone(),
             model: None,
             env_key: params.env_key.clone(),
             api_key: params.api_key.clone(),
+            idp: params.idp.clone(),
             quiet: true,
         }),
         AiTool::ClaudeDesktop => onboard_desktop(OnboardDesktopParams {
             gateway_url: params.gateway_url.clone(),
             api_key: params.api_key.clone(),
             model: None,
-            oidc_client_id: params.oidc_client_id.clone(),
-            oidc_issuer: params.oidc_issuer.clone(),
-            oidc_scopes: params.oidc_scopes.clone(),
-            oidc_redirect_port: params.oidc_redirect_port,
+            oidc_client_id: params.idp.client_id.clone(),
+            oidc_issuer: params.idp.issuer.clone(),
+            oidc_scopes: params.idp.scopes.clone(),
+            oidc_redirect_port: params.idp.redirect_port,
             quiet: true,
             reuse_saved_sso: desktop_reuse_saved_sso(params),
         }),
@@ -569,6 +573,36 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    fn settings(issuer: &str, client_id: &str, api_key: Option<&str>) -> RelaySettings {
+        let mut settings = RelaySettings::default();
+        settings.idp.issuer = issuer.into();
+        settings.idp.client_id = client_id.into();
+        settings.gateway.api_key = api_key.map(str::to_string);
+        settings
+    }
+
+    #[test]
+    fn should_fall_back_to_the_saved_key_only_without_a_usable_idp() {
+        let saved_key = Some("sk-saved");
+        let no_overrides = IdpOverrides::default();
+
+        assert_eq!(
+            saved_key_fallback(&no_overrides, &settings("", "", saved_key)),
+            Some("sk-saved".into())
+        );
+        assert_eq!(
+            saved_key_fallback(&no_overrides, &settings("", "", Some("  "))),
+            None
+        );
+        assert_eq!(
+            saved_key_fallback(
+                &no_overrides,
+                &settings("https://login.example.com", "client", saved_key)
+            ),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn should_refuse_to_configure_any_tool_with_a_rejected_credential() {
         let home = temp_home("rejected");
@@ -628,30 +662,34 @@ mod tests {
 
     #[test]
     fn static_key_in_play_covers_the_desktop_saved_key_fallback() {
-        let idp_params = AutoConfigureParams {
-            authorize_url: Some("https://idp.example.com/authorize".into()),
-            ..AutoConfigureParams::default()
-        };
+        let saved_idp_params = AutoConfigureParams::default();
         assert_eq!(
             static_key_in_play(
-                &idp_params,
+                &saved_idp_params,
                 Some("sk-saved"),
                 false,
                 &[AiTool::ClaudeDesktop]
             ),
             Some("sk-saved".to_string()),
-            "the saved key Claude Desktop falls back to must be gated on IdP setups"
+            "the saved key Claude Desktop falls back to must be gated when the IdP is only in the saved config"
         );
         assert_eq!(
-            static_key_in_play(&idp_params, Some("sk-saved"), false, &[AiTool::ClaudeCode]),
+            static_key_in_play(
+                &saved_idp_params,
+                Some("sk-saved"),
+                false,
+                &[AiTool::ClaudeCode]
+            ),
             None,
-            "no static key reaches Claude Code on an IdP setup"
+            "no static key reaches Claude Code without an explicit key"
         );
 
         let oidc_params = AutoConfigureParams {
-            authorize_url: Some("https://idp.example.com/authorize".into()),
-            oidc_client_id: Some("client".into()),
-            oidc_issuer: Some("https://issuer.example.com".into()),
+            idp: IdpOverrides {
+                client_id: Some("client".into()),
+                issuer: Some("https://issuer.example.com".into()),
+                ..IdpOverrides::default()
+            },
             ..AutoConfigureParams::default()
         };
         assert_eq!(
@@ -673,37 +711,42 @@ mod tests {
                 &[AiTool::Codex]
             ),
             Some("sk-static".to_string()),
-            "an explicit static key is in play without an authorize URL"
+            "an explicit static key is in play without OIDC flags"
         );
 
-        let flag_and_idp = AutoConfigureParams {
+        let flag_and_saved_idp = AutoConfigureParams {
             api_key: Some("sk-flag".into()),
-            ..idp_params.clone()
+            ..saved_idp_params.clone()
         };
         assert_eq!(
             static_key_in_play(
-                &flag_and_idp,
+                &flag_and_saved_idp,
                 Some("sk-saved"),
                 false,
                 &[AiTool::ClaudeDesktop, AiTool::ClaudeCode]
             ),
             Some("sk-flag".to_string()),
-            "on an IdP setup the explicit key still reaches Claude Desktop"
-        );
-        assert_eq!(
-            static_key_in_play(&flag_and_idp, Some("sk-saved"), false, &[AiTool::Codex]),
-            Some("sk-flag".to_string()),
-            "an explicit key with an authorize URL still lands in Codex"
+            "the explicit key wins over the saved key for Claude Desktop"
         );
         assert_eq!(
             static_key_in_play(
-                &flag_and_idp,
+                &flag_and_saved_idp,
+                Some("sk-saved"),
+                false,
+                &[AiTool::Codex]
+            ),
+            Some("sk-flag".to_string()),
+            "an explicit key with the IdP in the saved config still lands in Codex"
+        );
+        assert_eq!(
+            static_key_in_play(
+                &flag_and_saved_idp,
                 Some("sk-saved"),
                 false,
                 &[AiTool::ClaudeCode]
             ),
             Some("sk-flag".to_string()),
-            "an explicit key with an authorize URL still lands in Claude Code"
+            "an explicit key with the IdP in the saved config still lands in Claude Code"
         );
 
         let oidc_params_with_key = AutoConfigureParams {
@@ -748,6 +791,35 @@ mod tests {
     }
 
     #[test]
+    fn should_judge_the_idp_after_applying_the_overrides() {
+        let saved_key = Some("sk-saved");
+        let issuer_only = IdpOverrides {
+            issuer: Some("https://login.example.com".into()),
+            ..IdpOverrides::default()
+        };
+        let client_only = IdpOverrides {
+            client_id: Some("client".into()),
+            ..IdpOverrides::default()
+        };
+
+        assert_eq!(
+            saved_key_fallback(&issuer_only, &settings("", "", saved_key)),
+            Some("sk-saved".into())
+        );
+        assert_eq!(
+            saved_key_fallback(&issuer_only, &settings("", "client", saved_key)),
+            None
+        );
+        assert_eq!(
+            saved_key_fallback(
+                &client_only,
+                &settings("https://login.example.com", "", saved_key)
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn static_key_in_play_skips_claude_desktop_when_it_reuses_the_saved_sso() {
         let fallback_key = AutoConfigureParams {
             api_key: Some("sk-saved".into()),
@@ -766,16 +838,13 @@ mod tests {
         );
         assert_eq!(
             static_key_in_play(
-                &AutoConfigureParams {
-                    authorize_url: Some("https://idp.example.com/authorize".into()),
-                    ..AutoConfigureParams::default()
-                },
+                &AutoConfigureParams::default(),
                 Some("sk-saved"),
                 true,
                 &[AiTool::ClaudeDesktop]
             ),
             None,
-            "the IdP-setup fallback to the saved key does not apply when saved SSO is reused"
+            "the saved-config IdP fallback to the saved key does not apply when saved SSO is reused"
         );
         assert_eq!(
             static_key_in_play(

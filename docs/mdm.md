@@ -23,7 +23,7 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 | --- | --- | --- |
 | `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
-| Managed `config.yaml` | Gateway URL, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
+| Managed `config.yaml` | Gateway URL, IdP issuer and client id, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
 
 The managed config can be baked into the `.pkg` at build time
 (`--config-file`) so no separate config delivery is needed:
@@ -123,8 +123,17 @@ profile.
 Using `--api-key` (or `gateway.api_key` in the managed config) writes a static
 Gateway key to every device. Prefer per-user browser SSO where your Gateway
 supports it. The credential check also runs when `--api-key` is combined with
-`--authorize-url`, since Codex and Claude Code prefer the explicit key over the
-IdP.
+the `--oidc-*` flags, since Codex and Claude Code prefer the explicit key over
+the IdP.
+
+The `--oidc-*` flags on `relay autoconfigure` set the IdP for Claude Code,
+Codex, and Claude Desktop alike, and Relay saves it under `idp:` in
+`config.yaml`. From then on every `autoconfigure` run without `--api-key`, the
+LaunchAgent's included, sets Claude Code and Codex up for browser sign-in and
+stops writing a saved Gateway key into their config, so a key passed once with
+`--api-key` lasts only until the next scheduled run. To put only Claude Desktop
+on SSO and keep Claude Code and Codex on a static key, pass the flags to
+`relay onboard-claude-desktop` instead
 
 The per-user LaunchAgent re-runs `autoconfigure` at login and on its interval.
 Each run checks the stored Gateway credential first. If the Gateway rejects it,

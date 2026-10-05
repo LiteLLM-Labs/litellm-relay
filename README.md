@@ -56,7 +56,8 @@ relay autoconfigure --only claude-desktop # just one (repeatable)
 
 Unset flags fall back to the saved Relay config, so a managed `config.yaml`
 seeded by your MDM is enough to configure a device with no arguments. Pass
-`--authorize-url`, `--team`, `--api-key`, or the `--oidc-*` flags to override.
+`--team`, `--api-key`, or the `--oidc-*` flags (`--oidc-issuer`,
+`--oidc-client-id`, `--oidc-scopes`, `--oidc-redirect-port`) to override.
 Only detected tools are touched, and one tool failing never blocks the others.
 Pass `--skip-autoconfigure` to `install.sh` to disable it.
 

@@ -4,7 +4,7 @@ Onboarding for AI coding tools onto the LiteLLM AI Gateway. Each tool is wired s
 
 ## Layout
 
-Shared identity concerns live at the top level and are reused by every tool. `idp.rs` runs the loopback browser sign-in against the corporate IdP and returns a JWT. `token.rs` caches that JWT under `~/.litellm-relay/` and refreshes it when it is missing or near expiry. Neither module knows anything about a specific tool.
+Shared identity concerns live at the top level and are reused by every tool. `idp.rs` runs the OIDC authorization code plus PKCE sign-in against the corporate IdP named by `idp.issuer` and `idp.client_id` (discovery document, loopback redirect, code exchange) and the refresh token grant, returning the ID token and refresh token. `token.rs` caches that session under `~/.litellm-relay/identity-token.json`, renews it silently with the refresh token near expiry, and only opens the browser when no refresh is possible. Neither module knows anything about a specific tool.
 
 `detect.rs` decides which tools are installed on the device (pure `PATH`/filesystem inspection via `DetectContext`), and `autoconfigure.rs` drives detection then calls each detected tool's `onboard`, continuing past any single tool's failure. This is what makes Relay opt-out: installing it wires every recognized tool to the Gateway, no per-tool command.
 
@@ -15,8 +15,8 @@ ai_tools/
   mod.rs          shared re-exports and module wiring
   detect.rs       which AI tools are installed (shared)
   autoconfigure.rs detect + onboard every installed tool (shared)
-  idp.rs          corporate IdP browser sign-in (shared)
-  token.rs        identity token cache and refresh (shared)
+  idp.rs          corporate IdP sign-in and refresh, OIDC code + PKCE (shared)
+  token.rs        identity session cache and silent refresh (shared)
   claude_cli/     Claude Code settings writer
     mod.rs
 ```

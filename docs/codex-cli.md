@@ -16,21 +16,26 @@ general_settings:
   litellm_jwtauth:
     user_id_jwt_field: "sub"
     user_id_upsert: True
-    team_id_jwt_field: "team_id"
-    team_id_upsert: True
+    # team_id_jwt_field: "team_id"  # only when your IdP puts a team_id claim in the ID token
+    # team_id_upsert: True
     virtual_key_claim_field: "email"
     unregistered_jwt_client_behavior: "auto_register"
 ```
+
+Leave the `team_id_*` lines out unless your IdP issues a `team_id` claim; the Gateway rejects tokens that lack a configured team claim (see [Claude Code](claude-code.md#gateway-configuration)).
 
 ## Step 2: Run `relay onboard-codex` on the device
 
 ```bash
 relay onboard-codex \
   --gateway-url https://gateway.yourco.com \
-  --authorize-url https://login.yourco.com/authorize \
+  --oidc-issuer https://login.yourco.com \
+  --oidc-client-id 00000000-0000-0000-0000-000000000000 \
   --team engineering \
   --model gpt-5-codex
 ```
+
+The `--oidc-*` flags are the same ones `relay onboard` takes (see [Claude Code](claude-code.md#commands)); the IdP session is shared, so a developer who already signed in for Claude Code is not asked again.
 
 This writes `~/.codex/config.toml`:
 
@@ -47,14 +52,15 @@ http_headers = { x-litellm-team = "engineering" }
 [model_providers.litellm.auth]
 command = "/usr/local/bin/litellm-relay"
 args = ["codex-token"]
+timeout_ms = 390000
 refresh_interval_ms = 300000
 ```
 
-There is no API key in the file. `relay codex-token` prints a valid IdP bearer token on stdout, which is exactly what Codex's `auth` hook expects. The file is written with `0600` permissions.
+There is no API key in the file. `relay codex-token` prints a valid IdP bearer token on stdout, which is exactly what Codex's `auth` hook expects. `timeout_ms` raises Codex's five-second ceiling on the helper to the length of a whole browser sign-in, so the first `codex` run can complete the IdP flow instead of being killed mid sign-in. The file is written with `0600` permissions.
 
 ## Step 3: Start Codex and sign in
 
-The developer runs `codex` with no key and no exports. On first use Relay opens the corporate IdP sign-in in the browser, caches the identity token, and hands Codex a short-lived bearer token for each request. Spend is tracked per-user in LiteLLM, exactly as with Claude Code.
+The developer runs `codex` with no key and no exports. On first use Relay opens the corporate IdP sign-in in the browser (OIDC authorization code with PKCE), caches the identity session, and hands Codex a short-lived bearer token for each request, renewing it with the refresh token so the browser does not open again when the token expires. Spend is tracked per-user in LiteLLM, exactly as with Claude Code.
 
 ## Credential alternatives
 
