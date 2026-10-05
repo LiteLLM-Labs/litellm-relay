@@ -112,6 +112,8 @@ enum CommandKind {
         #[arg(long)]
         gateway_url: Option<String>,
         #[arg(long)]
+        team: Option<String>,
+        #[arg(long)]
         api_key: Option<String>,
         #[arg(long)]
         model: Option<String>,
@@ -200,6 +202,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
                     env_key,
                     idp: oidc.into(),
                     explicit_api_key: false,
+                    saved_key_refused: false,
                 },
                 &only,
             )
@@ -221,6 +224,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
         }),
         CommandKind::OnboardClaudeDesktop {
             gateway_url,
+            team,
             api_key,
             model,
             oidc_client_id,
@@ -229,6 +233,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
             oidc_redirect_port,
         } => onboard_desktop(OnboardDesktopParams {
             gateway_url,
+            team,
             api_key,
             model,
             oidc_client_id,
@@ -238,6 +243,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
             allow_sign_in: std::io::stderr().is_terminal(),
             quiet: false,
             reuse_saved_sso: false,
+            saved_key_refused: false,
         }),
         CommandKind::ClaudeToken => print_token(),
         CommandKind::OnboardCodex {
@@ -334,6 +340,18 @@ mod tests {
     fn should_leave_the_overrides_empty_when_no_oidc_flag_is_passed() {
         let overrides = overrides_of(&["relay", "onboard", "--team", "eng"]);
         assert_eq!(overrides, IdpOverrides::default());
+    }
+
+    #[test]
+    fn should_accept_a_team_on_the_claude_desktop_onboard() {
+        let cli = Cli::try_parse_from(["relay", "onboard-claude-desktop", "--team", "eng"])
+            .expect("the command line must parse");
+        match cli.command.expect("a subcommand") {
+            CommandKind::OnboardClaudeDesktop { team, .. } => {
+                assert_eq!(team.as_deref(), Some("eng"))
+            }
+            other => panic!("unexpected command {}", describe(&other)),
+        }
     }
 
     #[test]

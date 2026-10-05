@@ -32,6 +32,7 @@ const LINUX_MANAGED_JSON: &str = "/etc/claude-desktop/managed-settings.json";
 #[derive(Debug, Default)]
 pub struct OnboardDesktopParams {
     pub gateway_url: Option<String>,
+    pub team: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub oidc_client_id: Option<String>,
@@ -50,6 +51,7 @@ pub struct OnboardDesktopParams {
     /// sign-in mode the device was enrolled with; the standalone command
     /// leaves it false so its flags decide.
     pub reuse_saved_sso: bool,
+    pub saved_key_refused: bool,
 }
 
 /// Writes the managed configuration Claude Desktop reads on launch so it routes
@@ -63,9 +65,12 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
     }
-    let explicit_api_key = params.api_key.as_deref().is_some_and(|key| !key.is_empty());
+    let saved_key_use = saved_key_use(params.api_key.as_deref(), params.saved_key_refused);
     if let Some(api_key) = params.api_key {
         settings.gateway.enroll_if_changed(api_key);
+    }
+    if params.team.is_some() {
+        settings.claude.team = params.team;
     }
     if let Some(model) = params.model {
         settings.claude.model = model;
@@ -89,7 +94,7 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     } else {
         SignIn::CachedOnly
     };
-    let credential = resolve_credential(&settings, sso, explicit_api_key, || {
+    let credential = resolve_credential(&settings, sso, saved_key_use, || {
         ensure_gateway_credential(
             &settings,
             settings.claude.team.as_deref(),
@@ -148,29 +153,45 @@ enum DesktopCredential {
     Static(StaticCredential),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SavedKeyUse {
+    Explicit,
+    Fallback,
+    Refused,
+}
+
+fn saved_key_use(passed_key: Option<&str>, saved_key_refused: bool) -> SavedKeyUse {
+    match passed_key {
+        Some(key) if !key.is_empty() => SavedKeyUse::Explicit,
+        _ if saved_key_refused => SavedKeyUse::Refused,
+        _ => SavedKeyUse::Fallback,
+    }
+}
+
 // OIDC flags win because the developer signs in inside the app, and an explicit
 // `--api-key` is the operator's choice. Otherwise a configured IdP means Relay
 // exchanges the developer's sign-in, and a saved key covers a Gateway without
-// the exchange or an exchange that failed.
+// the exchange or an exchange that failed, unless the Gateway refused that key.
 fn resolve_credential(
     settings: &RelaySettings,
     sso: Option<DesktopSso>,
-    explicit_api_key: bool,
+    saved_key_use: SavedKeyUse,
     exchange: impl FnOnce() -> Result<GatewayCredential>,
 ) -> Result<DesktopCredential> {
     if let Some(sso) = sso {
         return Ok(DesktopCredential::Sso(sso));
     }
-    let saved_key = settings
+    let enrolled_key = settings
         .gateway
         .api_key
         .as_deref()
         .filter(|key| !key.is_empty());
-    if let Some(key) = saved_key.filter(|_| explicit_api_key) {
+    if let Some(key) = enrolled_key.filter(|_| saved_key_use == SavedKeyUse::Explicit) {
         return Ok(DesktopCredential::Static(StaticCredential::Key(
             key.to_string(),
         )));
     }
+    let saved_key = enrolled_key.filter(|_| saved_key_use != SavedKeyUse::Refused);
     if settings.idp.is_configured() {
         match exchange() {
             Ok(GatewayCredential::Issued(token)) => {
@@ -649,8 +670,13 @@ mod tests {
     fn should_prefer_sso_over_every_other_credential() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential =
-            resolve_credential(&settings, Some(sso_config()), true, no_exchange).unwrap();
+        let credential = resolve_credential(
+            &settings,
+            Some(sso_config()),
+            SavedKeyUse::Explicit,
+            no_exchange,
+        )
+        .unwrap();
 
         assert!(matches!(credential, DesktopCredential::Sso(_)));
     }
@@ -659,7 +685,8 @@ mod tests {
     fn should_prefer_an_explicit_api_key_over_the_exchange() {
         let settings = settings_with_idp(Some("sk-explicit"));
 
-        let credential = resolve_credential(&settings, None, true, no_exchange).unwrap();
+        let credential =
+            resolve_credential(&settings, None, SavedKeyUse::Explicit, no_exchange).unwrap();
 
         assert_eq!(static_secret(&credential), "sk-explicit");
     }
@@ -668,7 +695,7 @@ mod tests {
     fn should_exchange_the_idp_sign_in_when_no_key_was_passed() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential = resolve_credential(&settings, None, false, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
             Ok(GatewayCredential::Issued("sk-exchanged".into()))
         })
         .unwrap();
@@ -680,7 +707,7 @@ mod tests {
     fn should_fall_back_to_the_saved_key_when_the_gateway_has_no_exchange() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential = resolve_credential(&settings, None, false, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
             Ok(GatewayCredential::Unsupported)
         })
         .unwrap();
@@ -692,7 +719,7 @@ mod tests {
     fn should_keep_the_saved_key_when_the_exchange_fails() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential = resolve_credential(&settings, None, false, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
             bail!("no signed-in identity on this device")
         })
         .unwrap();
@@ -704,7 +731,7 @@ mod tests {
     fn should_surface_the_exchange_failure_when_no_key_is_saved() {
         let settings = settings_with_idp(None);
 
-        let error = resolve_credential(&settings, None, false, || {
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
             bail!("no signed-in identity on this device")
         })
         .unwrap_err();
@@ -716,7 +743,7 @@ mod tests {
     fn should_explain_when_the_gateway_has_no_exchange_and_nothing_else_is_configured() {
         let settings = settings_with_idp(None);
 
-        let error = resolve_credential(&settings, None, false, || {
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
             Ok(GatewayCredential::Unsupported)
         })
         .unwrap_err();
@@ -725,10 +752,56 @@ mod tests {
     }
 
     #[test]
+    fn should_exchange_the_idp_sign_in_when_the_gateway_refused_the_saved_key() {
+        let settings = settings_with_idp(Some("sk-refused"));
+
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+            Ok(GatewayCredential::Issued("sk-exchanged".into()))
+        })
+        .unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-exchanged");
+    }
+
+    #[test]
+    fn should_never_write_a_refused_saved_key_when_the_exchange_fails() {
+        let settings = settings_with_idp(Some("sk-refused"));
+
+        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+            bail!("no signed-in identity on this device")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no signed-in identity"));
+    }
+
+    #[test]
+    fn should_never_write_a_refused_saved_key_when_the_gateway_has_no_exchange() {
+        let settings = settings_with_idp(Some("sk-refused"));
+
+        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+            Ok(GatewayCredential::Unsupported)
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("offers no IdP token exchange"));
+    }
+
+    #[test]
+    fn should_let_a_passed_key_win_over_a_refused_saved_key() {
+        assert_eq!(saved_key_use(Some("sk-flag"), true), SavedKeyUse::Explicit);
+        assert_eq!(saved_key_use(Some("sk-flag"), false), SavedKeyUse::Explicit);
+        assert_eq!(saved_key_use(None, true), SavedKeyUse::Refused);
+        assert_eq!(saved_key_use(Some(""), true), SavedKeyUse::Refused);
+        assert_eq!(saved_key_use(None, false), SavedKeyUse::Fallback);
+    }
+
+    #[test]
     fn should_use_the_saved_key_without_an_idp() {
         let settings = settings_with("https://gw.corp", Some("sk-saved"), "claude-sonnet-4-5");
 
-        let credential = resolve_credential(&settings, None, false, no_exchange).unwrap();
+        let credential =
+            resolve_credential(&settings, None, SavedKeyUse::Fallback, no_exchange).unwrap();
 
         assert_eq!(static_secret(&credential), "sk-saved");
     }
@@ -737,7 +810,8 @@ mod tests {
     fn should_require_some_credential() {
         let settings = settings_with("https://gw.corp", None, "claude-sonnet-4-5");
 
-        let error = resolve_credential(&settings, None, false, no_exchange).unwrap_err();
+        let error =
+            resolve_credential(&settings, None, SavedKeyUse::Fallback, no_exchange).unwrap_err();
 
         assert!(error.to_string().contains("needs a Gateway credential"));
     }
@@ -1306,6 +1380,44 @@ mod tests {
             saved.gateway.expires_at,
             Some(expires_at),
             "handing the saved key back must keep the expiry setup recorded"
+        );
+
+        restore_env("HOME", old_home);
+        restore_env(MANAGED_SETTINGS_PATH_ENV, old_override);
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(managed.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn should_save_the_team_the_exchange_is_issued_for() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = scratch_dir("team-home");
+        let managed = scratch_dir("team").join("managed.plist");
+        let old_home = env::var_os("HOME");
+        let old_override = env::var_os(MANAGED_SETTINGS_PATH_ENV);
+        env::set_var("HOME", &home);
+        env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
+
+        onboard_desktop(OnboardDesktopParams {
+            gateway_url: Some("https://gw.corp".into()),
+            team: Some("eng".into()),
+            api_key: Some("sk-saved".into()),
+            quiet: true,
+            ..OnboardDesktopParams::default()
+        })
+        .unwrap();
+        assert_eq!(load_settings().unwrap().claude.team.as_deref(), Some("eng"));
+
+        onboard_desktop(OnboardDesktopParams {
+            api_key: Some("sk-saved".into()),
+            quiet: true,
+            ..OnboardDesktopParams::default()
+        })
+        .unwrap();
+        assert_eq!(
+            load_settings().unwrap().claude.team.as_deref(),
+            Some("eng"),
+            "a rerun without --team must keep the saved team"
         );
 
         restore_env("HOME", old_home);

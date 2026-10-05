@@ -17,13 +17,15 @@ sudo relay onboard-claude-desktop \
 
 ## Relay-issued credential
 
-When Relay is onboarded against an IdP (`relay onboard --authorize-url ...`), no credential flag is needed. Relay exchanges the developer's IdP sign-in for a Gateway credential at the Gateway's `/token` endpoint and writes it as the key Claude Desktop sends, so the Gateway attributes the app's traffic to the developer and their team without an admin-issued key.
+When Relay is onboarded against an IdP (`relay onboard --oidc-issuer ... --oidc-client-id ...`), no credential flag is needed. Relay exchanges the developer's IdP sign-in for a Gateway credential at the Gateway's `/token` endpoint and writes it as the key Claude Desktop sends, so the Gateway attributes the app's traffic to the developer and their team without an admin-issued key.
 
 ```bash
-sudo relay onboard-claude-desktop --gateway-url https://gateway.yourco.com
+sudo relay onboard-claude-desktop --gateway-url https://gateway.yourco.com --team platform
 ```
 
-Run from a terminal, the command opens the browser sign-in when no identity token is cached. Without a terminal (an MDM push, the auto-configure daemon) it never opens a browser: it reuses the identity the developer already signed in with, so sign in once (`relay claude-token`, `relay codex-token`, or the command above) before its first run. The daemon renews the credential with its refresh token and rewrites the managed file on every run (hourly by default), so the key in the file always has close to its full lifetime left. Claude Desktop reads the file on launch, so an app left running for longer than the credential's lifetime (24 hours by default) needs a restart to pick up the renewed one. When the exchange fails and a Gateway key is already saved in Relay's config, Relay keeps that key and reports the failure on stderr.
+`--team` names the Gateway team the credential is issued for and is saved in Relay's config, in the same place `relay onboard --team` saves it, so leave it out on a device where Claude Code is already onboarded with a team. `relay autoconfigure --team` passes it to Claude Desktop too.
+
+Run from a terminal, the command opens the browser sign-in when no identity token is cached. Without a terminal (an MDM push, the auto-configure daemon) it never opens a browser: it reuses the identity the developer already signed in with, so sign in once (`relay claude-token`, `relay codex-token`, or the command above) before its first run. The daemon renews the credential with its refresh token and rewrites the managed file on every run (hourly by default), so the key in the file always has close to its full lifetime left. Claude Desktop reads the file on launch, so an app left running for longer than the credential's lifetime (24 hours by default) needs a restart to pick up the renewed one. When the exchange fails and a Gateway key is already saved in Relay's config, Relay keeps that key and reports the failure on stderr. `relay autoconfigure` first checks that saved key against the Gateway: when the Gateway rejects it or cannot be reached, the run says so, still exchanges the sign-in, and never writes the refused key, so an expired `relay setup` session no longer stops the daemon from renewing Claude Desktop's credential.
 
 ## Static key (proof of concept)
 
