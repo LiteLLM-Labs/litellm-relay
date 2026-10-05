@@ -74,6 +74,25 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     written.with_context(|| format!("failed to write {}", path.display()))
 }
 
+pub fn lock_private(path: &Path) -> Result<fs::File> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    match create_private(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to create {}", path.display()))
+        }
+    }
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock {}", path.display()))?;
+    Ok(file)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

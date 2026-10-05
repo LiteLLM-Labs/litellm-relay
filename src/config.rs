@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
@@ -16,6 +17,8 @@ pub struct RelayConfig {
     pub shadow_enabled: bool,
     pub gateway_url: String,
     pub gateway_api_key: Option<String>,
+    pub gateway_enrolled_at: Option<DateTime<Utc>>,
+    pub gateway_expires_at: Option<DateTime<Utc>>,
     pub shadow_model: String,
     pub shadow_min_interval_seconds: u64,
     pub request_timeout_seconds: f64,
@@ -60,6 +63,8 @@ impl RelaySettings {
                 .api_key
                 .clone()
                 .filter(|value| !value.is_empty()),
+            gateway_enrolled_at: self.gateway.enrolled_at,
+            gateway_expires_at: self.gateway.expires_at,
             shadow_model: self.shadow.model.clone(),
             shadow_min_interval_seconds: self.shadow.min_interval_seconds,
             request_timeout_seconds: self.timeouts.request_seconds,
@@ -98,6 +103,10 @@ pub struct GatewaySection {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrolled_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl Default for GatewaySection {
@@ -105,7 +114,24 @@ impl Default for GatewaySection {
         Self {
             url: "http://127.0.0.1:4000".into(),
             api_key: None,
+            enrolled_at: None,
+            expires_at: None,
         }
+    }
+}
+
+impl GatewaySection {
+    pub fn enroll(&mut self, api_key: String, expires_at: Option<DateTime<Utc>>) {
+        self.api_key = Some(api_key);
+        self.enrolled_at = Some(Utc::now());
+        self.expires_at = expires_at;
+    }
+
+    pub fn enroll_if_changed(&mut self, api_key: String) {
+        if self.api_key.as_deref() == Some(api_key.as_str()) {
+            return;
+        }
+        self.enroll(api_key, None);
     }
 }
 
@@ -168,7 +194,56 @@ impl Default for TimeoutSection {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IdpSection {
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_port: Option<u16>,
+    #[serde(skip_serializing)]
     pub authorize_url: String,
+}
+
+impl IdpSection {
+    pub fn is_configured(&self) -> bool {
+        !self.normalized_issuer().is_empty() && !self.client_id.trim().is_empty()
+    }
+
+    pub fn normalized_issuer(&self) -> &str {
+        self.issuer.trim().trim_end_matches('/')
+    }
+
+    pub fn setup_hint(&self) -> &'static str {
+        if self.authorize_url.trim().is_empty() {
+            "set --oidc-issuer and --oidc-client-id, or idp.issuer and idp.client_id in config.yaml"
+        } else {
+            "idp.authorize_url is no longer used: Relay signs in with OIDC authorization code plus \
+             PKCE, so set --oidc-issuer and --oidc-client-id instead"
+        }
+    }
+
+    pub fn apply(&mut self, overrides: &IdpOverrides) {
+        if let Some(issuer) = &overrides.issuer {
+            self.issuer = issuer.trim().trim_end_matches('/').to_string();
+        }
+        if let Some(client_id) = &overrides.client_id {
+            self.client_id = client_id.trim().to_string();
+        }
+        if overrides.scopes.is_some() {
+            self.scopes = overrides.scopes.clone();
+        }
+        if overrides.redirect_port.is_some() {
+            self.redirect_port = overrides.redirect_port;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdpOverrides {
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+    pub scopes: Option<String>,
+    pub redirect_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -177,6 +252,8 @@ pub struct ClaudeSection {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_sso: Option<DesktopSso>,
 }
 
 impl Default for ClaudeSection {
@@ -184,8 +261,21 @@ impl Default for ClaudeSection {
         Self {
             model: "claude-sonnet-4-5".into(),
             team: None,
+            desktop_sso: None,
         }
     }
+}
+
+/// OIDC settings Claude Desktop was enrolled with, kept so unattended
+/// autoconfigure reruns can rebuild the same single sign-on document.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct DesktopSso {
+    pub client_id: String,
+    pub issuer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -395,6 +485,105 @@ capture:
     }
 
     #[test]
+    fn should_load_gateway_section_without_credential_timestamps() {
+        let settings: RelaySettings = serde_yaml::from_str(
+            r#"
+gateway:
+  url: https://gateway.example.com
+  api_key: sk-test
+"#,
+        )
+        .expect("settings yaml should parse");
+
+        assert_eq!(settings.gateway.enrolled_at, None);
+        assert_eq!(settings.gateway.expires_at, None);
+        let config = settings.to_config();
+        assert_eq!(config.gateway_enrolled_at, None);
+        assert_eq!(config.gateway_expires_at, None);
+    }
+
+    #[test]
+    fn should_round_trip_credential_timestamps() {
+        let enrolled_at = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T21:27:58.096Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let settings = RelaySettings {
+            gateway: GatewaySection {
+                url: "https://gateway.example.com".into(),
+                api_key: Some("sk-test".into()),
+                enrolled_at: Some(enrolled_at),
+                expires_at: Some(expires_at),
+            },
+            ..RelaySettings::default()
+        };
+
+        let yaml = serde_yaml::to_string(&settings).unwrap();
+        let reloaded: RelaySettings = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(reloaded.gateway.enrolled_at, Some(enrolled_at));
+        assert_eq!(reloaded.gateway.expires_at, Some(expires_at));
+        assert_eq!(reloaded.to_config().gateway_expires_at, Some(expires_at));
+    }
+
+    #[test]
+    fn should_stamp_enrollment_when_a_new_key_replaces_the_saved_one() {
+        let stale = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut gateway = GatewaySection {
+            api_key: Some("sk-old".into()),
+            enrolled_at: Some(stale),
+            expires_at: Some(stale),
+            ..GatewaySection::default()
+        };
+        let before = Utc::now();
+
+        gateway.enroll("sk-new".into(), None);
+
+        assert_eq!(gateway.api_key.as_deref(), Some("sk-new"));
+        assert!(gateway.enrolled_at.is_some_and(|at| at >= before));
+        assert_eq!(gateway.expires_at, None);
+    }
+
+    #[test]
+    fn should_keep_enrollment_timestamps_when_the_saved_key_is_handed_back() {
+        let enrolled_at = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T21:27:58Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut gateway = GatewaySection {
+            api_key: Some("sk-saved".into()),
+            enrolled_at: Some(enrolled_at),
+            expires_at: Some(expires_at),
+            ..GatewaySection::default()
+        };
+
+        gateway.enroll_if_changed("sk-saved".into());
+
+        assert_eq!(gateway.enrolled_at, Some(enrolled_at));
+        assert_eq!(gateway.expires_at, Some(expires_at));
+
+        gateway.enroll_if_changed("sk-new".into());
+
+        assert_eq!(gateway.api_key.as_deref(), Some("sk-new"));
+        assert!(gateway.enrolled_at.is_some_and(|at| at > enrolled_at));
+        assert_eq!(gateway.expires_at, None);
+    }
+
+    #[test]
+    fn should_omit_unset_credential_timestamps_from_yaml() {
+        let yaml = serde_yaml::to_string(&RelaySettings::default()).unwrap();
+
+        assert!(!yaml.contains("enrolled_at"), "{yaml}");
+        assert!(!yaml.contains("expires_at"), "{yaml}");
+    }
+
+    #[test]
     fn should_default_to_metadata_only_capture() {
         let config = RelaySettings::default().to_config();
 
@@ -441,5 +630,92 @@ capture:
             values.get("LITELLM_GATEWAY_URL").map(String::as_str),
             Some("https://gateway.example.com")
         );
+    }
+
+    fn idp(issuer: &str, client_id: &str) -> IdpSection {
+        IdpSection {
+            issuer: issuer.into(),
+            client_id: client_id.into(),
+            ..IdpSection::default()
+        }
+    }
+
+    #[test]
+    fn should_need_both_issuer_and_client_id_to_be_configured() {
+        assert!(idp("https://login.example.com", "client-1").is_configured());
+        assert!(!idp("https://login.example.com", " ").is_configured());
+        assert!(!idp(" / ", "client-1").is_configured());
+        assert!(!IdpSection::default().is_configured());
+    }
+
+    #[test]
+    fn should_normalize_the_issuer_the_same_way_everywhere() {
+        assert_eq!(
+            idp(" https://login.example.com/tenant/v2.0/ ", "client-1").normalized_issuer(),
+            "https://login.example.com/tenant/v2.0"
+        );
+    }
+
+    #[test]
+    fn should_apply_only_the_overrides_that_were_passed() {
+        let mut section = IdpSection {
+            scopes: Some("openid".into()),
+            redirect_port: Some(53180),
+            ..idp("https://old.example.com", "old-client")
+        };
+
+        section.apply(&IdpOverrides {
+            issuer: Some(" https://login.example.com/ ".into()),
+            client_id: Some(" new-client ".into()),
+            ..IdpOverrides::default()
+        });
+
+        assert_eq!(section.issuer, "https://login.example.com");
+        assert_eq!(section.client_id, "new-client");
+        assert_eq!(section.scopes.as_deref(), Some("openid"));
+        assert_eq!(section.redirect_port, Some(53180));
+
+        section.apply(&IdpOverrides {
+            scopes: Some("openid groups".into()),
+            redirect_port: Some(53999),
+            ..IdpOverrides::default()
+        });
+
+        assert_eq!(section.issuer, "https://login.example.com");
+        assert_eq!(section.client_id, "new-client");
+        assert_eq!(section.scopes.as_deref(), Some("openid groups"));
+        assert_eq!(section.redirect_port, Some(53999));
+    }
+
+    #[test]
+    fn should_point_a_legacy_authorize_url_config_at_the_oidc_flags() {
+        let legacy: RelaySettings =
+            serde_yaml::from_str("idp:\n  authorize_url: https://login.example.com/authorize\n")
+                .expect("legacy settings yaml should parse");
+
+        assert!(!legacy.idp.is_configured());
+        assert!(legacy
+            .idp
+            .setup_hint()
+            .contains("authorize_url is no longer used"));
+        assert!(!IdpSection::default().setup_hint().contains("authorize_url"));
+        assert!(IdpSection::default().setup_hint().contains("--oidc-issuer"));
+    }
+
+    #[test]
+    fn should_drop_the_legacy_authorize_url_when_saving() {
+        let legacy: RelaySettings = serde_yaml::from_str(
+            "idp:\n  authorize_url: https://login.example.com/authorize\n  issuer: https://login.example.com\n  client_id: client-1\n",
+        )
+        .expect("settings yaml should parse");
+
+        let saved = serde_yaml::to_string(&legacy).expect("settings should serialize");
+
+        assert!(!saved.contains("authorize_url"), "{saved}");
+        assert!(
+            saved.contains("issuer: https://login.example.com"),
+            "{saved}"
+        );
+        assert!(saved.contains("client_id: client-1"), "{saved}");
     }
 }

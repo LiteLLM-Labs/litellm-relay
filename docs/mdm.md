@@ -23,7 +23,7 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 | --- | --- | --- |
 | `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
-| Managed `config.yaml` | Gateway URL, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
+| Managed `config.yaml` | Gateway URL, IdP issuer and client id, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
 
 The managed config can be baked into the `.pkg` at build time
 (`--config-file`) so no separate config delivery is needed:
@@ -125,5 +125,19 @@ Gateway key to every device. With an IdP onboarded, Relay exchanges each
 developer's sign-in for their own Gateway credential instead, so the flag is
 only needed for Gateways without the authorization server. A push has no
 terminal, so it never opens a browser: it uses the identity the developer
-already signed in with, and keeps a saved Gateway key when there is none. Prefer per-user
-browser SSO where your Gateway supports it.
+already signed in with, renewing it silently with its refresh token, and keeps
+a saved Gateway key when there is none. Prefer per-user browser SSO where your
+Gateway supports it. The credential check also runs when `--api-key` is
+combined with the `--oidc-*` flags, since Codex and Claude Code prefer the
+explicit key over the IdP.
+
+The per-user LaunchAgent re-runs `autoconfigure` at login and on its interval.
+Each run checks the stored Gateway credential first. If the Gateway rejects it,
+the run leaves the Codex, Claude Code, and Claude Desktop configs untouched and
+exits non-zero, so an expired SSO session shows up in the LaunchAgent's exit
+status and in the `credential` block of `/api/status` instead of being rewritten
+into the tools every hour. The check also covers the saved key Claude Desktop
+falls back to when it is not given OIDC flags, so an IdP setup cannot copy a
+rejected key into the desktop app. `/api/status` reflects the credential
+currently saved in `config.yaml`, so re-running `litellm-relay setup` updates
+the dashboard without restarting Relay

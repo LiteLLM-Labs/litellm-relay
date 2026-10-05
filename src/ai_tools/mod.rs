@@ -4,6 +4,7 @@
 //! folder with a settings writer. See `CLAUDE.md`.
 
 pub mod autoconfigure;
+pub mod blocking;
 pub mod claude_cli;
 pub mod claude_desktop;
 pub mod codex;

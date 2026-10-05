@@ -4,7 +4,7 @@ Onboarding for AI coding tools onto the LiteLLM AI Gateway. Each tool is wired s
 
 ## Layout
 
-Shared identity concerns live at the top level and are reused by every tool. `idp.rs` runs the loopback browser sign-in against the corporate IdP and returns a JWT. `token.rs` caches that JWT under `~/.litellm-relay/` and refreshes it when it is missing or near expiry. `gateway_credential.rs` registers Relay with the Gateway's authorization server (`/.well-known/litellm-cli-auth`), exchanges the JWT for a Gateway credential (RFC 8693 token exchange at `/token`), caches it per Gateway and team under `~/.litellm-relay/gateway-credentials.json`, and keeps it fresh with its refresh token. Both caches are written through `system::write_private`, which keeps them owner-only and owned by the developer even when the root daemon writes them. None of these modules knows anything about a specific tool.
+Shared identity concerns live at the top level and are reused by every tool. `idp.rs` runs the OIDC authorization code plus PKCE sign-in against the corporate IdP named by `idp.issuer` and `idp.client_id` (discovery document, loopback redirect, code exchange) and the refresh token grant, returning the ID token and refresh token. `token.rs` caches that session under `~/.litellm-relay/identity-token.json`, renews it silently with the refresh token near expiry, and only opens the browser when no refresh is possible and the caller allows one. `gateway_credential.rs` registers Relay with the Gateway's authorization server (`/.well-known/litellm-cli-auth`), exchanges the ID token for a Gateway credential (RFC 8693 token exchange at `/token`), caches it per Gateway and team under `~/.litellm-relay/gateway-credentials.json`, and keeps it fresh with its refresh token. Both caches are written through `system::write_private` and locked through `system::lock_private`, which keep them owner-only and owned by the developer even when the root daemon writes them. `blocking.rs` runs one async HTTP exchange to completion from a synchronous command. None of these modules knows anything about a specific tool.
 
 `detect.rs` decides which tools are installed on the device (pure `PATH`/filesystem inspection via `DetectContext`), and `autoconfigure.rs` drives detection then calls each detected tool's `onboard`, continuing past any single tool's failure. This is what makes Relay opt-out: installing it wires every recognized tool to the Gateway, no per-tool command.
 
@@ -15,9 +15,10 @@ ai_tools/
   mod.rs          shared re-exports and module wiring
   detect.rs       which AI tools are installed (shared)
   autoconfigure.rs detect + onboard every installed tool (shared)
-  idp.rs          corporate IdP browser sign-in (shared)
-  token.rs        identity token cache and refresh (shared)
-  gateway_credential.rs  IdP token to Gateway credential exchange and cache (shared)
+  idp.rs          corporate IdP sign-in and refresh, OIDC code + PKCE (shared)
+  token.rs        identity session cache and silent refresh (shared)
+  gateway_credential.rs  ID token to Gateway credential exchange and cache (shared)
+  blocking.rs     one async HTTP exchange run from a synchronous command (shared)
   claude_cli/     Claude Code settings writer
     mod.rs
 ```

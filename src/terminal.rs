@@ -1,5 +1,6 @@
 use std::{env, path::Path};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::config::RelayConfig;
@@ -53,13 +54,25 @@ pub fn print_step(number: u8, total: u8, title: &str) {
     );
 }
 
-pub fn print_setup_complete(config_path: &Path, user_id: Option<&str>, team_id: Option<&str>) {
+pub fn print_setup_complete(
+    config_path: &Path,
+    user_id: Option<&str>,
+    team_id: Option<&str>,
+    expires_at: Option<DateTime<Utc>>,
+) {
     println!("  Config: {}", config_path.display());
     if let Some(user_id) = user_id {
         println!("  User: {user_id}");
     }
     if let Some(team_id) = team_id {
         println!("  Team: {team_id}");
+    }
+    match expires_at {
+        Some(expires_at) => println!("  Credential expires: {}", expires_at.to_rfc3339()),
+        None => println!(
+            "  Credential expiry: not reported by the Gateway. Relay verifies the credential \
+             before every auto-configure run and shows it on /api/status"
+        ),
     }
     println!();
     println!(

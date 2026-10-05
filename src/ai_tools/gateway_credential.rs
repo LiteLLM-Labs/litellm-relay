@@ -2,7 +2,7 @@
 //! exchanges the developer's IdP token for it (RFC 8693) at the Gateway's
 //! authorization server and renews it with the rotating refresh token.
 
-use std::{fs, future::Future, io, path::PathBuf, thread, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
@@ -12,9 +12,12 @@ use serde_json::json;
 use url::Url;
 
 use crate::{
-    ai_tools::token::{cached_token, ensure_token},
+    ai_tools::{
+        blocking::call,
+        token::{ensure_token, SignIn},
+    },
     config::{relay_home, RelaySettings},
-    system::{create_private, write_private},
+    system::{lock_private, write_private},
 };
 
 const CACHE_FILE: &str = "gateway-credentials.json";
@@ -31,15 +34,6 @@ const HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Claude Code and Codex cache the helper's output for five minutes, so a token
 // they fetched right before a renewal has to stay valid until they ask again.
 const CREDENTIAL_REFRESH_SKEW_SECONDS: i64 = 600;
-
-/// Whether Relay may open the browser for an IdP sign-in when no cached
-/// identity token is usable. Unattended runs (the autoconfigure agents) must
-/// never block on a browser that nobody is watching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignIn {
-    Allowed,
-    CachedOnly,
-}
 
 /// When a cached credential is renewed. Token hooks run every few minutes, so
 /// they renew near expiry. A file an app reads once at launch is renewed on
@@ -70,16 +64,7 @@ pub fn ensure_gateway_credential(
     renewal: Renewal,
 ) -> Result<GatewayCredential> {
     let gateway_url = settings.gateway.url.trim_end_matches('/').to_string();
-    let authorize_url = settings.idp.authorize_url.clone();
-    let mut identity_token = move || match sign_in {
-        SignIn::Allowed => ensure_token(&authorize_url),
-        SignIn::CachedOnly => cached_token()?.ok_or_else(|| {
-            anyhow!(
-                "no signed-in identity on this device; run `relay claude-token` or \
-                 `relay codex-token` once to sign in, then re-run"
-            )
-        }),
-    };
+    let mut identity_token = || ensure_token(&settings.idp, sign_in);
     let request = CredentialRequest {
         gateway_url: &gateway_url,
         team,
@@ -126,7 +111,7 @@ pub fn print_bearer(settings: &RelaySettings, team: Option<&str>) -> Result<()> 
                     "gateway {} offers no IdP token exchange; sending the identity token instead",
                     settings.gateway.url
                 );
-                ensure_token(&settings.idp.authorize_url)?
+                ensure_token(&settings.idp, SignIn::Allowed)?
             }
         };
     println!("{bearer}");
@@ -483,23 +468,7 @@ fn save_store(store: &CredentialStore) -> Result<()> {
 // Renewals spend a single-use refresh token, so concurrent token hooks take
 // turns: the loser re-reads the cache and finds the winner's credential.
 fn lock_store() -> Result<fs::File> {
-    let path = relay_home().join(LOCK_FILE);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    match create_private(&path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to create {}", path.display()))
-        }
-    }
-    let file =
-        fs::File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
-    file.lock()
-        .with_context(|| format!("failed to lock {}", path.display()))?;
-    Ok(file)
+    lock_private(&relay_home().join(LOCK_FILE))
 }
 
 /// The real authorization server over HTTP. Each call runs on a scratch thread
@@ -701,28 +670,10 @@ async fn fetch(request: reqwest::RequestBuilder) -> Result<Reply> {
     Ok(Reply { status, body })
 }
 
-fn call<T, F, Fut>(work: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T>>,
-{
-    let worker = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to start the gateway HTTP runtime")?;
-        runtime.block_on(work())
-    });
-    worker
-        .join()
-        .map_err(|_| anyhow!("the gateway HTTP worker panicked"))?
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, collections::VecDeque};
+    use std::{cell::RefCell, collections::VecDeque, thread};
 
     const NOW: i64 = 1_800_000_000;
     const GATEWAY: &str = "https://gateway.example.com";
