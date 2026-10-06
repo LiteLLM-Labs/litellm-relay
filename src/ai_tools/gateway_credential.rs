@@ -34,6 +34,7 @@ const HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Claude Code and Codex cache the helper's output for five minutes, so a token
 // they fetched right before a renewal has to stay valid until they ask again.
 const CREDENTIAL_REFRESH_SKEW_SECONDS: i64 = 600;
+const ASSUMED_CREDENTIAL_LIFETIME_SECONDS: i64 = 3600;
 
 /// When a cached credential is renewed. Token hooks run every few minutes, so
 /// they renew near expiry. A file an app reads once at launch is renewed on
@@ -261,8 +262,7 @@ struct CachedCredential {
     access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expires_at: Option<i64>,
+    expires_at: i64,
     #[serde(default)]
     issued_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,17 +278,13 @@ impl CachedCredential {
 
     fn is_fresh(&self, now: i64, renewal: Renewal) -> bool {
         match renewal {
-            Renewal::NearExpiry => self
-                .expires_at
-                .is_none_or(|expires_at| expires_at > now + CREDENTIAL_REFRESH_SKEW_SECONDS),
-            Renewal::HalfLife => self
-                .expires_at
-                .is_none_or(|expires_at| expires_at - now > (expires_at - self.issued_at) / 2),
+            Renewal::NearExpiry => self.expires_at > now + CREDENTIAL_REFRESH_SKEW_SECONDS,
+            Renewal::HalfLife => self.expires_at - now > (self.expires_at - self.issued_at) / 2,
         }
     }
 
     fn is_valid(&self, now: i64) -> bool {
-        self.expires_at.is_none_or(|expires_at| expires_at > now)
+        self.expires_at > now
     }
 
     fn issued(
@@ -303,12 +299,30 @@ impl CachedCredential {
             client_id,
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            expires_at: tokens.expires_in.map(|ttl| now + ttl),
+            expires_at: expires_at(tokens.expires_in, now),
             issued_at: now,
             user_id: tokens.user_id,
             team_id: tokens.team_id,
         }
     }
+
+    fn renewed(&self, tokens: IssuedTokens, now: i64) -> Self {
+        Self {
+            gateway_url: self.gateway_url.clone(),
+            team: self.team.clone(),
+            client_id: self.client_id.clone(),
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token.or_else(|| self.refresh_token.clone()),
+            expires_at: expires_at(tokens.expires_in, now),
+            issued_at: now,
+            user_id: tokens.user_id.or_else(|| self.user_id.clone()),
+            team_id: tokens.team_id.or_else(|| self.team_id.clone()),
+        }
+    }
+}
+
+fn expires_at(expires_in: Option<i64>, now: i64) -> i64 {
+    now + expires_in.unwrap_or(ASSUMED_CREDENTIAL_LIFETIME_SECONDS)
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -375,12 +389,7 @@ fn renew(
     if let Some(credential) = cached {
         if let Some(tokens) = refresh(server, &document, credential)? {
             return Ok(Resolved::Issued {
-                credential: CachedCredential::issued(
-                    request,
-                    credential.client_id.clone(),
-                    tokens,
-                    now,
-                ),
+                credential: credential.renewed(tokens, now),
                 changed: true,
             });
         }
@@ -865,7 +874,7 @@ mod tests {
             client_id: "llm_dcrc_cached".to_string(),
             access_token: "sk-cached".to_string(),
             refresh_token: refresh_token.map(str::to_string),
-            expires_at: Some(expires_at),
+            expires_at,
             issued_at: NOW - 1,
             user_id: Some("dev".to_string()),
             team_id: team.map(str::to_string),
@@ -951,7 +960,7 @@ mod tests {
         assert_eq!(credential.access_token, "sk-new");
         assert_eq!(credential.refresh_token.as_deref(), Some("rt-2"));
         assert_eq!(credential.client_id, "llm_dcrc_cached");
-        assert_eq!(credential.expires_at, Some(NOW + 86_400));
+        assert_eq!(credential.expires_at, NOW + 86_400);
         assert_eq!(
             server.calls(),
             vec![
@@ -963,6 +972,83 @@ mod tests {
             ]
         );
         assert_eq!(*idp_calls.borrow(), 0, "a refresh must not touch the IdP");
+    }
+
+    #[test]
+    fn should_keep_the_refresh_token_when_the_renewal_answer_omits_one() {
+        let server = FakeServer::supported().replying(vec![Ok(TokenReply::Issued(IssuedTokens {
+            access_token: "sk-new".to_string(),
+            refresh_token: None,
+            expires_in: Some(86_400),
+            user_id: None,
+            team_id: None,
+        }))]);
+        let idp_calls = RefCell::new(0);
+        let store = vec![cached(Some("team-a"), NOW + 300, Some("rt-1"))];
+
+        let resolved = resolve(
+            &server,
+            &mut idp_token(&idp_calls),
+            &store,
+            request(Some("team-a")),
+            NOW,
+        )
+        .unwrap();
+
+        let Resolved::Issued { credential, .. } = resolved else {
+            panic!("expected an issued credential");
+        };
+        assert_eq!(credential.access_token, "sk-new");
+        assert_eq!(credential.refresh_token.as_deref(), Some("rt-1"));
+        assert_eq!(credential.user_id.as_deref(), Some("dev"));
+        assert_eq!(credential.team_id.as_deref(), Some("team-a"));
+        assert_eq!(credential.expires_at, NOW + 86_400);
+    }
+
+    #[test]
+    fn should_assume_a_lifetime_when_the_gateway_states_none() {
+        let without_lifetime = || {
+            Ok(TokenReply::Issued(IssuedTokens {
+                access_token: "sk-new".to_string(),
+                refresh_token: Some("rt-2".to_string()),
+                expires_in: None,
+                user_id: Some("dev".to_string()),
+                team_id: Some("team-a".to_string()),
+            }))
+        };
+        let idp_calls = RefCell::new(0);
+
+        let exchanged = resolve(
+            &FakeServer::supported()
+                .registering("llm_dcrc_fresh")
+                .replying(vec![without_lifetime()]),
+            &mut idp_token(&idp_calls),
+            &[],
+            request(Some("team-a")),
+            NOW,
+        )
+        .unwrap();
+        let renewed = resolve(
+            &FakeServer::supported().replying(vec![without_lifetime()]),
+            &mut idp_token(&idp_calls),
+            &[cached(Some("team-a"), NOW + 300, Some("rt-1"))],
+            request(Some("team-a")),
+            NOW,
+        )
+        .unwrap();
+
+        for resolved in [exchanged, renewed] {
+            let Resolved::Issued { credential, .. } = resolved else {
+                panic!("expected an issued credential");
+            };
+            assert_eq!(credential.expires_at, NOW + ASSUMED_CREDENTIAL_LIFETIME_SECONDS);
+            assert!(credential.is_fresh(NOW, Renewal::NearExpiry));
+            assert!(!credential.is_fresh(
+                NOW + ASSUMED_CREDENTIAL_LIFETIME_SECONDS - CREDENTIAL_REFRESH_SKEW_SECONDS,
+                Renewal::NearExpiry
+            ));
+            assert!(!credential.is_valid(NOW + ASSUMED_CREDENTIAL_LIFETIME_SECONDS));
+        }
     }
 
     #[test]
@@ -1089,7 +1175,7 @@ mod tests {
         };
         assert!(changed);
         assert_eq!(credential.access_token, "sk-new");
-        assert_eq!(credential.expires_at, Some(NOW + 86_400));
+        assert_eq!(credential.expires_at, NOW + 86_400);
         assert_eq!(*idp_calls.borrow(), 0);
     }
 
@@ -1185,7 +1271,7 @@ mod tests {
                     client_id: "llm_dcrc_first".to_string(),
                     access_token: "sk-first".to_string(),
                     refresh_token: Some("rt-1".to_string()),
-                    expires_at: Some(NOW + 86_400),
+                    expires_at: NOW + 86_400,
                     issued_at: NOW,
                     user_id: Some("dev".to_string()),
                     team_id: Some("team-a".to_string()),
