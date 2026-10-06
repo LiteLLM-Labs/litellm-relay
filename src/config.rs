@@ -76,6 +76,10 @@ impl RelaySettings {
             .find(|entry| without_trailing_slash(entry.url.trim()) == current)
     }
 
+    pub fn environment_named(&self, name: &str) -> Option<&EnvironmentEntry> {
+        self.environments.iter().find(|entry| entry.name == name)
+    }
+
     pub fn managed_team(&self) -> Option<String> {
         let selected = non_empty(self.gateway.team.as_deref());
         let environment = non_empty(
@@ -871,6 +875,18 @@ codex:
             }
         );
         assert_eq!(settings.environments[1].team, None);
+        assert_eq!(
+            settings.environment_named("test"),
+            Some(&settings.environments[2])
+        );
+        assert_eq!(
+            settings
+                .environment_named("prod")
+                .map(|entry| entry.url.as_str()),
+            Some("https://prod.example.com")
+        );
+        assert_eq!(settings.environment_named("staging"), None);
+        assert_eq!(settings.environment_named("Prod"), None);
     }
 
     #[test]

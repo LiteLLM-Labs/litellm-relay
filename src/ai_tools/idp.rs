@@ -143,13 +143,29 @@ pub fn refresh(idp: &IdpSection, refresh_token: &str) -> Result<Session> {
 /// Reads the `exp` claim from a JWT without verifying the signature. Relay only
 /// uses this to decide when a cached token needs to be refreshed; the Gateway
 /// remains the sole authority that verifies the signature.
-pub fn token_expiry(jwt: &str) -> Option<i64> {
+fn token_claims(jwt: &str) -> Option<serde_json::Value> {
     let payload = jwt.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn token_expiry(jwt: &str) -> Option<i64> {
+    let claims = token_claims(jwt)?;
     let exp = claims.get("exp")?;
     exp.as_i64()
         .or_else(|| exp.as_f64().map(|seconds| seconds.floor() as i64))
+}
+
+const DISPLAY_NAME_CLAIMS: [&str; 3] = ["name", "preferred_username", "email"];
+
+pub fn display_name(jwt: &str) -> Option<String> {
+    let claims = token_claims(jwt)?;
+    DISPLAY_NAME_CLAIMS
+        .iter()
+        .filter_map(|claim| claims.get(claim).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn redeem_callback(
@@ -618,9 +634,19 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn jwt_with_exp(exp: i64) -> String {
+        jwt_with_payload(&format!("{{\"exp\":{exp},\"sub\":\"dev\"}}"))
+    }
+
+    pub(crate) fn jwt_with_name(exp: i64, name: &str) -> String {
+        jwt_with_payload(&format!(
+            "{{\"exp\":{exp},\"sub\":\"dev\",\"name\":\"{name}\"}}"
+        ))
+    }
+
+    fn jwt_with_payload(payload: &str) -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
-        let payload = URL_SAFE_NO_PAD.encode(format!("{{\"exp\":{exp},\"sub\":\"dev\"}}"));
+        let payload = URL_SAFE_NO_PAD.encode(payload);
         format!("{header}.{payload}.")
     }
 
@@ -1050,6 +1076,38 @@ mod tests {
         assert_eq!(token_expiry("not-a-jwt"), None);
         assert_eq!(token_expiry("a.!!!.c"), None);
         assert_eq!(token_expiry("a.bm90IGpzb24.c"), None);
+    }
+
+    fn jwt_with_claims(claims: &str) -> String {
+        format!(
+            "{}.{}.",
+            URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}"),
+            URL_SAFE_NO_PAD.encode(claims)
+        )
+    }
+
+    #[test]
+    fn should_pick_the_display_name_from_name_then_preferred_username_then_email() {
+        assert_eq!(
+            display_name(&jwt_with_claims(
+                "{\"name\":\"Ada Lovelace\",\"preferred_username\":\"ada\",\"email\":\"ada@example.com\"}"
+            ))
+            .as_deref(),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(
+            display_name(&jwt_with_claims(
+                "{\"name\":\"  \",\"preferred_username\":\"ada\",\"email\":\"ada@example.com\"}"
+            ))
+            .as_deref(),
+            Some("ada")
+        );
+        assert_eq!(
+            display_name(&jwt_with_claims("{\"email\":\" ada@example.com \"}")).as_deref(),
+            Some("ada@example.com")
+        );
+        assert_eq!(display_name(&jwt_with_claims("{\"sub\":\"dev\"}")), None);
+        assert_eq!(display_name("not-a-jwt"), None);
     }
 
     #[test]

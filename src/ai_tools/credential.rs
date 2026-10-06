@@ -162,7 +162,7 @@ pub fn daemon_answers(socket: &Path) -> bool {
 fn ask(request: Request) -> Outcome {
     let path = crate::broker::socket_path();
     match transport::exchange(&path, &request, SIGN_IN_CEILING + REPLY_GRACE) {
-        Ok(reply) => interpret(request, &reply),
+        Ok(reply) => interpret(&request, &reply),
         Err(transport::Failure::NoDaemon) => Outcome::Failed(format!(
             "relay credential: the Relay daemon is not running (no socket at {}); run `relay \
              autoconfigure` or your onboard command again to start the {LAUNCH_AGENT_LABEL} \
@@ -175,7 +175,7 @@ fn ask(request: Request) -> Outcome {
     }
 }
 
-pub(crate) fn interpret(request: Request, reply: &Value) -> Outcome {
+pub(crate) fn interpret(request: &Request, reply: &Value) -> Outcome {
     if reply["ok"] != Value::Bool(true) {
         let reason = reply["reason"].as_str().unwrap_or("error");
         let message = reply["message"]
@@ -199,7 +199,9 @@ pub(crate) fn interpret(request: Request, reply: &Value) -> Outcome {
         Request::SignOut => {
             Outcome::Done("Signed out; the session and its key are gone.".to_string())
         }
-        Request::Status => Outcome::Done(reply.to_string()),
+        Request::Status | Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. } => {
+            Outcome::Done(reply.to_string())
+        }
     }
 }
 
@@ -281,21 +283,21 @@ mod tests {
         };
         assert_eq!(
             interpret(
-                request,
+                &request,
                 &json!({"ok": true, "token": "sk-abc", "source": "minted_key"})
             ),
             Outcome::Token("sk-abc".into())
         );
         assert_eq!(
             interpret(
-                request,
+                &request,
                 &json!({"ok": false, "reason": "caller_refused", "message": "no allowed client"})
             ),
             Outcome::Failed("relay credential: caller_refused: no allowed client".into())
         );
         assert!(matches!(
             interpret(
-                Request::Credential {
+                &Request::Credential {
                     context: HelperContext::Interactive
                 },
                 &json!({"ok": true})
@@ -308,13 +310,13 @@ mod tests {
     fn should_describe_sign_in_and_sign_out_without_a_token() {
         assert_eq!(
             interpret(
-                Request::SignIn,
+                &Request::SignIn,
                 &json!({"ok": true, "signed_in": true, "user_id": "alice"})
             ),
             Outcome::Done("Signed in as alice.".into())
         );
         assert!(matches!(
-            interpret(Request::SignOut, &json!({"ok": true, "signed_in": false})),
+            interpret(&Request::SignOut, &json!({"ok": true, "signed_in": false})),
             Outcome::Done(_)
         ));
     }
@@ -430,12 +432,12 @@ mod tests {
         );
         let request = credential_request(Audience::LocalProxy, HelperContext::NonInteractive);
         assert_eq!(
-            serde_json::to_value(request).unwrap(),
+            serde_json::to_value(&request).unwrap(),
             json!({"op": "proxy_credential", "context": "non_interactive"})
         );
         assert_eq!(
             interpret(
-                request,
+                &request,
                 &json!({"ok": true, "token": "relay-proxy-abc", "source": "proxy_token"})
             ),
             Outcome::Token("relay-proxy-abc".to_string())

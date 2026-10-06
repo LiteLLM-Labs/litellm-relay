@@ -263,6 +263,17 @@ mod tests {
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["signed_in"], true);
         assert!(reply.get("token").is_none());
+        let switch_path = path.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            exchange(
+                &switch_path,
+                "{\"op\":\"switch_team\",\"team\":\"team-b\"}\n",
+            )
+        })
+        .await
+        .expect("exchange");
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["reason"], "gateway_error");
         let reply = tokio::task::spawn_blocking(move || exchange(&path, "{\"op\":\"sign_out\"}\n"))
             .await
             .expect("exchange");

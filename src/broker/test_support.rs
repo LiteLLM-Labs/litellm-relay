@@ -21,7 +21,7 @@ use crate::{
             AuthorizationServer, AuthorizationServerDocument, Discovery, Grant, IssuedTokens,
             OAuthError, TokenReply,
         },
-        idp::{test_support::jwt_with_exp, Session},
+        idp::{test_support::jwt_with_name, Session},
         token::IdentityProvider,
     },
     config::{IdpSection, RelaySettings},
@@ -30,6 +30,7 @@ use crate::{
 pub(crate) const GATEWAY: &str = "https://gateway.example.com";
 pub(crate) const NOW: i64 = 1_800_000_000;
 pub(crate) const HOSTNAME: &str = "laptop";
+pub(crate) const DISPLAY_NAME: &str = "Dev Eloper";
 const IDENTITY_TOKEN_LIFETIME: i64 = 8 * 3600;
 
 pub(crate) fn idp_settings(team: Option<&str>) -> RelaySettings {
@@ -70,6 +71,8 @@ struct AuthState {
     supported: bool,
     session_lifetime: i64,
     valid_clients: HashSet<String>,
+    refused_teams: HashSet<String>,
+    discoveries: Vec<String>,
     registrations: u64,
     exchanges: u64,
     refreshes: u64,
@@ -85,6 +88,8 @@ impl FakeAuth {
             supported,
             session_lifetime: 3600,
             valid_clients: HashSet::new(),
+            refused_teams: HashSet::new(),
+            discoveries: Vec::new(),
             registrations: 0,
             exchanges: 0,
             refreshes: 0,
@@ -102,12 +107,24 @@ impl FakeAuth {
         self.0.lock().unwrap().valid_clients.clear();
     }
 
+    pub(crate) fn refuse_team(&self, team: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .refused_teams
+            .insert(team.to_string());
+    }
+
     pub(crate) fn registrations(&self) -> u64 {
         self.0.lock().unwrap().registrations
     }
 
     pub(crate) fn exchanges(&self) -> u64 {
         self.0.lock().unwrap().exchanges
+    }
+
+    pub(crate) fn discoveries(&self) -> Vec<String> {
+        self.0.lock().unwrap().discoveries.clone()
     }
 
     pub(crate) fn refreshes(&self) -> u64 {
@@ -137,8 +154,12 @@ impl FakeAuth {
 }
 
 impl AuthorizationServer for FakeAuth {
-    fn discover(&self, _gateway_url: &str) -> Result<Discovery> {
-        let supported = self.0.lock().unwrap().supported;
+    fn discover(&self, gateway_url: &str) -> Result<Discovery> {
+        let supported = {
+            let mut state = self.0.lock().unwrap();
+            state.discoveries.push(gateway_url.to_string());
+            state.supported
+        };
         if !supported {
             return Ok(Discovery::Unsupported);
         }
@@ -166,6 +187,12 @@ impl AuthorizationServer for FakeAuth {
                 state.exchanges += 1;
                 if !state.valid_clients.contains(&client_id) {
                     return Ok(Self::refused(401, "invalid_client"));
+                }
+                if team
+                    .as_deref()
+                    .is_some_and(|team| state.refused_teams.contains(team))
+                {
+                    return Ok(Self::refused(403, "access_denied"));
                 }
                 Ok(Self::issue(&mut state, team))
             }
@@ -214,7 +241,7 @@ impl FakeIdentity {
 
     fn session(&self, serial: u64) -> Session {
         Session {
-            id_token: jwt_with_exp(self.clock.now() + IDENTITY_TOKEN_LIFETIME),
+            id_token: jwt_with_name(self.clock.now() + IDENTITY_TOKEN_LIFETIME, DISPLAY_NAME),
             refresh_token: Some(format!("idp-refresh-{serial}")),
         }
     }
@@ -416,6 +443,11 @@ impl SettingsSource for FakeSettings {
             return None;
         }
         Some(self.settings.lock().unwrap().clone())
+    }
+
+    fn store(&self, settings: &RelaySettings) -> Result<()> {
+        self.set(settings.clone());
+        Ok(())
     }
 }
 
