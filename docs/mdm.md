@@ -163,8 +163,10 @@ invalid_request: subject_token was rejected by the gateway's JWT auth)` where
 the older Relay's ID token was accepted and the team ignored, so add the
 developers to their teams on the Gateway before the rollout, or push a
 `--team` the Gateway accepts. `/.well-known/litellm-cli-auth`, `/register`,
-and `/token` are reached without a bearer and must pass through any proxy or
-WAF in front of the Gateway unauthenticated (see
+and `/token` are reached without a bearer, so let them through any proxy or
+WAF in front of the Gateway unauthenticated; while they are blocked, Claude
+Code and Codex send the ID token itself with a notice on stderr, as the older
+Relay did, and Claude Desktop keeps its saved key or reports the failure (see
 [claude-code.md](claude-code.md#gateway-configuration)). `/api/status` reflects the credential
 currently saved in `config.yaml`, so re-running `litellm-relay setup` updates
 the dashboard without restarting Relay

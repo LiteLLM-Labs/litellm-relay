@@ -2,7 +2,7 @@
 //! exchanges the developer's IdP token for it (RFC 8693) at the Gateway's
 //! authorization server and renews it with the rotating refresh token.
 
-use std::{fs, path::PathBuf, time::Duration};
+use std::{error::Error, fmt, fs, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
@@ -53,6 +53,42 @@ pub enum GatewayCredential {
     Unsupported,
 }
 
+/// The Gateway's authorization server answered the exchange with a 4xx, so the
+/// grant itself was rejected rather than the request failing on the way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeRefused(String);
+
+impl fmt::Display for ExchangeRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for ExchangeRefused {}
+
+/// The IdP sign-in the exchange needed did not produce an identity token.
+/// Transparent: it reads exactly like the sign-in error it carries.
+#[derive(Debug)]
+pub struct SignInFailed(anyhow::Error);
+
+impl fmt::Display for SignInFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl Error for SignInFailed {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.source()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelperBearer {
+    Credential(String),
+    IdentityToken { token: String, notice: String },
+}
+
 /// Returns a fresh Gateway credential for the tool's team, exchanging or
 /// refreshing as needed. The cache under `~/.litellm-relay/` is shared across
 /// tools and keyed by Gateway URL and team, so tools on different teams keep
@@ -100,22 +136,45 @@ pub fn ensure_gateway_credential(
 }
 
 /// Prints the bearer a tool's token hook should use: the Gateway credential,
-/// or the raw identity token (with a notice on stderr) when the Gateway offers
-/// no token exchange, which is what the hooks sent before the exchange existed.
+/// or the raw identity token (with a notice on stderr) whenever the Gateway
+/// could not issue one, which is what the hooks sent before the exchange
+/// existed. Only a refused exchange and a failed sign-in stay errors.
 pub fn print_bearer(settings: &RelaySettings, team: Option<&str>) -> Result<()> {
-    let bearer =
-        match ensure_gateway_credential(settings, team, SignIn::Allowed, Renewal::NearExpiry)? {
-            GatewayCredential::Issued(token) => token,
-            GatewayCredential::Unsupported => {
-                eprintln!(
-                    "gateway {} offers no IdP token exchange; sending the identity token instead",
-                    settings.gateway.url
-                );
-                ensure_token(&settings.idp, SignIn::Allowed)?
-            }
-        };
+    let resolved = ensure_gateway_credential(settings, team, SignIn::Allowed, Renewal::NearExpiry);
+    let identity_token = || ensure_token(&settings.idp, SignIn::Allowed);
+    let bearer = match helper_bearer(&settings.gateway.url, resolved, identity_token)? {
+        HelperBearer::Credential(token) => token,
+        HelperBearer::IdentityToken { token, notice } => {
+            eprintln!("{notice}");
+            token
+        }
+    };
     println!("{bearer}");
     Ok(())
+}
+
+pub fn helper_bearer(
+    gateway_url: &str,
+    resolved: Result<GatewayCredential>,
+    identity_token: impl FnOnce() -> Result<String>,
+) -> Result<HelperBearer> {
+    let notice = match resolved {
+        Ok(GatewayCredential::Issued(token)) => return Ok(HelperBearer::Credential(token)),
+        Ok(GatewayCredential::Unsupported) => format!(
+            "gateway {gateway_url} offers no IdP token exchange; sending the identity token instead"
+        ),
+        Err(error) if error.is::<ExchangeRefused>() || error.is::<SignInFailed>() => {
+            return Err(error)
+        }
+        Err(error) => format!(
+            "gateway {gateway_url} could not issue a credential, sending the identity token \
+             instead: {error:#}"
+        ),
+    };
+    Ok(HelperBearer::IdentityToken {
+        token: identity_token()?,
+        notice,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,7 +385,8 @@ fn renew(
             });
         }
     }
-    let subject_token = identity_token()?;
+    let subject_token =
+        identity_token().map_err(|error| anyhow::Error::new(SignInFailed(error)))?;
     let known_client = cached.map(|credential| credential.client_id.as_str());
     let (client_id, tokens) = exchange(server, &document, &subject_token, request, known_client)?;
     Ok(Resolved::Issued {
@@ -410,11 +470,11 @@ fn attempt_exchange(
         TokenReply::Refused { error, .. } if error.error == "invalid_client" => {
             Ok(ExchangeReply::UnknownClient)
         }
-        TokenReply::Refused { status, error } => bail!(
+        TokenReply::Refused { status, error } => Err(anyhow::Error::new(ExchangeRefused(format!(
             "the gateway refused the token exchange ({}){}",
             refusal_summary(status, &error),
             team_hint(team, &error.error)
-        ),
+        )))),
     }
 }
 
@@ -1373,6 +1433,131 @@ mod tests {
         assert!(error
             .to_string()
             .contains("invalid_request: invalid_request description"));
+    }
+
+    #[test]
+    fn should_keep_a_refused_exchange_closed_for_the_helpers() {
+        let server = FakeServer::supported()
+            .registering("llm_dcrc_first")
+            .replying(vec![refused(400, "invalid_grant")]);
+        let idp_calls = RefCell::new(0);
+        let resolved = resolve(&server, &mut idp_token(&idp_calls), &[], request(None), NOW)
+            .map(|_| unreachable!("the refusal is an error"));
+        let fallback_calls = RefCell::new(0);
+
+        let error = helper_bearer(GATEWAY, resolved, || {
+            *fallback_calls.borrow_mut() += 1;
+            Ok("id-token".to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.is::<ExchangeRefused>());
+        assert!(error
+            .to_string()
+            .contains("the gateway refused the token exchange (HTTP 400 invalid_grant"));
+        assert_eq!(*fallback_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn should_keep_a_failed_sign_in_closed_for_the_helpers() {
+        let server = FakeServer::supported().registering("llm_dcrc_first");
+        let resolved = resolve(&server, &mut no_idp_token, &[], request(None), NOW)
+            .map(|_| unreachable!("the sign-in failure is an error"));
+        let fallback_calls = RefCell::new(0);
+
+        let error = helper_bearer(GATEWAY, resolved, || {
+            *fallback_calls.borrow_mut() += 1;
+            Ok("id-token".to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.is::<SignInFailed>());
+        assert_eq!(error.to_string(), "no signed-in identity on this device");
+        assert_eq!(*fallback_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn should_send_the_identity_token_when_discovery_fails() {
+        let idp_calls = RefCell::new(0);
+        let resolved = resolve(
+            &FakeServer::unreachable(),
+            &mut idp_token(&idp_calls),
+            &[],
+            request(Some("team-a")),
+            NOW,
+        )
+        .map(|_| unreachable!("an unreachable gateway is an error"));
+
+        let bearer = helper_bearer(GATEWAY, resolved, || Ok("id-token".to_string())).unwrap();
+
+        let HelperBearer::IdentityToken { token, notice } = bearer else {
+            panic!("expected the identity token, got {bearer:?}");
+        };
+        assert_eq!(token, "id-token");
+        assert!(notice.starts_with(
+            "gateway https://gateway.example.com could not issue a credential, sending the \
+             identity token instead: "
+        ));
+        assert!(notice.ends_with("connection refused"));
+    }
+
+    #[test]
+    fn should_send_the_identity_token_when_the_token_endpoint_breaks() {
+        let server = FakeServer::supported()
+            .registering("llm_dcrc_first")
+            .replying(vec![Err(anyhow!(
+                "the gateway answered HTTP 503 on the token endpoint"
+            ))]);
+        let idp_calls = RefCell::new(0);
+        let resolved = resolve(&server, &mut idp_token(&idp_calls), &[], request(None), NOW)
+            .map(|_| unreachable!("a broken token endpoint is an error"));
+
+        let bearer = helper_bearer(GATEWAY, resolved, || Ok("id-token".to_string())).unwrap();
+
+        assert!(
+            matches!(bearer, HelperBearer::IdentityToken { ref token, ref notice }
+            if token == "id-token" && notice.ends_with("HTTP 503 on the token endpoint"))
+        );
+    }
+
+    #[test]
+    fn should_send_the_identity_token_when_the_gateway_offers_no_exchange() {
+        let bearer = helper_bearer(GATEWAY, Ok(GatewayCredential::Unsupported), || {
+            Ok("id-token".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            bearer,
+            HelperBearer::IdentityToken {
+                token: "id-token".to_string(),
+                notice: "gateway https://gateway.example.com offers no IdP token exchange; \
+                         sending the identity token instead"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn should_surface_the_fallback_sign_in_failure() {
+        let error = helper_bearer(GATEWAY, Err(anyhow!("connection refused")), || {
+            Err(anyhow!("the sign-in timed out"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "the sign-in timed out");
+    }
+
+    #[test]
+    fn should_print_the_issued_credential_as_is() {
+        let bearer = helper_bearer(
+            GATEWAY,
+            Ok(GatewayCredential::Issued("sk-issued".to_string())),
+            || unreachable!("an issued credential needs no identity token"),
+        )
+        .unwrap();
+
+        assert_eq!(bearer, HelperBearer::Credential("sk-issued".to_string()));
     }
 
     #[test]
