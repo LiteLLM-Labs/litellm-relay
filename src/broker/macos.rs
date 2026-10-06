@@ -139,71 +139,60 @@ mod tests {
     use super::*;
     use crate::broker::caller::{walk, AllowedCaller, Peer, Verdict};
     use std::{
-        env, fs,
+        env,
         io::{BufRead, BufReader},
         os::unix::net::UnixStream,
-        path::{Path, PathBuf},
         process::{Child, Command, Stdio},
     };
-    use uuid::Uuid;
 
-    const TEST_IDENTIFIER: &str = "relay.test.caller";
+    const SLEEPER_TEST: &str = "broker::macos::tests::sleeper_process";
+    const SLEEP_PID_PREFIX: &str = "sleep_pid=";
 
-    /// `/bin/sh` on macOS is a launcher that execs the selected shell, which
-    /// would drop the ad hoc signature; zsh is a plain binary.
-    const SHELL: &str = "/bin/zsh";
-
-    fn scratch_dir() -> PathBuf {
-        let dir = env::temp_dir().join(format!("relay-broker-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
-    }
-
-    fn ad_hoc_signed_shell(dir: &Path) -> PathBuf {
-        let shell = dir.join("signed-sh");
-        fs::copy(SHELL, &shell).expect("copy the shell");
-        let status = Command::new("codesign")
-            .args(["-s", "-", "-f", "-i", TEST_IDENTIFIER])
-            .arg(&shell)
-            .status()
-            .expect("codesign");
-        assert!(status.success(), "ad hoc codesign failed");
-        shell
+    /// Run only as the child of `should_allow_an_ancestor_by_identifier_and_refuse_it_by_team`:
+    /// starts `/bin/sleep` and reports its pid so the parent can walk from the
+    /// sleeper up to this test binary, which cargo ad hoc signs with its own
+    /// identifier and no team.
+    #[test]
+    #[ignore]
+    fn sleeper_process() {
+        let mut sleep = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        println!("{SLEEP_PID_PREFIX}{}", sleep.id());
+        let _ = sleep.wait();
     }
 
     struct Sleeper {
-        shell: Child,
+        harness: Child,
         sleep_pid: u32,
     }
 
     impl Sleeper {
-        /// The shell prints the background job's pid before that child has
-        /// exec'ed `sleep`, so the walk would otherwise see a forked copy of
-        /// the shell at level 0; wait until the pid runs `sleep`.
-        fn spawn(shell: &Path) -> Self {
-            let mut child = Command::new(shell)
-                .args(["-c", "sleep 30 & echo $!; wait"])
+        /// Spawns this test binary running `sleeper_process`, reads the pid
+        /// of its `/bin/sleep` child, and waits until that pid runs `sleep`.
+        fn spawn() -> Self {
+            let mut harness = Command::new(env::current_exe().expect("test binary"))
+                .args(["--ignored", "--exact", SLEEPER_TEST, "--nocapture"])
                 .stdout(Stdio::piped())
+                .stderr(Stdio::null())
                 .spawn()
-                .expect("spawn shell");
-            let stdout = child.stdout.take().expect("stdout");
-            let mut line = String::new();
-            BufReader::new(stdout)
-                .read_line(&mut line)
-                .expect("sleep pid");
-            let sleep_pid = line.trim().parse().expect("pid");
+                .expect("spawn the sleeper harness");
+            let stdout = harness.stdout.take().expect("stdout");
+            let sleep_pid = BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+                .find_map(|line| line.strip_prefix(SLEEP_PID_PREFIX)?.trim().parse().ok())
+                .expect("the sleeper harness reported its sleep pid");
             for _ in 0..500 {
                 if executable_of(sleep_pid).ends_with("/sleep") {
-                    return Self {
-                        shell: child,
-                        sleep_pid,
-                    };
+                    return Self { harness, sleep_pid };
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the background job never exec'ed sleep");
+            let _ = harness.kill();
+            let _ = harness.wait();
+            panic!("the sleeper harness never exec'ed sleep");
         }
     }
 
@@ -227,9 +216,17 @@ mod tests {
             unsafe {
                 libc::kill(self.sleep_pid as i32, libc::SIGKILL);
             }
-            let _ = self.shell.kill();
-            let _ = self.shell.wait();
+            let _ = self.harness.kill();
+            let _ = self.harness.wait();
         }
+    }
+
+    fn own_identifier() -> String {
+        SecCode::for_self(Flags::NONE)
+            .ok()
+            .and_then(|code| signing_information(&code))
+            .map(|(identifier, _)| identifier)
+            .expect("test binary is ad hoc signed")
     }
 
     fn peer(pid: u32) -> Peer {
@@ -250,39 +247,33 @@ mod tests {
     }
 
     #[test]
-    fn should_allow_a_child_of_an_ad_hoc_signed_shell_by_identifier_and_refuse_it_by_team() {
-        let dir = scratch_dir();
-        let shell = ad_hoc_signed_shell(&dir);
-        let sleeper = Sleeper::spawn(&shell);
+    fn should_allow_an_ancestor_by_identifier_and_refuse_it_by_team() {
+        let sleeper = Sleeper::spawn();
         let table = MacProcessTable;
-        let by_identifier = vec![AllowedCaller::new(TEST_IDENTIFIER, None)];
-        assert!(matches!(
-            walk(&table, &by_identifier, peer(sleeper.sleep_pid)),
-            Verdict::Allowed { level: 1, .. }
-        ));
-        let by_team = vec![AllowedCaller::new(TEST_IDENTIFIER, Some("Q6L2SF6YDW"))];
+        let identifier = own_identifier();
+        let by_identifier = vec![AllowedCaller::new(&identifier, None)];
+        let verdict = walk(&table, &by_identifier, peer(sleeper.sleep_pid));
+        assert!(
+            matches!(verdict, Verdict::Allowed { level: 1, .. }),
+            "{verdict:?}"
+        );
+        let by_team = vec![AllowedCaller::new(&identifier, Some("Q6L2SF6YDW"))];
         let refused = walk(&table, &by_team, peer(sleeper.sleep_pid));
         let message = refused.refusal_message().expect("refused by team");
-        assert!(message.contains(TEST_IDENTIFIER), "{message}");
-        drop(sleeper);
-        let plain = Sleeper::spawn(&PathBuf::from(SHELL));
+        assert!(message.contains(&identifier), "{message}");
+        let someone_else = vec![AllowedCaller::new("relay.test.someone-else", None)];
         assert!(matches!(
-            walk(&table, &by_identifier, peer(plain.sleep_pid)),
+            walk(&table, &someone_else, peer(sleeper.sleep_pid)),
             Verdict::Refused { .. }
         ));
-        drop(plain);
-        fs::remove_dir_all(&dir).expect("cleanup");
+        drop(sleeper);
     }
 
     #[test]
     fn should_validate_the_peer_through_its_audit_token() {
         let (ours, theirs) = UnixStream::pair().expect("socket pair");
         let token = peer_audit_token(std::os::fd::AsRawFd::as_raw_fd(&ours)).expect("audit token");
-        let own_identifier = SecCode::for_self(Flags::NONE)
-            .ok()
-            .and_then(|code| signing_information(&code))
-            .map(|(identifier, _)| identifier)
-            .expect("test binary is ad hoc signed");
+        let own_identifier = own_identifier();
         let table = MacProcessTable;
         let allowed = vec![AllowedCaller::new(&own_identifier, None)];
         let verdict = walk(
