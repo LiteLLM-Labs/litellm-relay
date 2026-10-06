@@ -43,8 +43,8 @@ enum Command {
 /// the executable path.
 #[derive(Subcommand)]
 enum HelperCommand {
-    /// Print the Gateway bearer for the calling client (used by Claude Code,
-    /// Claude Desktop, and Codex as their credential helper).
+    /// Print the Gateway bearer for the calling client (used by Claude Code
+    /// and Codex as their credential helper).
     Credential,
     /// Sign in to the IdP through the browser and keep the session in the daemon.
     SignIn,

@@ -59,11 +59,11 @@ login keychain so AI app payloads can be captured. Then run:
 The relay command opens the interactive setup wizard when needed and then starts
 the foreground terminal trace view.
 
-Wiring an AI tool (the wizard, relay onboard, relay onboard-codex,
-relay onboard-claude-desktop, relay autoconfigure) installs and starts the
-ai.litellm.relay LaunchAgent when no Relay daemon is answering, because the
-tools ask that daemon for their credential. With the agent running, relay
-prints where the dashboard is instead of opening the trace view.
+Wiring Claude Code or Codex (the wizard, relay onboard, relay onboard-codex,
+relay autoconfigure) installs and starts the ai.litellm.relay LaunchAgent when
+no Relay daemon is answering, because those tools ask that daemon for their
+credential. With the agent running, relay prints where the dashboard is instead
+of opening the trace view.
 
 Pass --background to also configure Gateway SSO during the install, restart the
 LaunchAgent on the new binary, and re-detect AI tools on an interval.

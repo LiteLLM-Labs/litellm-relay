@@ -116,19 +116,21 @@ PAC profile so macOS stops using Auto Proxy:
 
 ## Credential broker
 
-On macOS the Relay daemon (`relay serve`, the `ai.litellm.relay` LaunchAgent) is
-the only thing on the device that holds a Gateway credential. Claude Code,
-Claude Desktop, and Codex are wired with `relay credential` as their credential
-helper, which asks the daemon over the Unix socket `~/.litellm-relay/broker.sock`
-(directory 0700, socket 0600) and prints the bearer it gets back. The proxy
-port never serves credentials, and no key, token, or session is written into
-Claude Code's settings file, Codex's `config.toml`, or the Claude Desktop
-managed file: the developer's IdP session and the Gateway key live in the
-daemon's memory and are gone when it stops
+On macOS the Relay daemon (`relay serve`, the `ai.litellm.relay` LaunchAgent)
+holds the Gateway credential for Claude Code and Codex. Both are wired with
+`relay credential` as their credential helper, which asks the daemon over the
+Unix socket `~/.litellm-relay/broker.sock` (directory 0700, socket 0600) and
+prints the bearer it gets back. The proxy port never serves credentials, and no
+key, token, or session is written into Claude Code's settings file or Codex's
+`config.toml`: the developer's IdP session and the Gateway key live in the
+daemon's memory and are gone when it stops. Claude Desktop is not on the broker
+yet: `relay onboard-claude-desktop` keeps writing the static key or the in-app
+OIDC settings into the managed file described in
+[claude-desktop.md](claude-desktop.md)
 
 Every command that writes the `relay credential` helper into a tool (`relay
-onboard`, `relay onboard-codex`, `relay onboard-claude-desktop`, `relay
-autoconfigure`, and the setup wizard) makes sure that daemon is running before
+onboard`, `relay onboard-codex`, `relay autoconfigure`, and the setup wizard)
+makes sure that daemon is running before
 it returns. When something already answers on the socket, a foreground `relay
 serve` or an agent your MDM loaded, the command changes nothing. Otherwise it
 writes `~/Library/LaunchAgents/ai.litellm.relay.plist` (the plist `relay
@@ -190,10 +192,10 @@ re-mints the key. A changed `credential.allowed_callers` list applies from the
 next request and leaves the key in place, so a client taken off the list is
 refused the next time it runs the helper
 
-Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
-`scheduled-task` when nobody is at the keyboard; those requests never open a
-browser and answer `signed_out` until a developer runs the app interactively or
-`relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
+A helper run with `CLAUDE_HELPER_CONTEXT=background` or `scheduled-task` (what
+Claude Desktop sets when nobody is at the keyboard) never opens a browser and
+answers `signed_out` until a developer signs in interactively, through the
+client or `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
 sign-in and `relay sign-out` deletes the key and forgets the session. The
 `broker` block of `/api/status` shows `signed_in`, `user_id`, `team`,
 `key_expires_at`, `key_extended_at`, the `source` of the last answer
