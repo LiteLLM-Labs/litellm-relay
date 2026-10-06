@@ -114,6 +114,62 @@ PAC profile so macOS stops using Auto Proxy:
 /usr/local/litellm-relay/uninstall.sh --unset-system-proxy "Wi-Fi" --remove-data
 ```
 
+## Credential broker
+
+On macOS the Relay daemon (`relay serve`, the `ai.litellm.relay` LaunchAgent) is
+the only thing on the device that holds a Gateway credential. Claude Code,
+Claude Desktop, and Codex are wired with `relay credential` as their credential
+helper, which asks the daemon over the Unix socket `~/.litellm-relay/broker.sock`
+(directory 0700, socket 0600) and prints the bearer it gets back. The proxy
+port never serves credentials, and no key, token, or session is written into
+Claude Code's settings file, Codex's `config.toml`, or the Claude Desktop
+managed file: the developer's IdP session and the Gateway key live in the
+daemon's memory and are gone when it stops
+
+Before answering, the daemon checks who is asking. It reads the connecting
+process's uid (it has to match the daemon's), its pid, and its audit token, and
+walks the peer and up to four of its ancestors, validating each against the
+Apple code signature requirement of an allowed client: the signing identifier
+plus the Team ID on the leaf certificate. The defaults are Claude Desktop
+(`com.anthropic.claudefordesktop` and its `.helper`, team `Q6L2SF6YDW`), Claude
+Code (`com.anthropic.claude-code`, team `Q6L2SF6YDW`), and Codex (`codex`, team
+`2DC432GLL2`). A shell, a script, or any other process that runs
+`relay credential` gets `caller_refused` and the chain it was refused on, and
+the refusal is counted in `/api/status`. `credential.allowed_callers` in
+`config.yaml` replaces the defaults (see `mdm/config.yaml.example`), so list
+every client you keep
+
+With an IdP configured, the first interactive request runs the browser sign-in
+from the daemon, exchanges the ID token for a Gateway session credential the
+way the older helpers did, and mints a Gateway key scoped to the device's team
+through `POST /key/generate` with a 60 minute duration and the alias
+`relay-<hostname>-<timestamp>`. The daemon extends that key at its half-life
+with `POST /key/update`, replaces an expired one on the next request, and
+deletes it on `relay sign-out` and when the daemon stops. Minting needs the
+team to allow `/key/generate`, `/key/update`, and `/key/delete` for its members
+(`POST /team/permissions_update` on the Gateway); while it does not, the daemon
+serves the session credential itself and prints the fix once on stderr. A 401
+on a mint or an extension means the Gateway no longer accepts the session
+credential (its sealing key rotated), so the daemon exchanges the IdP session
+again and mints anew, without a browser while the IdP session is still valid.
+Without an IdP, the daemon serves `gateway.api_key` from `config.yaml` to the
+same allowed clients, so a static-key rollout gets the caller check too
+
+Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
+`scheduled-task` when nobody is at the keyboard; those requests never open a
+browser and answer `signed_out` until a developer runs the app interactively or
+`relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
+sign-in and `relay sign-out` deletes the key and forgets the session. The
+`broker` block of `/api/status` shows `signed_in`, `user_id`, `team`,
+`key_expires_at`, `key_extended_at`, the `source` of the last answer
+(`minted_key`, `session_credential`, `identity_token`, or `static_key`), and
+`refused_callers`, never a token
+
+Linux hosts have no code-signature check, so there the tools keep the on-disk
+`claude-token` and `codex-token` helpers and a static key goes into the tool's
+config as before. Those commands and their caches under `~/.litellm-relay`
+still exist on macOS too for now and are removed in a follow-up
+
 ## Notes
 
 macOS has a single Global HTTP Proxy payload per device. Customers already using

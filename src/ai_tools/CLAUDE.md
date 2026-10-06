@@ -8,6 +8,8 @@ Shared identity concerns live at the top level and are reused by every tool. `id
 
 `detect.rs` decides which tools are installed on the device (pure `PATH`/filesystem inspection via `DetectContext`), and `autoconfigure.rs` drives detection then calls each detected tool's `onboard`, continuing past any single tool's failure. This is what makes Relay opt-out: installing it wires every recognized tool to the Gateway, no per-tool command.
 
+`credential.rs` is the client side of the credential broker in `src/broker/`: `relay credential` asks the running daemon for the bearer over `~/.litellm-relay/broker.sock` and prints it, `relay sign-in` and `relay sign-out` drive the daemon's IdP session from a terminal, and `bearer_plan` tells each writer which bearer source to name in the tool's file. On macOS that is always the broker, which checks the asking process chain's code signature, so no key or token lands in a tool's config; elsewhere the writers keep the on-disk `claude-token` and `codex-token` helpers or a static key.
+
 Each tool gets its own folder holding only that tool's settings writer, for example `claude_cli/` for Claude Code. Codex and others are added as sibling folders without touching the shared modules or Relay's proxy code.
 
 ```
@@ -19,10 +21,13 @@ ai_tools/
   token.rs        identity session cache and silent refresh (shared)
   gateway_credential.rs  ID token to Gateway credential exchange and cache (shared)
   blocking.rs     one async HTTP exchange run from a synchronous command (shared)
+  credential.rs   `relay credential` / `sign-in` / `sign-out` and the per-host bearer plan (shared)
   claude_cli/     Claude Code settings writer
     mod.rs
+  codex/          Codex CLI config writer
+  claude_desktop/ Claude Desktop managed settings writer
 ```
 
 ## Adding a tool
 
-Create a folder named after the tool. Print the bearer through `gateway_credential::print_bearer` (which resolves the identity token through `token::ensure_token` and exchanges it) rather than talking to `token` or `idp` directly, so sign-in, exchange, caching, and refresh stay in one place. Write only the tool's own config (its equivalent of `~/.claude/settings.json`), pointing it at the Gateway with the team header and an `apiKeyHelper`-style hook that prints the credential to stdout and nothing else. Wire the new `onboard` and token commands into `src/app.rs`. Then teach `detect.rs` how to recognize the tool (add an `AiTool` variant and its detection evidence) and dispatch it in `autoconfigure.rs` so it is auto-configured on install. Add meaningful tests next to the writer.
+Create a folder named after the tool. Ask `credential::bearer_plan` which bearer source the host gets and write only the tool's own config (its equivalent of `~/.claude/settings.json`), pointing it at the Gateway with the team header and an `apiKeyHelper`-style hook that runs `relay credential` on macOS, or elsewhere the legacy token helper through `gateway_credential::print_bearer` (which resolves the identity token through `token::ensure_token` and exchanges it) rather than talking to `token` or `idp` directly, so sign-in, exchange, caching, and refresh stay in one place. Add the tool's signing identifier and Team ID to `broker::caller::default_callers`, or the daemon refuses it. Wire the new `onboard` command into `src/app.rs`. Then teach `detect.rs` how to recognize the tool (add an `AiTool` variant and its detection evidence) and dispatch it in `autoconfigure.rs` so it is auto-configured on install. Add meaningful tests next to the writer.

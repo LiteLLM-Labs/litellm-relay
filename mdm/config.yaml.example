@@ -43,3 +43,19 @@ capture:
 
 timeouts:
   request_seconds: 10.0
+
+# Which processes the Relay daemon hands a Gateway credential to (macOS).
+# It checks the code signature of the asking process and up to four of its
+# ancestors: the signing identifier plus the Apple Team ID on the leaf
+# certificate. Setting this list replaces the built-in defaults shown here,
+# so repeat every client you keep. Omit team_id to match on identifier alone.
+credential:
+  # allowed_callers:
+  #   - identifier: com.anthropic.claudefordesktop
+  #     team_id: Q6L2SF6YDW
+  #   - identifier: com.anthropic.claudefordesktop.helper
+  #     team_id: Q6L2SF6YDW
+  #   - identifier: com.anthropic.claude-code
+  #     team_id: Q6L2SF6YDW
+  #   - identifier: codex
+  #     team_id: 2DC432GLL2
