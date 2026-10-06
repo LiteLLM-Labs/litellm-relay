@@ -658,6 +658,7 @@ impl Broker {
         }
         if current.callers != next.callers || current.unanchored != next.unanchored {
             announce_callers(&next.callers, &next.unanchored);
+            self.lock_state().proxy_token = None;
         }
         *self.lock_target() = next;
     }
@@ -1775,6 +1776,29 @@ mod tests {
                 gateway_url: GATEWAY.trim_end_matches('/').to_string(),
             })
         );
+    }
+
+    #[test]
+    fn should_drop_the_proxy_token_when_the_caller_allowlist_changes() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let token = issued(proxy_token(&rig, Context::Interactive)).token;
+        assert!(rig.broker.bearer_for_proxy(&token).is_ok());
+
+        let mut changed = idp_settings(Some("team-a"));
+        changed.credential.allowed_callers = Some(vec![super::caller::AllowedCaller::new(
+            "com.example.tool",
+            Some("TEAM123456"),
+        )]);
+        rig.settings.set(changed);
+
+        assert_eq!(
+            rig.broker.bearer_for_proxy(&token).unwrap_err().reason(),
+            "caller_refused"
+        );
+        let reissued = issued(proxy_token(&rig, Context::NonInteractive)).token;
+        assert_ne!(reissued, token);
+        assert!(rig.broker.bearer_for_proxy(&reissued).is_ok());
+        assert_eq!(rig.identity.sign_ins(), 1);
     }
 
     #[test]

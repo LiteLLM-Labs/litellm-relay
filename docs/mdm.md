@@ -239,8 +239,10 @@ user exactly as they do with `relay credential`
 
 A request with no proxy token, a wrong one, or two headers that disagree gets a
 401 before anything is sent to the Gateway, and so does every request after
-`relay sign-out` or a daemon restart, since both end the token; Claude Code and
-Codex answer a 401 by running their helper again, which signs in if needed. The
+`relay sign-out`, a daemon restart, or a change to `credential.allowed_callers`,
+since each of those ends the token. Claude Code and Codex answer a 401 by
+running their helper again, which goes back through the caller check and signs
+in if needed. The
 proxy never opens a browser on its own. Connections that do not come from the
 device itself get a 403 even when `relay.host` is not a loopback address, and
 paths outside `/v1/` are not forwarded. A Gateway that cannot be reached answers
