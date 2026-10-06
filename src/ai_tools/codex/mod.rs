@@ -5,7 +5,10 @@ use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::{
     ai_tools::{
-        credential::{bearer_plan, keep_key_for_broker, relay_executable, BearerPlan, Host},
+        credential::{
+            bearer_plan, keep_key_for_broker, local_proxy_url, relay_executable, BearerPlan, Host,
+            PROXY_FLAG,
+        },
         gateway_credential::print_bearer,
         idp::SIGN_IN_CEILING,
         launch_agent::{require_daemon, DaemonHost, Launchd},
@@ -140,7 +143,7 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
     if !params.quiet {
         println!(
             "Codex is wired to {} (provider `{}`, model `{}`)",
-            provider_base_url(&settings),
+            provider_base_url(&settings, &credential),
             settings.codex.provider_id,
             settings.codex.model
         );
@@ -182,8 +185,13 @@ fn codex_config_path() -> PathBuf {
     home_dir().join(".codex").join("config.toml")
 }
 
-fn provider_base_url(settings: &RelaySettings) -> String {
-    format!("{}/v1", settings.gateway.url.trim_end_matches('/'))
+fn provider_base_url(settings: &RelaySettings, credential: &Credential) -> String {
+    match credential {
+        Credential::Broker => format!("{}/v1", local_proxy_url(settings)),
+        Credential::TokenHelper | Credential::EnvKey(_) | Credential::StaticKey(_) => {
+            format!("{}/v1", settings.gateway.url.trim_end_matches('/'))
+        }
+    }
 }
 
 fn write_codex_config(
@@ -238,7 +246,7 @@ fn render_codex_config(
 fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: &str) -> Table {
     let mut provider = Table::new();
     provider["name"] = value("LiteLLM AI Gateway");
-    provider["base_url"] = value(provider_base_url(settings));
+    provider["base_url"] = value(provider_base_url(settings, credential));
     provider["wire_api"] = value(WIRE_API);
 
     if let Some(team) = &settings.codex.team {
@@ -251,10 +259,10 @@ fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: 
     // mutually exclusive, so exactly one is written.
     match credential {
         Credential::Broker => {
-            provider["auth"] = Item::Table(auth_hook(exe, "credential"));
+            provider["auth"] = Item::Table(auth_hook(exe, &["credential", PROXY_FLAG]));
         }
         Credential::TokenHelper => {
-            provider["auth"] = Item::Table(auth_hook(exe, "codex-token"));
+            provider["auth"] = Item::Table(auth_hook(exe, &["codex-token"]));
         }
         Credential::EnvKey(var) => {
             provider["env_key"] = value(*var);
@@ -267,12 +275,10 @@ fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: 
     provider
 }
 
-fn auth_hook(exe: &str, subcommand: &str) -> Table {
+fn auth_hook(exe: &str, arguments: &[&str]) -> Table {
     let mut auth = Table::new();
     auth["command"] = value(exe);
-    let mut args = Array::new();
-    args.push(subcommand);
-    auth["args"] = value(args);
+    auth["args"] = value(arguments.iter().copied().collect::<Array>());
     auth["timeout_ms"] = value(TOKEN_COMMAND_TIMEOUT_MS);
     auth["refresh_interval_ms"] = value(TOKEN_REFRESH_INTERVAL_MS);
     auth
@@ -368,7 +374,9 @@ mod tests {
 
     #[test]
     fn should_write_the_broker_hook_and_no_key_on_the_broker_path() {
-        let settings = settings_with_team(None);
+        let mut settings = settings_with_team(None);
+        settings.relay.host = "0.0.0.0".into();
+        settings.relay.port = 4199;
         let rendered = render_codex_config(
             "experimental_bearer_token = \"sk-stale\"\n",
             &settings,
@@ -383,7 +391,18 @@ mod tests {
             provider["auth"]["command"].as_str(),
             Some("/opt/relay/litellm-relay")
         );
-        assert_eq!(provider["auth"]["args"][0].as_str(), Some("credential"));
+        let arguments = provider["auth"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|argument| argument.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments, ["credential", "--proxy"]);
+        assert_eq!(
+            provider["base_url"].as_str(),
+            Some("http://127.0.0.1:4199/v1"),
+            "the broker path must send Codex to the daemon on loopback, whatever relay.host says"
+        );
         assert_eq!(
             provider["auth"]["timeout_ms"].as_integer(),
             Some(SIGN_IN_CEILING.as_millis() as i64)

@@ -12,7 +12,10 @@ use serde_json::{json, Map, Value};
 
 use crate::{
     ai_tools::{
-        credential::{bearer_plan, keep_key_for_broker, relay_executable, BearerPlan, Host},
+        credential::{
+            bearer_plan, keep_key_for_broker, local_proxy_url, relay_executable, BearerPlan, Host,
+            PROXY_FLAG,
+        },
         gateway_credential::print_bearer,
         launch_agent::{require_daemon, DaemonHost, Launchd},
     },
@@ -40,7 +43,7 @@ impl<'a> Credential<'a> {
     fn from_plan(plan: BearerPlan<'a>, exe: &str) -> Self {
         match plan {
             BearerPlan::Broker => Credential::Broker {
-                helper: helper_command(exe, "credential"),
+                helper: helper_command(exe, &format!("credential {PROXY_FLAG}")),
             },
             BearerPlan::LegacyHelper => Credential::TokenHelper,
             BearerPlan::StaticKey(key) => Credential::StaticKey(key),
@@ -127,7 +130,14 @@ fn onboard_with(
     }
 
     if !params.quiet {
-        println!("Claude Code is wired to {}", settings.gateway.url);
+        match &credential {
+            Credential::Broker { .. } => println!(
+                "Claude Code is wired to {} through the Relay daemon at {}",
+                settings.gateway.url,
+                local_proxy_url(&settings)
+            ),
+            _ => println!("Claude Code is wired to {}", settings.gateway.url),
+        }
         if let Some(team) = &settings.claude.team {
             println!("Team header: x-litellm-team: {team}");
         }
@@ -267,7 +277,7 @@ fn merge_claude_settings(
     let env = env_object(&mut root);
     env.insert(
         "ANTHROPIC_BASE_URL".into(),
-        Value::String(settings.gateway.url.clone()),
+        Value::String(base_url(settings, credential)),
     );
     env.insert(
         "ANTHROPIC_MODEL".into(),
@@ -312,6 +322,13 @@ fn merge_claude_settings(
     }
 
     Ok(root)
+}
+
+fn base_url(settings: &RelaySettings, credential: &Credential) -> String {
+    match credential {
+        Credential::Broker { .. } => local_proxy_url(settings),
+        Credential::TokenHelper | Credential::StaticKey(_) => settings.gateway.url.clone(),
+    }
 }
 
 fn read_existing_settings(path: &PathBuf) -> Result<Map<String, Value>> {
@@ -398,7 +415,7 @@ mod tests {
         assert_eq!(
             Credential::from_plan(BearerPlan::Broker, exe),
             Credential::Broker {
-                helper: "'/opt/relay/litellm-relay' credential".into()
+                helper: "'/opt/relay/litellm-relay' credential --proxy".into()
             }
         );
         assert_eq!(
@@ -413,7 +430,9 @@ mod tests {
 
     #[test]
     fn should_write_the_broker_helper_and_no_token_on_the_broker_path() {
-        let settings = settings_with_team(Some("engineering"));
+        let mut settings = settings_with_team(Some("engineering"));
+        settings.relay.host = "0.0.0.0".into();
+        settings.relay.port = 4199;
         let existing = serde_json::from_str::<Value>(
             r#"{"apiKeyHelper":"stale","env":{"ANTHROPIC_AUTH_TOKEN":"sk-stale","KEEP":"yes"}}"#,
         )
@@ -421,17 +440,20 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        let credential = Credential::Broker {
-            helper: "'/opt/relay/litellm-relay' credential".into(),
-        };
+        let credential = Credential::from_plan(BearerPlan::Broker, "/opt/relay/litellm-relay");
 
         let root = merge_claude_settings(existing, &settings, &credential).unwrap();
 
         assert_eq!(
             root["apiKeyHelper"],
-            Value::String("'/opt/relay/litellm-relay' credential".into())
+            Value::String("'/opt/relay/litellm-relay' credential --proxy".into())
         );
         let env = root["env"].as_object().unwrap();
+        assert_eq!(
+            env["ANTHROPIC_BASE_URL"],
+            Value::String("http://127.0.0.1:4199".into()),
+            "the broker path must send Claude Code to the daemon on loopback, whatever relay.host says"
+        );
         assert!(
             !env.contains_key("ANTHROPIC_AUTH_TOKEN"),
             "the broker path must leave no bearer in the settings file"
