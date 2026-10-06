@@ -1041,7 +1041,10 @@ mod tests {
             let Resolved::Issued { credential, .. } = resolved else {
                 panic!("expected an issued credential");
             };
-            assert_eq!(credential.expires_at, NOW + ASSUMED_CREDENTIAL_LIFETIME_SECONDS);
+            assert_eq!(
+                credential.expires_at,
+                NOW + ASSUMED_CREDENTIAL_LIFETIME_SECONDS
+            );
             assert!(credential.is_fresh(NOW, Renewal::NearExpiry));
             assert!(!credential.is_fresh(
                 NOW + ASSUMED_CREDENTIAL_LIFETIME_SECONDS - CREDENTIAL_REFRESH_SKEW_SECONDS,
