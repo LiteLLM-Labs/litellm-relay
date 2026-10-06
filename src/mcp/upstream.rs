@@ -258,27 +258,26 @@ mod tests {
                 Default::default(),
                 StreamableHttpServerConfig::default(),
             );
-        let router =
-            Router::new()
-                .nest_service(GATEWAY_MCP_PATH, service)
-                .layer(middleware::from_fn(
-                    move |request: Request, next: middleware::Next| {
-                        let headers = Arc::clone(&headers);
-                        async move {
-                            let presented = request
-                                .headers()
-                                .get(CREDENTIAL_HEADER)
-                                .and_then(|value| value.to_str().ok())
-                                .map(str::to_string);
-                            let accepted = presented.as_deref() == Some("Bearer sk-relay-test");
-                            headers.lock().expect("headers").push(presented);
-                            match accepted {
-                                true => next.run(request).await,
-                                false => StatusCode::UNAUTHORIZED.into_response(),
-                            }
+        let router = Router::new()
+            .nest_service("/mcp", service)
+            .layer(middleware::from_fn(
+                move |request: Request, next: middleware::Next| {
+                    let headers = Arc::clone(&headers);
+                    async move {
+                        let presented = request
+                            .headers()
+                            .get("x-litellm-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let accepted = presented.as_deref() == Some("Bearer sk-relay-test");
+                        headers.lock().expect("headers").push(presented);
+                        match accepted {
+                            true => next.run(request).await,
+                            false => StatusCode::UNAUTHORIZED.into_response(),
                         }
-                    },
-                ));
+                    }
+                },
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

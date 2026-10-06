@@ -350,6 +350,19 @@ pub(crate) mod tests {
         let by_server = catalog.search("github search", &active(&["github"]));
         assert_eq!(by_server.tools[0], "github-search_code");
         assert_eq!(by_server.tools.len(), 5);
+        let ranked = Catalog::build(
+            vec![
+                tool("search-list", "List saved searches"),
+                tool("github-search_code", "Find code"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            ranked
+                .search("search", &active(&["github", "search"]))
+                .tools,
+            ["github-search_code", "search-list"]
+        );
         assert!(catalog
             .search("payroll", &active(&["github"]))
             .tools

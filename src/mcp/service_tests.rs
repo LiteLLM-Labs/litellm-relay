@@ -118,7 +118,7 @@ async fn should_refresh_every_300_seconds_and_keep_the_catalog_when_a_refresh_fa
     service.check_session().await;
     assert_eq!(upstream.lists().len(), 1);
     assert_eq!(upstream.lists()[0].credential, "sk-static");
-    rig.clock.advance(CATALOG_REFRESH_SECONDS - 1);
+    rig.clock.advance(299);
     service.check_session().await;
     assert_eq!(upstream.lists().len(), 1);
     rig.clock.advance(1);
@@ -127,14 +127,14 @@ async fn should_refresh_every_300_seconds_and_keep_the_catalog_when_a_refresh_fa
 
     upstream.fail_lists(true);
     upstream.set_tools(vec![tool("github-get_issue", "Read one issue")]);
-    rig.clock.advance(CATALOG_REFRESH_SECONDS);
+    rig.clock.advance(300);
     service.check_session().await;
     service.check_session().await;
     assert_eq!(upstream.lists().len(), 3);
     assert_eq!(service.status()["catalog_tools"], 3);
 
     upstream.fail_lists(false);
-    rig.clock.advance(CATALOG_REFRESH_SECONDS);
+    rig.clock.advance(300);
     service.check_session().await;
     assert_eq!(upstream.lists().len(), 4);
     assert_eq!(service.status()["catalog_tools"], 1);
