@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
@@ -10,10 +10,11 @@ use rmcp::{
     ServiceExt,
 };
 use serde_json::{Map, Value};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::timeout};
 
 pub const CREDENTIAL_HEADER: &str = "x-litellm-api-key";
 pub const GATEWAY_MCP_PATH: &str = "/mcp";
+pub const CONNECT_CEILING: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayTarget {
@@ -49,12 +50,25 @@ pub trait Upstream: Send + Sync {
 
 type Connection = RunningService<RoleClient, ()>;
 
-#[derive(Default)]
 pub struct RmcpUpstream {
     connected: Mutex<Option<(GatewayTarget, Arc<Connection>)>>,
+    connect_ceiling: Duration,
+}
+
+impl Default for RmcpUpstream {
+    fn default() -> Self {
+        Self::with_connect_ceiling(CONNECT_CEILING)
+    }
 }
 
 impl RmcpUpstream {
+    pub fn with_connect_ceiling(connect_ceiling: Duration) -> Self {
+        Self {
+            connected: Mutex::new(None),
+            connect_ceiling,
+        }
+    }
+
     async fn connection(&self, target: &GatewayTarget) -> Result<Arc<Connection>, UpstreamError> {
         let mut connected = self.connected.lock().await;
         let reusable = connected
@@ -64,7 +78,15 @@ impl RmcpUpstream {
         if let Some(connection) = reusable {
             return Ok(connection);
         }
-        let connection = Arc::new(connect(target).await?);
+        let connection = match timeout(self.connect_ceiling, connect(target)).await {
+            Ok(connected) => Arc::new(connected?),
+            Err(_) => {
+                return Err(UpstreamError(format!(
+                    "the Gateway MCP server did not finish initialize within {} ms",
+                    self.connect_ceiling.as_millis()
+                )))
+            }
+        };
         *connected = Some((target.clone(), Arc::clone(&connection)));
         Ok(connection)
     }
@@ -346,6 +368,33 @@ mod tests {
         assert!(presented
             .iter()
             .all(|header| header.as_deref() == Some("Bearer sk-relay-test")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_give_up_on_a_gateway_that_accepts_tcp_but_never_answers_initialize() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                held.push(socket);
+            }
+        });
+        let target = GatewayTarget {
+            url,
+            credential: "sk-relay-test".to_string(),
+        };
+        let upstream = RmcpUpstream::with_connect_ceiling(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let outcome = timeout(Duration::from_secs(10), upstream.list_tools(&target)).await;
+        silent.abort();
+        let error = outcome
+            .expect("the connect ceiling must end the call")
+            .expect_err("a silent Gateway cannot list tools");
+        assert!(error.0.contains("initialize"), "{}", error.0);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
