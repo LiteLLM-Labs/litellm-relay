@@ -12,6 +12,7 @@ pub mod credential;
 pub mod detect;
 pub mod gateway_credential;
 pub mod idp;
+pub mod launch_agent;
 pub mod token;
 
 pub use autoconfigure::{autoconfigure, AutoConfigureParams};

@@ -47,6 +47,12 @@ when not already root (the macOS `.pkg` postinstall already runs as root). If it
 can't get root, Claude Code and Codex still auto-configure and Relay prints a
 warning for Claude Desktop.
 
+On macOS the tools get their credential from the Relay daemon, so every onboard
+command, the setup wizard, and each auto-configure pass also install and start
+the `ai.litellm.relay` LaunchAgent when no daemon is answering. A default
+install needs no `--background` for that; see
+[Credential broker](docs/mdm.md#credential-broker).
+
 You can still run detection on demand, and scope it with `--only`:
 
 ```bash

@@ -126,6 +126,34 @@ Claude Code's settings file, Codex's `config.toml`, or the Claude Desktop
 managed file: the developer's IdP session and the Gateway key live in the
 daemon's memory and are gone when it stops
 
+Every command that writes the `relay credential` helper into a tool (`relay
+onboard`, `relay onboard-codex`, `relay onboard-claude-desktop`, `relay
+autoconfigure`, and the setup wizard) makes sure that daemon is running before
+it returns. When something already answers on the socket, a foreground `relay
+serve` or an agent your MDM loaded, the command changes nothing. Otherwise it
+writes `~/Library/LaunchAgents/ai.litellm.relay.plist` (the plist `relay
+launch-agent` prints, which `install.sh --background` installs too), bootstraps
+it into the user's `gui/<uid>` domain, and waits up to 15 seconds for the socket
+to answer. When the label is already loaded but nothing answers within 3
+seconds, it restarts that agent with `launchctl kickstart -k` and leaves its
+plist alone. A start
+that fails prints one line and the command exits non-zero. The tool file it
+wrote keeps pointing at the helper, which refuses until a daemon answers, and
+Relay never falls back to a key or token on disk
+
+The agent pins `HOME` to the home directory the command ran with, the same way
+the Claude Desktop LaunchDaemon does, so the daemon reads the `~/.litellm-relay`
+the tool files point at even when the command ran through `sudo` or with a
+different `HOME`. The label exists once per login session, so a second Relay
+home cannot get its own agent while another one holds `ai.litellm.relay`.
+`relay credential` never starts the agent: launchd keeps it alive and starts it
+at login, and a daemon someone stopped on purpose stays stopped until an
+onboard command or `relay serve` runs. While a daemon answers, a second `relay
+serve` exits with an error and `relay` prints where the dashboard is instead of
+opening the trace view. To stop the agent run `launchctl bootout
+gui/$(id -u)/ai.litellm.relay`, and delete the plist to keep it from loading at
+the next login
+
 Before answering, the daemon checks who is asking. It reads the connecting
 process's uid (it has to match the daemon's), its pid, and its audit token, and
 walks the peer and up to four of its ancestors, validating each against the

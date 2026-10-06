@@ -8,6 +8,7 @@ use crate::{
         credential::{bearer_plan, keep_key_for_broker, relay_executable, BearerPlan, Host},
         gateway_credential::print_bearer,
         idp::SIGN_IN_CEILING,
+        launch_agent::{require_daemon, DaemonHost, Launchd},
     },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
@@ -83,6 +84,10 @@ pub struct CodexOnboardParams {
 /// a short-lived corporate-identity bearer token and no provider key ever
 /// touches the device. `--env-key` and a static `--api-key` are alternatives.
 pub fn onboard(params: CodexOnboardParams) -> Result<()> {
+    onboard_with(params, &Launchd)
+}
+
+fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
@@ -128,6 +133,9 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     let exe = relay_executable()?;
     let config_path = write_codex_config(&settings, &credential, &exe)?;
     save_settings(&settings)?;
+    if credential == Credential::Broker {
+        require_daemon(daemon, params.quiet)?;
+    }
 
     if !params.quiet {
         println!(
@@ -284,6 +292,7 @@ fn secure_file(path: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
     use crate::config::RelaySettings;
 
     fn settings_with_team(team: Option<&str>) -> RelaySettings {
@@ -489,6 +498,9 @@ base_url = \"https://other.example.com/v1\"
 
     #[test]
     fn should_write_to_env_override_path() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = env::temp_dir().join(format!("relay-codex-test-{}", std::process::id()));
         let config_path = dir.join("config.toml");
         let _ = fs::remove_dir_all(&dir);
@@ -508,5 +520,65 @@ base_url = \"https://other.example.com/v1\"
 
         env::remove_var(CODEX_CONFIG_PATH_ENV);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_start_the_daemon_only_for_the_credential_helper() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = env::temp_dir().join(format!("relay-codex-daemon-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let with_key = || CodexOnboardParams {
+            gateway_url: Some("https://gw.corp".into()),
+            api_key: Some("sk-saved".into()),
+            quiet: true,
+            ..CodexOnboardParams::default()
+        };
+
+        let env_key_run = FakeHost::down();
+        let env_key = onboard_with(
+            CodexOnboardParams {
+                gateway_url: Some("https://gw.corp".into()),
+                env_key: Some("LITELLM_KEY".into()),
+                quiet: true,
+                ..CodexOnboardParams::default()
+            },
+            &env_key_run,
+        );
+        let fresh = FakeHost::down();
+        let first = onboard_with(with_key(), &fresh);
+        let running = FakeHost::answering();
+        let second = onboard_with(with_key(), &running);
+        let broken = FakeHost::down().launchd_failing("denied");
+        let third = onboard_with(with_key(), &broken);
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).unwrap();
+        env_key.unwrap();
+        first.unwrap();
+        second.unwrap();
+        assert!(env_key_run.calls.borrow().is_empty());
+        match Host::current() {
+            Host::MacOs => {
+                assert_eq!(fresh.count("install_agent"), 1);
+                assert_eq!(*running.calls.borrow(), vec!["answers"]);
+                assert!(third
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("could not start the Relay daemon"));
+            }
+            Host::Other => {
+                assert!(fresh.calls.borrow().is_empty());
+                assert!(running.calls.borrow().is_empty());
+                third.unwrap();
+            }
+        }
     }
 }

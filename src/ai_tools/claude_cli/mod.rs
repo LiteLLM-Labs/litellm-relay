@@ -7,6 +7,7 @@ use crate::{
     ai_tools::{
         credential::{bearer_plan, keep_key_for_broker, relay_executable, BearerPlan, Host},
         gateway_credential::print_bearer,
+        launch_agent::{require_daemon, DaemonHost, Launchd},
     },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
@@ -63,6 +64,10 @@ pub struct OnboardParams {
 /// supplied (or configured with no IdP), it is written to `ANTHROPIC_AUTH_TOKEN`
 /// instead.
 pub fn onboard(params: OnboardParams) -> Result<()> {
+    onboard_with(params, &Launchd)
+}
+
+fn onboard_with(params: OnboardParams, daemon: &dyn DaemonHost) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
@@ -102,6 +107,9 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
 
     let settings_path = write_claude_settings(&settings, &credential)?;
     save_settings(&settings)?;
+    if let Credential::Broker { .. } = credential {
+        require_daemon(daemon, params.quiet)?;
+    }
 
     if !params.quiet {
         println!("Claude Code is wired to {}", settings.gateway.url);
@@ -418,5 +426,56 @@ mod tests {
                 .contains_key("ANTHROPIC_CUSTOM_HEADERS"),
             "no team means no custom headers"
         );
+    }
+
+    #[test]
+    fn should_start_the_daemon_whenever_the_credential_helper_is_written() {
+        use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
+        use std::env;
+
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = env::temp_dir().join(format!("relay-cc-daemon-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let params = || OnboardParams {
+            gateway_url: Some("https://gw.corp".into()),
+            api_key: Some("sk-saved".into()),
+            quiet: true,
+            ..OnboardParams::default()
+        };
+
+        let fresh = FakeHost::down();
+        let first = onboard_with(params(), &fresh);
+        let running = FakeHost::answering();
+        let second = onboard_with(params(), &running);
+        let broken = FakeHost::down().launchd_failing("denied");
+        let third = onboard_with(params(), &broken);
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).unwrap();
+        first.unwrap();
+        second.unwrap();
+        match Host::current() {
+            Host::MacOs => {
+                assert_eq!(fresh.count("install_agent"), 1);
+                assert_eq!(*running.calls.borrow(), vec!["answers"]);
+                assert!(third
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("could not start the Relay daemon"));
+            }
+            Host::Other => {
+                assert!(fresh.calls.borrow().is_empty());
+                assert!(running.calls.borrow().is_empty());
+                third.unwrap();
+            }
+        }
     }
 }

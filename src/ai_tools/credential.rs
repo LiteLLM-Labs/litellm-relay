@@ -3,7 +3,7 @@
 //! drive the daemon's IdP session from a terminal, and the onboarding writers
 //! ask here which bearer source a client file should name.
 
-use std::{env, process::ExitCode, time::Duration};
+use std::{env, path::Path, process::ExitCode, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -19,6 +19,7 @@ pub const LAUNCH_AGENT_LABEL: &str = "ai.litellm.relay";
 /// `scheduled-task` mean nobody is watching for a browser.
 const HELPER_CONTEXT_ENV: &str = "CLAUDE_HELPER_CONTEXT";
 const REPLY_GRACE: Duration = Duration::from_secs(15);
+const PROBE_PATIENCE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
@@ -132,13 +133,21 @@ pub(crate) fn helper_context(value: Option<&str>) -> HelperContext {
     }
 }
 
+pub fn daemon_answers(socket: &Path) -> bool {
+    !matches!(
+        transport::exchange(socket, &Request::Status, PROBE_PATIENCE),
+        Err(transport::Failure::NoDaemon)
+    )
+}
+
 fn ask(request: Request) -> Outcome {
     let path = crate::broker::socket_path();
-    match transport::exchange(&path, &request) {
+    match transport::exchange(&path, &request, SIGN_IN_CEILING + REPLY_GRACE) {
         Ok(reply) => interpret(request, &reply),
         Err(transport::Failure::NoDaemon) => Outcome::Failed(format!(
-            "relay credential: the Relay daemon is not running (no socket at {}); start it with \
-             `relay serve` or load the {LAUNCH_AGENT_LABEL} LaunchAgent",
+            "relay credential: the Relay daemon is not running (no socket at {}); run `relay \
+             autoconfigure` or your onboard command again to start the {LAUNCH_AGENT_LABEL} \
+             LaunchAgent, or run `relay serve` in a terminal",
             path.display()
         )),
         Err(transport::Failure::Broken(message)) => {
@@ -175,12 +184,13 @@ pub(crate) fn interpret(request: Request, reply: &Value) -> Outcome {
 
 #[cfg(unix)]
 mod transport {
-    use super::{Request, REPLY_GRACE, SIGN_IN_CEILING};
+    use super::Request;
     use serde_json::Value;
     use std::{
         io::{BufRead, BufReader, ErrorKind, Write},
         os::unix::net::UnixStream,
         path::Path,
+        time::Duration,
     };
 
     pub(super) enum Failure {
@@ -188,13 +198,17 @@ mod transport {
         Broken(String),
     }
 
-    pub(super) fn exchange(path: &Path, request: &Request) -> Result<Value, Failure> {
+    pub(super) fn exchange(
+        path: &Path,
+        request: &Request,
+        patience: Duration,
+    ) -> Result<Value, Failure> {
         let mut stream = UnixStream::connect(path).map_err(|error| match error.kind() {
             ErrorKind::NotFound | ErrorKind::ConnectionRefused => Failure::NoDaemon,
             _ => Failure::Broken(format!("could not reach the daemon socket: {error}")),
         })?;
         stream
-            .set_read_timeout(Some(SIGN_IN_CEILING + REPLY_GRACE))
+            .set_read_timeout(Some(patience))
             .map_err(|error| Failure::Broken(error.to_string()))?;
         let line =
             serde_json::to_string(request).map_err(|error| Failure::Broken(error.to_string()))?;
@@ -215,14 +229,18 @@ mod transport {
 mod transport {
     use super::Request;
     use serde_json::Value;
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
 
     pub(super) enum Failure {
         NoDaemon,
         Broken(String),
     }
 
-    pub(super) fn exchange(_path: &Path, _request: &Request) -> Result<Value, Failure> {
+    pub(super) fn exchange(
+        _path: &Path,
+        _request: &Request,
+        _patience: Duration,
+    ) -> Result<Value, Failure> {
         Err(Failure::Broken(
             "the credential broker needs a Unix socket, which this platform has none of"
                 .to_string(),
@@ -324,6 +342,31 @@ mod tests {
         let mut nothing_passed = RelaySettings::default();
         keep_key_for_broker(&mut nothing_passed, Host::MacOs, None);
         assert_eq!(nothing_passed.gateway.api_key, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_see_a_daemon_only_while_something_listens_on_the_socket() {
+        use std::{fs, io::Write, os::unix::net::UnixListener, thread};
+
+        let dir = env::temp_dir().join(format!("relay-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("b.sock");
+        assert!(!daemon_answers(&socket));
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        let daemon = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(b"{\"ok\":false,\"reason\":\"caller_refused\"}\n")
+                .unwrap();
+        });
+        assert!(daemon_answers(&socket));
+        daemon.join().unwrap();
+
+        assert!(socket.exists());
+        assert!(!daemon_answers(&socket));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

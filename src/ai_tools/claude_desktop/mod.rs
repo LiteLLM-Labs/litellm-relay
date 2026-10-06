@@ -11,6 +11,7 @@ use crate::{
         credential::{relay_executable, Host},
         gateway_credential::{ensure_gateway_credential, GatewayCredential, Renewal},
         idp::SIGN_IN_CEILING,
+        launch_agent::{require_daemon, DaemonHost, Launchd},
         token::SignIn,
     },
     config::{load_settings, save_settings, DesktopSso, RelaySettings},
@@ -74,6 +75,10 @@ pub struct OnboardDesktopParams {
 /// into gateway mode and, in SSO mode, prompts the developer to sign in
 /// through their browser on first use.
 pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
+    onboard_desktop_with(params, &Launchd)
+}
+
+fn onboard_desktop_with(params: OnboardDesktopParams, daemon: &dyn DaemonHost) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
@@ -123,6 +128,9 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     let document = build_managed_settings(&settings, &credential);
     let written = write_managed_settings(&ManagedLayout::for_host(), &document)?;
     save_settings(&settings)?;
+    if let DesktopCredential::Helper(_) = credential {
+        require_daemon(daemon, params.quiet)?;
+    }
 
     if let Some(stale) = &written.removed_stale {
         println!("Removed stale {}", stale.display());
@@ -580,6 +588,7 @@ fn managed_write_error(error: io::Error, layout: &ManagedLayout, path: &Path) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
 
     fn settings_with(url: &str, key: Option<&str>, model: &str) -> RelaySettings {
         let mut settings = RelaySettings::default();
@@ -1426,8 +1435,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
         match value {
             Some(value) => env::set_var(name, value),
@@ -1437,7 +1444,9 @@ mod tests {
 
     #[test]
     fn should_reuse_the_saved_sso_on_an_unattended_rerun() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("sso-reuse-home");
         let managed = scratch_dir("sso-reuse").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1445,20 +1454,26 @@ mod tests {
         env::set_var("HOME", &home);
         env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
 
-        onboard_desktop(OnboardDesktopParams {
-            gateway_url: Some("https://gw.corp".into()),
-            api_key: Some("sk-saved".into()),
-            oidc_client_id: Some("client-1".into()),
-            oidc_issuer: Some("https://issuer.corp".into()),
-            quiet: true,
-            ..OnboardDesktopParams::default()
-        })
+        onboard_desktop_with(
+            OnboardDesktopParams {
+                gateway_url: Some("https://gw.corp".into()),
+                api_key: Some("sk-saved".into()),
+                oidc_client_id: Some("client-1".into()),
+                oidc_issuer: Some("https://issuer.corp".into()),
+                quiet: true,
+                ..OnboardDesktopParams::default()
+            },
+            &FakeHost::answering(),
+        )
         .unwrap();
-        onboard_desktop(OnboardDesktopParams {
-            reuse_saved_sso: true,
-            quiet: true,
-            ..OnboardDesktopParams::default()
-        })
+        onboard_desktop_with(
+            OnboardDesktopParams {
+                reuse_saved_sso: true,
+                quiet: true,
+                ..OnboardDesktopParams::default()
+            },
+            &FakeHost::answering(),
+        )
         .unwrap();
 
         let on_disk: plist::Value = plist::from_file(&managed).unwrap();
@@ -1485,7 +1500,9 @@ mod tests {
 
     #[test]
     fn should_keep_the_setup_enrollment_timestamps_on_an_unattended_rerun() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("keep-expiry-home");
         let managed = scratch_dir("keep-expiry").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1503,12 +1520,15 @@ mod tests {
         enrolled.gateway.expires_at = Some(expires_at);
         save_settings(&enrolled).unwrap();
 
-        onboard_desktop(OnboardDesktopParams {
-            api_key: Some("sk-saved".into()),
-            reuse_saved_sso: true,
-            quiet: true,
-            ..OnboardDesktopParams::default()
-        })
+        onboard_desktop_with(
+            OnboardDesktopParams {
+                api_key: Some("sk-saved".into()),
+                reuse_saved_sso: true,
+                quiet: true,
+                ..OnboardDesktopParams::default()
+            },
+            &FakeHost::answering(),
+        )
         .unwrap();
 
         let saved = load_settings().unwrap();
@@ -1532,7 +1552,9 @@ mod tests {
 
     #[test]
     fn should_save_the_team_the_exchange_is_issued_for() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("team-home");
         let managed = scratch_dir("team").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1540,21 +1562,27 @@ mod tests {
         env::set_var("HOME", &home);
         env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
 
-        onboard_desktop(OnboardDesktopParams {
-            gateway_url: Some("https://gw.corp".into()),
-            team: Some("eng".into()),
-            api_key: Some("sk-saved".into()),
-            quiet: true,
-            ..OnboardDesktopParams::default()
-        })
+        onboard_desktop_with(
+            OnboardDesktopParams {
+                gateway_url: Some("https://gw.corp".into()),
+                team: Some("eng".into()),
+                api_key: Some("sk-saved".into()),
+                quiet: true,
+                ..OnboardDesktopParams::default()
+            },
+            &FakeHost::answering(),
+        )
         .unwrap();
         assert_eq!(load_settings().unwrap().claude.team.as_deref(), Some("eng"));
 
-        onboard_desktop(OnboardDesktopParams {
-            api_key: Some("sk-saved".into()),
-            quiet: true,
-            ..OnboardDesktopParams::default()
-        })
+        onboard_desktop_with(
+            OnboardDesktopParams {
+                api_key: Some("sk-saved".into()),
+                quiet: true,
+                ..OnboardDesktopParams::default()
+            },
+            &FakeHost::answering(),
+        )
         .unwrap();
         assert_eq!(
             load_settings().unwrap().claude.team.as_deref(),
@@ -1570,7 +1598,9 @@ mod tests {
 
     #[test]
     fn should_switch_back_to_a_static_key_and_clear_the_saved_sso() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("sso-clear-home");
         let managed = scratch_dir("sso-clear").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1578,22 +1608,46 @@ mod tests {
         env::set_var("HOME", &home);
         env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
 
-        onboard_desktop(OnboardDesktopParams {
-            gateway_url: Some("https://gw.corp".into()),
-            api_key: Some("sk-saved".into()),
-            oidc_client_id: Some("client-1".into()),
-            oidc_issuer: Some("https://issuer.corp".into()),
-            quiet: true,
-            ..OnboardDesktopParams::default()
-        })
+        let sso_run = FakeHost::down();
+        onboard_desktop_with(
+            OnboardDesktopParams {
+                gateway_url: Some("https://gw.corp".into()),
+                api_key: Some("sk-saved".into()),
+                oidc_client_id: Some("client-1".into()),
+                oidc_issuer: Some("https://issuer.corp".into()),
+                quiet: true,
+                ..OnboardDesktopParams::default()
+            },
+            &sso_run,
+        )
         .unwrap();
-        onboard_desktop(OnboardDesktopParams {
+        assert!(
+            sso_run.calls.borrow().is_empty(),
+            "an SSO onboard writes no helper, so it must leave the daemon alone"
+        );
+        let key_params = || OnboardDesktopParams {
             api_key: Some("sk-saved".into()),
             reuse_saved_sso: false,
             quiet: true,
             ..OnboardDesktopParams::default()
-        })
-        .unwrap();
+        };
+        let key_run = FakeHost::down();
+        onboard_desktop_with(key_params(), &key_run).unwrap();
+        let failed_start = FakeHost::down().launchd_failing("denied");
+        let failed = onboard_desktop_with(key_params(), &failed_start);
+        match Host::current() {
+            Host::MacOs => {
+                assert_eq!(key_run.count("install_agent"), 1);
+                assert!(failed
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("could not start the Relay daemon"));
+            }
+            Host::Other => {
+                assert!(key_run.calls.borrow().is_empty());
+                failed.unwrap();
+            }
+        }
 
         let on_disk: plist::Value = plist::from_file(&managed).unwrap();
         let kind_for_a_key = match Host::current() {

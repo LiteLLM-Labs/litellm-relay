@@ -39,7 +39,8 @@ Options:
   --skip-autoconfigure            Do not auto-detect and wire installed AI tools to the Gateway
                                   (also disables periodic re-detection of later installs)
   --skip-trust-ca                 Install without adding the Relay CA to login keychain
-  --background                    Configure Gateway auth and start the LaunchAgent
+  --background                    Configure Gateway auth now, restart the Relay LaunchAgent,
+                                  and re-detect AI tools on an interval
   --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
   --gateway-url URL               Gateway URL for non-interactive setup
   --api-key KEY                   Gateway key for non-interactive setup
@@ -58,7 +59,14 @@ login keychain so AI app payloads can be captured. Then run:
 The relay command opens the interactive setup wizard when needed and then starts
 the foreground terminal trace view.
 
-Pass --background to also configure Gateway SSO and start the Relay LaunchAgent.
+Wiring an AI tool (the wizard, relay onboard, relay onboard-codex,
+relay onboard-claude-desktop, relay autoconfigure) installs and starts the
+ai.litellm.relay LaunchAgent when no Relay daemon is answering, because the
+tools ask that daemon for their credential. With the agent running, relay
+prints where the dashboard is instead of opening the trace view.
+
+Pass --background to also configure Gateway SSO during the install, restart the
+LaunchAgent on the new binary, and re-detect AI tools on an interval.
 Pass --set-system-proxy "Wi-Fi" to route AI apps through the background service.
 
 Relay settings are stored in:
@@ -429,8 +437,11 @@ LiteLLM Relay installed.
 Command:     $INSTALL_BIN_DIR/relay
 Relay CA:    $CA_PATH
 
-Start the interactive setup and live trace view:
+Start the interactive setup:
   relay
+
+Setup wires your AI tools and keeps Relay running in the background as the
+ai.litellm.relay LaunchAgent, which the tools ask for their credential.
 DONE
   if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
     cat <<DONE
@@ -473,14 +484,6 @@ else
   "$RELAY_HOME/bin/litellm-relay" setup "${SETUP_ARGS[@]}"
 fi
 
-mkdir -p "$RELAY_HOME/bin"
-cat > "$RELAY_HOME/bin/run-relay" <<RUNNER
-#!/usr/bin/env zsh
-set -euo pipefail
-exec "$RELAY_HOME/bin/litellm-relay" serve
-RUNNER
-chmod 700 "$RELAY_HOME/bin/run-relay"
-
 "$RELAY_HOME/bin/litellm-relay" pac > "$RELAY_HOME/relay.pac"
 RELAY_PORT="$(sed -n 's/.*PROXY 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$RELAY_HOME/relay.pac" | head -n 1)"
 if [[ -z "$RELAY_PORT" ]]; then
@@ -489,28 +492,7 @@ fi
 
 PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.plist"
 mkdir -p "$(dirname "$PLIST")"
-cat > "$PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>ai.litellm.relay</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$RELAY_HOME/bin/run-relay</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>$RELAY_HOME/launchd.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>$RELAY_HOME/launchd.err.log</string>
-</dict>
-</plist>
-PLIST
+"$RELAY_HOME/bin/litellm-relay" launch-agent > "$PLIST"
 
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"

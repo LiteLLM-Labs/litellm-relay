@@ -6,8 +6,11 @@ use clap::{Args, Parser, Subcommand};
 use crate::{
     ai_tools::{
         autoconfigure,
-        credential::{run_credential, run_sign_in, run_sign_out},
+        credential::{
+            daemon_answers, run_credential, run_sign_in, run_sign_out, Host, LAUNCH_AGENT_LABEL,
+        },
         detect::AiTool,
+        launch_agent::host_plist,
         onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
         AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
@@ -83,6 +86,8 @@ enum CommandKind {
     Serve,
     /// Print the PAC file served by Relay.
     Pac,
+    /// Print the macOS LaunchAgent plist that keeps `relay serve` running.
+    LaunchAgent,
     /// Create the local CA and print its path.
     CaPath,
     /// Configure Gateway URL and API key for Relay ingest.
@@ -193,7 +198,23 @@ async fn run_interactive_default() -> Result<()> {
         run_setup(None, None).await?;
         settings = load_settings()?;
     }
+    if another_daemon_answers(Host::current(), || {
+        daemon_answers(&crate::broker::socket_path())
+    }) {
+        let config = settings.to_config();
+        println!(
+            "LiteLLM Relay is already running in the background (dashboard: http://{}:{}/). \
+             To watch traffic in this terminal instead, stop it first: \
+             launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL}",
+            config.host, config.port
+        );
+        return Ok(());
+    }
     serve(settings).await
+}
+
+fn another_daemon_answers(host: Host, answers: impl FnOnce() -> bool) -> bool {
+    host == Host::MacOs && answers()
 }
 
 async fn run_command(command: CommandKind) -> Result<()> {
@@ -202,6 +223,10 @@ async fn run_command(command: CommandKind) -> Result<()> {
         CommandKind::Serve => serve(load_settings()?).await,
         CommandKind::Pac => {
             print!("{}", build_pac(&config));
+            Ok(())
+        }
+        CommandKind::LaunchAgent => {
+            print!("{}", host_plist()?);
             Ok(())
         }
         CommandKind::CaPath => {
@@ -319,9 +344,16 @@ async fn serve(settings: RelaySettings) -> Result<()> {
 
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
 
+    let path = socket_path();
+    if another_daemon_answers(Host::current(), || daemon_answers(&path)) {
+        anyhow::bail!(
+            "Relay is already running: a daemon answers on {}; stop it before starting another \
+             (launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL} stops the LaunchAgent)",
+            path.display()
+        );
+    }
     let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
     let proxy = RelayProxy::new(settings.to_config()).with_broker(Arc::clone(&broker));
-    let path = socket_path();
     let listener = socket::bind(&path)?;
     eprintln!("broker: listening on {}", path.display());
     let socket_task = tokio::spawn(socket::serve(
@@ -412,6 +444,7 @@ mod tests {
         match command {
             CommandKind::Serve => "serve",
             CommandKind::Pac => "pac",
+            CommandKind::LaunchAgent => "launch-agent",
             CommandKind::CaPath => "ca-path",
             CommandKind::Setup { .. } => "setup",
             CommandKind::Autoconfigure { .. } => "autoconfigure",
@@ -443,6 +476,17 @@ mod tests {
         assert_eq!(
             describe(&daemon_command(&["relay", "claude-token"])),
             "claude-token"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_second_daemon_only_on_macos_and_only_while_one_answers() {
+        assert!(another_daemon_answers(Host::MacOs, || true));
+        assert!(!another_daemon_answers(Host::MacOs, || false));
+        assert!(!another_daemon_answers(Host::Other, || true));
+        assert_eq!(
+            describe(&daemon_command(&["relay", "launch-agent"])),
+            "launch-agent"
         );
     }
 
