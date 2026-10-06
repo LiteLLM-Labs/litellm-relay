@@ -29,6 +29,7 @@ use crate::{
 pub const SESSION_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 pub const CATALOG_REFRESH_SECONDS: i64 = 300;
 pub const CALL_CEILING: Duration = Duration::from_secs(300);
+pub const SHOWN_ARGUMENT_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -495,8 +496,10 @@ impl McpService {
             let question = Question {
                 kind: QuestionKind::ConfirmCall,
                 message: format!(
-                    "Run {name} on the MCP server {}? Relay could not show that it only reads.",
-                    entry.server
+                    "Run {} on the MCP server {} with {}? Relay could not show that it only reads.",
+                    quoted(name),
+                    quoted(&entry.server),
+                    argument_preview(arguments.as_ref())
                 ),
             };
             confirm(question, asker).await?;
@@ -539,7 +542,8 @@ impl McpService {
         let question = Question {
             kind: QuestionKind::ActivateServer,
             message: format!(
-                "Activate the MCP server {server}? Its {tools} tools become available to search and call."
+                "Activate the MCP server {}? Its {tools} tools become available to search and call.",
+                quoted(server)
             ),
         };
         confirm(question, asker).await?;
@@ -580,6 +584,31 @@ pub async fn watch_session(service: Arc<McpService>, every: Duration) {
     loop {
         interval.tick().await;
         service.check_session().await;
+fn quoted(text: &str) -> String {
+    format!("{text:?}")
+}
+
+fn argument_preview(arguments: Option<&Map<String, Value>>) -> String {
+    let Some(arguments) = arguments.filter(|arguments| !arguments.is_empty()) else {
+        return "no arguments".to_string();
+    };
+    let rendered = Value::Object(arguments.clone()).to_string();
+    if rendered.len() <= SHOWN_ARGUMENT_BYTES {
+        return format!("arguments {rendered}");
+    }
+    let shown = rendered
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= SHOWN_ARGUMENT_BYTES)
+        .last()
+        .unwrap_or(0);
+    format!(
+        "arguments {}... (the first {shown} of {} bytes)",
+        &rendered[..shown],
+        rendered.len()
+    )
+}
+
     }
 }
 
