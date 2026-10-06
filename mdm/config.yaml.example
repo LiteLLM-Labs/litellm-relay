@@ -14,9 +14,23 @@ relay:
   port: 4142
 
 gateway:
-  # Your LiteLLM AI Gateway base URL.
+  # Your LiteLLM AI Gateway base URL. With an environments list below, this
+  # is the current environment and a switch rewrites it.
   url: https://litellm-gateway.your-company.com
   # api_key: sk-...  # optional; omit to use per-user browser SSO
+  # team: eng-platform  # the team the daemon mints keys for; a team switch writes it
+
+# The Gateways a developer can switch between from RelayBar or an agent; the
+# one whose url equals gateway.url is current. All share the idp section. An
+# entry's team is that Gateway's default team until the developer picks one.
+# environments:
+#   - name: prod
+#     url: https://litellm-gateway.your-company.com
+#     team: eng-platform
+#   - name: uat
+#     url: https://litellm-gateway-uat.your-company.com
+#   - name: test
+#     url: https://litellm-gateway-test.your-company.com
 
 # Org IdP for the per-user OIDC sign-in (authorization code plus PKCE) that
 # Claude Code, Codex, and Claude Desktop use to reach the Gateway. Register

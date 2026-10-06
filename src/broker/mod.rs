@@ -377,7 +377,7 @@ impl Target {
             version,
             mode: Mode::from_settings(settings),
             gateway_url: settings.gateway.url.trim_end_matches('/').to_string(),
-            team: managed_team(settings),
+            team: settings.managed_team(),
             callers: effective_callers(managed),
             unanchored: unanchored_callers(managed),
         }
@@ -1061,29 +1061,6 @@ impl Broker {
 enum KeyOutcome {
     Issued(Issued),
     DeadBearer,
-}
-
-fn managed_team(settings: &RelaySettings) -> Option<String> {
-    let claude = settings
-        .claude
-        .team
-        .as_deref()
-        .map(str::trim)
-        .filter(|team| !team.is_empty());
-    let codex = settings
-        .codex
-        .team
-        .as_deref()
-        .map(str::trim)
-        .filter(|team| !team.is_empty());
-    if let (Some(claude), Some(codex)) = (claude, codex) {
-        if claude != codex {
-            eprintln!(
-                "broker: claude.team ({claude}) and codex.team ({codex}) differ; minting keys for {claude}"
-            );
-        }
-    }
-    claude.or(codex).map(str::to_string)
 }
 
 fn mint_notice(team: &str, refusal: &MintRefusal) -> String {

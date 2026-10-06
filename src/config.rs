@@ -48,9 +48,56 @@ pub struct RelaySettings {
     pub codex: CodexSection,
     pub credential: CredentialSection,
     pub mcp: McpSection,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<EnvironmentEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct EnvironmentEntry {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+}
+
+fn without_trailing_slash(url: &str) -> &str {
+    url.strip_suffix('/').unwrap_or(url)
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 impl RelaySettings {
+    pub fn current_environment(&self) -> Option<&EnvironmentEntry> {
+        let current = without_trailing_slash(self.gateway.url.trim());
+        self.environments
+            .iter()
+            .find(|entry| without_trailing_slash(entry.url.trim()) == current)
+    }
+
+    pub fn managed_team(&self) -> Option<String> {
+        let selected = non_empty(self.gateway.team.as_deref());
+        let environment = non_empty(
+            self.current_environment()
+                .and_then(|entry| entry.team.as_deref()),
+        );
+        let claude = non_empty(self.claude.team.as_deref());
+        let codex = non_empty(self.codex.team.as_deref());
+        if let (None, None, Some(claude), Some(codex)) = (selected, environment, claude, codex) {
+            if claude != codex {
+                eprintln!(
+                    "broker: claude.team ({claude}) and codex.team ({codex}) differ; minting keys for {claude}"
+                );
+            }
+        }
+        selected
+            .or(environment)
+            .or(claude)
+            .or(codex)
+            .map(str::to_string)
+    }
+
     pub fn to_config(&self) -> RelayConfig {
         RelayConfig {
             host: self.relay.host.clone(),
@@ -109,6 +156,8 @@ pub struct GatewaySection {
     pub enrolled_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
 }
 
 impl Default for GatewaySection {
@@ -118,6 +167,7 @@ impl Default for GatewaySection {
             api_key: None,
             enrolled_at: None,
             expires_at: None,
+            team: None,
         }
     }
 }
@@ -593,6 +643,7 @@ gateway:
                 api_key: Some("sk-test".into()),
                 enrolled_at: Some(enrolled_at),
                 expires_at: Some(expires_at),
+                ..GatewaySection::default()
             },
             ..RelaySettings::default()
         };
@@ -777,6 +828,134 @@ capture:
             .contains("authorize_url is no longer used"));
         assert!(!IdpSection::default().setup_hint().contains("authorize_url"));
         assert!(IdpSection::default().setup_hint().contains("--oidc-issuer"));
+    }
+
+    const THREE_ENVIRONMENTS: &str = r#"
+gateway:
+  url: https://uat.example.com/
+  team: picked
+environments:
+  - name: prod
+    url: https://prod.example.com
+    team: prod-team
+  - name: uat
+    url: https://uat.example.com
+  - name: test
+    url: https://test.example.com/
+    team: test-team
+claude:
+  team: claude-team
+codex:
+  team: codex-team
+"#;
+
+    #[test]
+    fn should_parse_the_environments_list_and_the_selected_team() {
+        let settings: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+
+        assert_eq!(settings.gateway.team.as_deref(), Some("picked"));
+        assert_eq!(
+            settings
+                .environments
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["prod", "uat", "test"]
+        );
+        assert_eq!(
+            settings.environments[2],
+            EnvironmentEntry {
+                name: "test".into(),
+                url: "https://test.example.com/".into(),
+                team: Some("test-team".into()),
+            }
+        );
+        assert_eq!(settings.environments[1].team, None);
+    }
+
+    #[test]
+    fn should_match_the_current_environment_by_url_ignoring_one_trailing_slash() {
+        let mut settings: RelaySettings =
+            serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+
+        settings.gateway.url = "https://uat.example.com".into();
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+
+        settings.gateway.url = "https://test.example.com".into();
+        assert_eq!(settings.current_environment().unwrap().name, "test");
+
+        settings.gateway.url = "https://elsewhere.example.com".into();
+        assert_eq!(settings.current_environment(), None);
+
+        settings.gateway.url = "https://uat.example.com//".into();
+        assert_eq!(settings.current_environment(), None);
+
+        assert_eq!(RelaySettings::default().current_environment(), None);
+    }
+
+    #[test]
+    fn should_pick_the_managed_team_from_gateway_then_environment_then_claude_then_codex() {
+        let mut settings: RelaySettings =
+            serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        settings.gateway.url = "https://prod.example.com".into();
+        assert_eq!(settings.managed_team().as_deref(), Some("picked"));
+
+        settings.gateway.team = None;
+        assert_eq!(settings.managed_team().as_deref(), Some("prod-team"));
+
+        settings.gateway.url = "https://uat.example.com".into();
+        assert_eq!(settings.managed_team().as_deref(), Some("claude-team"));
+
+        settings.claude.team = Some("  ".into());
+        assert_eq!(settings.managed_team().as_deref(), Some("codex-team"));
+
+        settings.codex.team = None;
+        assert_eq!(settings.managed_team(), None);
+
+        settings.gateway.team = Some(" picked ".into());
+        assert_eq!(settings.managed_team().as_deref(), Some("picked"));
+    }
+
+    #[test]
+    fn should_save_a_config_without_environments_or_a_picked_team_exactly_as_before() {
+        let mut settings: RelaySettings =
+            serde_yaml::from_str(include_str!("../mdm/config.yaml.example")).expect("settings");
+        settings.relay.log_path = PathBuf::from("/managed/relay.log.jsonl");
+        settings.relay.mitm_ca_dir = PathBuf::from("/managed/mitm");
+        settings.domains.notion = vec!["notion.so".into()];
+        settings.domains.ai = vec!["api.anthropic.com".into()];
+
+        let saved = serde_yaml::to_string(&settings).expect("settings should serialize");
+
+        assert_eq!(
+            saved,
+            "relay:\n  host: 127.0.0.1\n  port: 4142\n  log_path: /managed/relay.log.jsonl\n  mitm_ca_dir: /managed/mitm\n\
+             gateway:\n  url: https://litellm-gateway.your-company.com\n\
+             shadow:\n  enabled: true\n  model: gpt-4o-mini\n  min_interval_seconds: 60\n\
+             capture:\n  payloads: false\n  payload_preview_bytes: 0\n  payload_body_bytes: 0\n\
+             domains:\n  notion:\n  - notion.so\n  ai:\n  - api.anthropic.com\n\
+             timeouts:\n  request_seconds: 10.0\n\
+             idp:\n  issuer: https://login.microsoftonline.com/<tenant-id>/v2.0\n  client_id: <app-client-id>\n\
+             claude:\n  model: claude-sonnet-4-5\n\
+             codex:\n  model: gpt-5-codex\n  provider_id: litellm\n\
+             credential: {}\nmcp: {}\n"
+        );
+        let reloaded: RelaySettings = serde_yaml::from_str(&saved).expect("saved settings parse");
+        assert!(reloaded.environments.is_empty());
+        assert_eq!(reloaded.gateway.team, None);
+    }
+
+    #[test]
+    fn should_round_trip_environments_and_the_picked_team_through_yaml() {
+        let settings: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+
+        let saved = serde_yaml::to_string(&settings).expect("settings should serialize");
+        let reloaded: RelaySettings = serde_yaml::from_str(&saved).expect("saved settings parse");
+
+        assert_eq!(reloaded.environments, settings.environments);
+        assert_eq!(reloaded.gateway.team.as_deref(), Some("picked"));
+        assert_eq!(reloaded.gateway.url, "https://uat.example.com/");
     }
 
     #[test]
