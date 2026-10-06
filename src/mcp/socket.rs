@@ -234,7 +234,7 @@ mod tests {
         rig.callers.refuse(&["/usr/bin/curl"]);
         for request in [
             json!({"op": "search_tools", "query": "issue"}),
-            json!({"op": "call_tool", "name": "github-get_issue", "confirmed": true}),
+            json!({"op": "call_tool", "name": "github-get_issue"}),
         ] {
             let reply = exchange(&path, request).await;
             assert_eq!(reply["ok"], false);
@@ -333,19 +333,21 @@ mod tests {
             .contains("4 MiB"));
         assert_eq!(rig.callers.checks(), 0);
 
-        let activated = exchange(
-            &path,
-            json!({"op": "activate_server", "server": "github", "confirmed": true}),
-        )
-        .await;
-        assert_eq!(activated["ok"], true);
+        let mut activation = Client::connect(&path).await;
+        activation
+            .send(json!({"op": "activate_server", "server": "github"}))
+            .await;
+        assert_eq!(activation.receive().await["ask"]["kind"], "activate_server");
+        activation.send(json!({"answer": "accept"})).await;
+        assert_eq!(activation.receive().await["ok"], true);
         let body = "b".repeat(3 * 1024 * 1024);
-        let large = exchange(
-            &path,
-            json!({"op": "call_tool", "name": "github-create_issue", "arguments": {"body": body}, "confirmed": true}),
-        )
-        .await;
-        assert_eq!(large["ok"], true);
+        let mut large = Client::connect(&path).await;
+        large
+            .send(json!({"op": "call_tool", "name": "github-create_issue", "arguments": {"body": body}, "confirmed": true}))
+            .await;
+        assert_eq!(large.receive().await["ask"]["kind"], "confirm_call");
+        large.send(json!({"answer": "accept"})).await;
+        assert_eq!(large.receive().await["ok"], true);
         let sent = upstream.calls().remove(0).2.expect("arguments");
         assert_eq!(sent["body"].as_str().map(str::len), Some(3 * 1024 * 1024));
         server.abort();

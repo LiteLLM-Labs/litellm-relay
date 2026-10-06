@@ -43,13 +43,9 @@ pub enum McpRequest {
         name: String,
         #[serde(default)]
         arguments: Option<Map<String, Value>>,
-        #[serde(default)]
-        confirmed: bool,
     },
     ActivateServer {
         server: String,
-        #[serde(default)]
-        confirmed: bool,
     },
 }
 
@@ -145,14 +141,7 @@ impl McpRefusal {
     }
 }
 
-async fn confirm(
-    confirmed: bool,
-    question: Question,
-    asker: &mut dyn Asker,
-) -> Result<(), McpRefusal> {
-    if confirmed {
-        return Ok(());
-    }
+async fn confirm(question: Question, asker: &mut dyn Asker) -> Result<(), McpRefusal> {
     match asker.ask(question).await {
         Answer::Accept => Ok(()),
         Answer::Decline => Err(McpRefusal::Declined(
@@ -162,7 +151,7 @@ async fn confirm(
             "the confirmation was cancelled; nothing was run".to_string(),
         )),
         Answer::Unsupported => Err(McpRefusal::ConfirmationRequired(
-            "this needs the user's confirmation and the client cannot ask for it; ask the user, then send the request again with confirmed set to true"
+            "this needs the user's confirmation in the client's own dialog and the client cannot show one; nothing was run"
                 .to_string(),
         )),
     }
@@ -292,17 +281,11 @@ impl McpService {
         match request {
             McpRequest::SearchTools { query } => Ok(self.search(&catalog, &bearer, &query)),
             McpRequest::DescribeTool { name } => self.describe(&catalog, &bearer, &name),
-            McpRequest::CallTool {
-                name,
-                arguments,
-                confirmed,
-            } => {
-                self.call(&catalog, &bearer, &name, arguments, confirmed, asker)
-                    .await
+            McpRequest::CallTool { name, arguments } => {
+                self.call(&catalog, &bearer, &name, arguments, asker).await
             }
-            McpRequest::ActivateServer { server, confirmed } => {
-                self.activate(&catalog, &bearer, &server, confirmed, asker)
-                    .await
+            McpRequest::ActivateServer { server } => {
+                self.activate(&catalog, &bearer, &server, asker).await
             }
         }
     }
@@ -504,7 +487,6 @@ impl McpService {
         bearer: &SessionBearer,
         name: &str,
         arguments: Option<Map<String, Value>>,
-        confirmed: bool,
         asker: &mut dyn Asker,
     ) -> Result<Value, McpRefusal> {
         let entry = catalog.get(name).ok_or_else(|| unknown_tool(name))?;
@@ -517,7 +499,7 @@ impl McpService {
                     entry.server
                 ),
             };
-            confirm(confirmed, question, asker).await?;
+            confirm(question, asker).await?;
         }
         let _slot = self.slots.acquire().await.ok_or_else(|| {
             McpRefusal::UpstreamError("the daemon is no longer running tool calls".to_string())
@@ -543,7 +525,6 @@ impl McpService {
         catalog: &Catalog,
         bearer: &SessionBearer,
         server: &str,
-        confirmed: bool,
         asker: &mut dyn Asker,
     ) -> Result<Value, McpRefusal> {
         let Some(tools) = catalog.tool_counts_by_server().get(server).copied() else {
@@ -561,7 +542,7 @@ impl McpService {
                 "Activate the MCP server {server}? Its {tools} tools become available to search and call."
             ),
         };
-        confirm(confirmed, question, asker).await?;
+        confirm(question, asker).await?;
         let mut state = self.lock_state();
         let session = state
             .session

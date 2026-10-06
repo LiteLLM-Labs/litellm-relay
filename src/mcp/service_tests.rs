@@ -43,10 +43,12 @@ async fn run(rig: &Rig, service: &Arc<McpService>, request: Value) -> Result<Val
 }
 
 async fn activate(rig: &Rig, service: &Arc<McpService>, server: &str) {
-    run(
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    ask(
         rig,
         service,
-        json!({"op": "activate_server", "server": server, "confirmed": true}),
+        json!({"op": "activate_server", "server": server}),
+        &mut accepting,
     )
     .await
     .expect("activated");
@@ -232,28 +234,34 @@ async fn should_run_an_ask_tool_only_after_a_confirmation() {
     );
     assert_eq!(result["isError"], false);
 
-    let mut confirmed = call.clone();
-    confirmed["confirmed"] = json!(true);
+    let mut claimed = call.clone();
+    claimed["confirmed"] = json!(true);
     let mut silent = FakeAsker::default();
-    ask(&rig, &service, confirmed, &mut silent)
-        .await
-        .expect("ran");
-    assert!(silent.questions.is_empty());
-    assert_eq!(upstream.calls().len(), 2);
+    assert_eq!(
+        reason(ask(&rig, &service, claimed.clone(), &mut silent).await),
+        "confirmation_required"
+    );
+    assert_eq!(silent.questions.len(), 1);
+    let mut declining = FakeAsker::answering(&[Answer::Decline]);
+    assert_eq!(
+        reason(ask(&rig, &service, claimed, &mut declining).await),
+        "declined"
+    );
+    assert_eq!(upstream.calls().len(), 1);
 
     let mut unasked = FakeAsker::default();
     let read = json!({"op": "call_tool", "name": "github-get_issue"});
     ask(&rig, &service, read, &mut unasked).await.expect("ran");
     assert!(unasked.questions.is_empty());
-    assert_eq!(upstream.calls().len(), 3);
-    assert_eq!(upstream.calls()[2].2, None);
+    assert_eq!(upstream.calls().len(), 2);
+    assert_eq!(upstream.calls()[1].2, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_refuse_tools_on_inactive_servers_and_activate_only_on_confirmation() {
     let upstream = FakeUpstream::serving(tools());
     let (rig, service) = service_on(static_key_settings("sk-static"), &upstream);
-    let call = json!({"op": "call_tool", "name": "github-get_issue", "confirmed": true});
+    let call = json!({"op": "call_tool", "name": "github-get_issue"});
     let refused = run(&rig, &service, call.clone())
         .await
         .expect_err("inactive");
@@ -264,9 +272,9 @@ async fn should_refuse_tools_on_inactive_servers_and_activate_only_on_confirmati
         reason(run(&rig, &service, describe.clone()).await),
         "server_inactive"
     );
-    let unknown = json!({"op": "call_tool", "name": "github-nope", "confirmed": true});
+    let unknown = json!({"op": "call_tool", "name": "github-nope"});
     assert_eq!(reason(run(&rig, &service, unknown).await), "unknown_tool");
-    let missing = json!({"op": "activate_server", "server": "gitlab", "confirmed": true});
+    let missing = json!({"op": "activate_server", "server": "gitlab"});
     assert_eq!(reason(run(&rig, &service, missing).await), "unknown_server");
 
     let activation = json!({"op": "activate_server", "server": "github"});
@@ -311,7 +319,7 @@ async fn should_refuse_tools_on_inactive_servers_and_activate_only_on_confirmati
         found,
         json!({"tools": ["github-create_issue", "github-get_issue"], "inactive_servers": ["jira"]})
     );
-    let jira = json!({"op": "call_tool", "name": "jira-search", "confirmed": true});
+    let jira = json!({"op": "call_tool", "name": "jira-search"});
     assert_eq!(reason(run(&rig, &service, jira).await), "server_inactive");
 }
 
@@ -323,8 +331,8 @@ async fn should_give_a_refused_caller_no_catalog_and_no_call() {
     for request in [
         json!({"op": "search_tools", "query": "issue"}),
         json!({"op": "describe_tool", "name": "github-get_issue"}),
-        json!({"op": "call_tool", "name": "github-get_issue", "confirmed": true}),
-        json!({"op": "activate_server", "server": "github", "confirmed": true}),
+        json!({"op": "call_tool", "name": "github-get_issue"}),
+        json!({"op": "activate_server", "server": "github"}),
     ] {
         assert_eq!(reason(run(&rig, &service, request).await), "caller_refused");
     }
