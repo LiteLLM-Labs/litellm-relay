@@ -329,6 +329,22 @@ async fn should_name_the_arguments_in_the_question_and_escape_a_name_that_forges
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_bound_the_call_cap_at_the_semaphore_ceiling_instead_of_panicking() {
+    let upstream = FakeUpstream::serving(tools());
+    let (rig, service) = service_on(settings_with(&[], Some(usize::MAX)), &upstream);
+    activate(&rig, &service, "github").await;
+    let call = json!({"op": "call_tool", "name": "github-get_issue"});
+    run(&rig, &service, call.clone()).await.expect("ran");
+
+    let (rig, service) = service_on(settings_with(&[], Some(4)), &upstream);
+    activate(&rig, &service, "github").await;
+    rig.settings.set(settings_with(&[], Some(usize::MAX)));
+    run(&rig, &service, call.clone()).await.expect("ran");
+    rig.settings.set(settings_with(&[], Some(2)));
+    run(&rig, &service, call).await.expect("ran");
+    assert_eq!(upstream.calls().len(), 3);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_refuse_tools_on_inactive_servers_and_activate_only_on_confirmation() {
     let upstream = FakeUpstream::serving(tools());

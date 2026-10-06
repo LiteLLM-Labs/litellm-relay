@@ -175,9 +175,13 @@ struct CallSlot {
 
 impl CallSlots {
     fn new(cap: usize) -> Arc<Self> {
+        let bounded = cap.min(Semaphore::MAX_PERMITS);
         Arc::new(Self {
-            semaphore: Arc::new(Semaphore::new(cap)),
-            ledger: Mutex::new(SlotLedger { cap, owed: 0 }),
+            semaphore: Arc::new(Semaphore::new(bounded)),
+            ledger: Mutex::new(SlotLedger {
+                cap: bounded,
+                owed: 0,
+            }),
         })
     }
 
@@ -186,18 +190,19 @@ impl CallSlots {
     }
 
     fn resize(&self, cap: usize) {
+        let bounded = cap.min(Semaphore::MAX_PERMITS);
         let mut ledger = self.lock_ledger();
-        if cap > ledger.cap {
-            let added = cap - ledger.cap;
+        if bounded > ledger.cap {
+            let added = bounded - ledger.cap;
             let repaid = added.min(ledger.owed);
             ledger.owed -= repaid;
             self.semaphore.add_permits(added - repaid);
         }
-        if cap < ledger.cap {
-            let removed = ledger.cap - cap;
+        if bounded < ledger.cap {
+            let removed = ledger.cap - bounded;
             ledger.owed += removed - self.semaphore.forget_permits(removed);
         }
-        ledger.cap = cap;
+        ledger.cap = bounded;
     }
 
     async fn acquire(self: &Arc<Self>) -> Option<CallSlot> {
@@ -579,11 +584,6 @@ fn unknown_tool(name: &str) -> McpRefusal {
     ))
 }
 
-pub async fn watch_session(service: Arc<McpService>, every: Duration) {
-    let mut interval = tokio::time::interval(every);
-    loop {
-        interval.tick().await;
-        service.check_session().await;
 fn quoted(text: &str) -> String {
     format!("{text:?}")
 }
@@ -609,6 +609,11 @@ fn argument_preview(arguments: Option<&Map<String, Value>>) -> String {
     )
 }
 
+pub async fn watch_session(service: Arc<McpService>, every: Duration) {
+    let mut interval = tokio::time::interval(every);
+    loop {
+        interval.tick().await;
+        service.check_session().await;
     }
 }
 
