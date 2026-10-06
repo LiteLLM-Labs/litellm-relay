@@ -20,7 +20,8 @@ use crate::{
         launch_agent::{require_daemon, DaemonHost, Launchd},
     },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
-    system::home_dir,
+    mcp::{CLIENT_SERVER_NAME, TOOL_NAMES},
+    system::{home_dir, write_private},
 };
 
 /// How Claude Code should obtain the Gateway bearer credential. These are
@@ -112,8 +113,9 @@ fn onboard_with(
         }
     });
 
+    let exe = relay_executable()?;
     let credential = match bearer_plan(host, settings.idp.is_configured(), static_key) {
-        Some(plan) => Credential::from_plan(plan, &relay_executable()?),
+        Some(plan) => Credential::from_plan(plan, &exe),
         None => bail!(
             "onboarding requires an IdP ({}) or a static Gateway key (--api-key or gateway.api_key)",
             settings.idp.setup_hint()
@@ -124,6 +126,9 @@ fn onboard_with(
         refuse_node_script_claude_code(claude_binary.as_deref())?;
     }
     let settings_path = write_claude_settings(&settings, &credential)?;
+    if matches!(credential, Credential::Broker { .. }) {
+        write_mcp_server(&claude_json_path(), &exe)?;
+    }
     save_settings(&settings)?;
     if let Credential::Broker { .. } = credential {
         require_daemon(daemon, params.quiet)?;
@@ -153,6 +158,12 @@ fn onboard_with(
             Credential::TokenHelper => {
                 println!("Run `claude` and sign in through your browser on first use.");
             }
+        }
+        if matches!(credential, Credential::Broker { .. }) {
+            println!(
+                "Registered the Gateway's MCP tools as the `{CLIENT_SERVER_NAME}` server in {}",
+                claude_json_path().display()
+            );
         }
     }
     Ok(())
@@ -249,6 +260,49 @@ fn claude_settings_path() -> PathBuf {
     home_dir().join(".claude").join("settings.json")
 }
 
+fn claude_json_path() -> PathBuf {
+    home_dir().join(".claude.json")
+}
+
+fn write_mcp_server(path: &Path, exe: &str) -> Result<()> {
+    let root = merge_mcp_server(read_existing_settings(path)?, exe);
+    let serialized = serde_json::to_string_pretty(&Value::Object(root))?;
+    write_private(path, &format!("{serialized}\n"))
+}
+
+fn taken_object(root: &mut Map<String, Value>, key: &str) -> Map<String, Value> {
+    match root.remove(key) {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    }
+}
+
+fn merge_mcp_server(mut root: Map<String, Value>, exe: &str) -> Map<String, Value> {
+    let mut servers = taken_object(&mut root, "mcpServers");
+    servers.insert(
+        CLIENT_SERVER_NAME.into(),
+        json!({"type": "stdio", "command": exe, "args": ["mcp"]}),
+    );
+    root.insert("mcpServers".into(), Value::Object(servers));
+    root
+}
+
+fn allow_mcp_tools(root: &mut Map<String, Value>) {
+    let mut permissions = taken_object(root, "permissions");
+    let mut allow = match permissions.remove("allow") {
+        Some(Value::Array(rules)) => rules,
+        _ => Vec::new(),
+    };
+    for tool in TOOL_NAMES {
+        let rule = Value::String(format!("mcp__{CLIENT_SERVER_NAME}__{tool}"));
+        if !allow.contains(&rule) {
+            allow.push(rule);
+        }
+    }
+    permissions.insert("allow".into(), Value::Array(allow));
+    root.insert("permissions".into(), Value::Object(permissions));
+}
+
 fn write_claude_settings(settings: &RelaySettings, credential: &Credential) -> Result<PathBuf> {
     let path = claude_settings_path();
     if let Some(parent) = path.parent() {
@@ -318,6 +372,7 @@ fn merge_claude_settings(
         }
         Credential::Broker { helper } => {
             root.insert("apiKeyHelper".into(), Value::String(helper.clone()));
+            allow_mcp_tools(&mut root);
         }
     }
 
@@ -331,7 +386,7 @@ fn base_url(settings: &RelaySettings, credential: &Credential) -> String {
     }
 }
 
-fn read_existing_settings(path: &PathBuf) -> Result<Map<String, Value>> {
+fn read_existing_settings(path: &Path) -> Result<Map<String, Value>> {
     if !path.exists() {
         return Ok(Map::new());
     }
@@ -359,6 +414,7 @@ fn helper_command(exe: &str, subcommand: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     #[test]
     fn should_insert_managed_env_and_preserve_existing_keys() {
@@ -464,6 +520,94 @@ mod tests {
             Value::String("x-litellm-team: engineering".into())
         );
         assert!(!Value::Object(root).to_string().contains("sk-stale"));
+    }
+
+    fn allow_rules(root: &Map<String, Value>) -> Vec<String> {
+        root["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn should_allow_the_four_relay_mcp_tools_once_on_the_broker_path_and_keep_other_rules() {
+        let settings = settings_with_team(None);
+        let existing = serde_json::from_str::<Value>(
+            r#"{"permissions":{"allow":["Bash(git status)","mcp__litellm__call_tool"],"deny":["Read(.env)"]}}"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+        let credential = Credential::from_plan(BearerPlan::Broker, "/opt/relay/litellm-relay");
+
+        let once = merge_claude_settings(existing, &settings, &credential).unwrap();
+        let twice = merge_claude_settings(once.clone(), &settings, &credential).unwrap();
+
+        assert_eq!(
+            allow_rules(&once),
+            [
+                "Bash(git status)",
+                "mcp__litellm__call_tool",
+                "mcp__litellm__search_tools",
+                "mcp__litellm__describe_tool",
+                "mcp__litellm__activate_server",
+            ]
+        );
+        assert_eq!(allow_rules(&twice), allow_rules(&once));
+        assert_eq!(once["permissions"]["deny"], json!(["Read(.env)"]));
+
+        let static_key = Credential::from_plan(BearerPlan::StaticKey("sk-1"), "/opt/relay/x");
+        let untouched = merge_claude_settings(Map::new(), &settings, &static_key).unwrap();
+        assert!(untouched.get("permissions").is_none());
+        let legacy =
+            merge_claude_settings(Map::new(), &settings, &Credential::TokenHelper).unwrap();
+        assert!(legacy.get("permissions").is_none());
+    }
+
+    #[test]
+    fn should_register_relay_mcp_in_the_home_claude_json_next_to_other_servers() {
+        let dir = env::temp_dir().join(format!("relay-claude-json-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".claude.json");
+
+        write_mcp_server(&path, "/opt/relay/litellm-relay").unwrap();
+        let fresh: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            fresh,
+            json!({"mcpServers": {"litellm": {"type": "stdio", "command": "/opt/relay/litellm-relay", "args": ["mcp"]}}})
+        );
+
+        fs::write(
+            &path,
+            r#"{"numStartups":3,"mcpServers":{"litellm":{"type":"stdio","command":"/old/relay","args":["mcp"]},"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}}}"#,
+        )
+        .unwrap();
+        write_mcp_server(&path, "/opt/relay/litellm-relay").unwrap();
+        write_mcp_server(&path, "/opt/relay/litellm-relay").unwrap();
+        let merged: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(merged["numStartups"], 3);
+        assert_eq!(
+            merged["mcpServers"]["github"],
+            json!({"type": "http", "url": "https://api.githubcopilot.com/mcp/"})
+        );
+        assert_eq!(
+            merged["mcpServers"]["litellm"],
+            json!({"type": "stdio", "command": "/opt/relay/litellm-relay", "args": ["mcp"]})
+        );
+        assert_eq!(merged["mcpServers"].as_object().unwrap().len(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn settings_with_team(team: Option<&str>) -> RelaySettings {

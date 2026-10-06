@@ -9,6 +9,7 @@ pub(crate) mod test_support;
 pub mod upstream;
 pub mod verdict;
 
+pub const CLIENT_SERVER_NAME: &str = "litellm";
 pub const TOOL_NAMES: [&str; 4] = [
     "search_tools",
     "describe_tool",
