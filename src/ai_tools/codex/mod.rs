@@ -1,10 +1,14 @@
 use std::{env, fs, path::PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::{
-    ai_tools::{gateway_credential::print_bearer, idp::SIGN_IN_CEILING},
+    ai_tools::{
+        credential::{bearer_plan, keep_key_for_broker, relay_executable, BearerPlan, Host},
+        gateway_credential::print_bearer,
+        idp::SIGN_IN_CEILING,
+    },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
 };
@@ -29,17 +33,29 @@ const CODEX_CONFIG_PATH_ENV: &str = "LITELLM_RELAY_CODEX_CONFIG";
 
 /// How Codex should obtain the Gateway bearer credential. These map onto the
 /// mutually exclusive auth fields of Codex's `ModelProviderInfo`.
-#[derive(Debug, Default)]
+#[derive(Debug, PartialEq, Eq)]
 enum Credential<'a> {
-    /// Command-backed `auth` hook running Relay's token helper (default). Codex
-    /// fetches the Gateway credential on demand; no admin-issued key on the device.
-    #[default]
+    /// Command-backed `auth` hook running `relay credential`: the daemon's
+    /// in-memory broker answers only a signed Codex process. The default on macOS.
+    Broker,
+    /// Command-backed `auth` hook running the on-disk token helper, for hosts
+    /// without the parent-process signature check.
     TokenHelper,
     /// Codex reads the bearer key from an environment variable (`env_key`).
     /// Relay's token helper is expected to populate it with the Gateway credential.
     EnvKey(&'a str),
     /// Static gateway key embedded as `experimental_bearer_token`.
     StaticKey(&'a str),
+}
+
+impl<'a> From<BearerPlan<'a>> for Credential<'a> {
+    fn from(plan: BearerPlan<'a>) -> Self {
+        match plan {
+            BearerPlan::Broker => Credential::Broker,
+            BearerPlan::LegacyHelper => Credential::TokenHelper,
+            BearerPlan::StaticKey(key) => Credential::StaticKey(key),
+        }
+    }
 }
 
 /// Inputs for wiring Codex CLI to route through the Gateway. Supplied by the
@@ -79,30 +95,35 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
         settings.codex.team = params.team;
     }
 
-    let static_key = params
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty());
+    let explicit_key = params.api_key.filter(|key| !key.trim().is_empty());
     let env_key = params
         .env_key
         .as_deref()
         .filter(|key| !key.trim().is_empty());
-    if static_key.is_some() && env_key.is_some() {
+    if explicit_key.is_some() && env_key.is_some() {
         bail!("--api-key and --env-key are mutually exclusive");
     }
-    let credential = match (static_key, env_key) {
-        (Some(key), _) => Credential::StaticKey(key),
-        (_, Some(var)) => Credential::EnvKey(var),
-        _ => Credential::TokenHelper,
-    };
-
-    let needs_idp = matches!(credential, Credential::TokenHelper);
-    if needs_idp && !settings.idp.is_configured() {
-        bail!(
+    let host = Host::current();
+    keep_key_for_broker(&mut settings, host, explicit_key.as_deref());
+    let static_key = explicit_key.as_deref().or_else(|| {
+        if host == Host::MacOs && !settings.idp.is_configured() {
+            settings
+                .gateway
+                .api_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        }
+    });
+    let credential = match (env_key, bearer_plan(host, settings.idp.is_configured(), static_key)) {
+        (Some(var), _) => Credential::EnvKey(var),
+        (None, Some(plan)) => Credential::from(plan),
+        (None, None) => bail!(
             "onboarding requires an IdP ({}), or pass --env-key / --api-key for a static credential",
             settings.idp.setup_hint()
-        );
-    }
+        ),
+    };
 
     let exe = relay_executable()?;
     let config_path = write_codex_config(&settings, &credential, &exe)?;
@@ -119,6 +140,9 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
             println!("Team header: x-litellm-team: {team}");
         }
         match &credential {
+            Credential::Broker => {
+                println!("Codex asks the Relay daemon for a credential via `relay credential`.");
+            }
             Credential::TokenHelper => {
                 println!("Codex fetches a Gateway credential via `relay codex-token`.");
             }
@@ -152,13 +176,6 @@ fn codex_config_path() -> PathBuf {
 
 fn provider_base_url(settings: &RelaySettings) -> String {
     format!("{}/v1", settings.gateway.url.trim_end_matches('/'))
-}
-
-fn relay_executable() -> Result<String> {
-    let exe = env::current_exe().context("failed to resolve the Relay executable path")?;
-    exe.to_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("Relay executable path is not valid UTF-8"))
 }
 
 fn write_codex_config(
@@ -225,15 +242,11 @@ fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: 
     // Codex treats `auth`, `env_key`, and `experimental_bearer_token` as
     // mutually exclusive, so exactly one is written.
     match credential {
+        Credential::Broker => {
+            provider["auth"] = Item::Table(auth_hook(exe, "credential"));
+        }
         Credential::TokenHelper => {
-            let mut auth = Table::new();
-            auth["command"] = value(exe);
-            let mut args = Array::new();
-            args.push("codex-token");
-            auth["args"] = value(args);
-            auth["timeout_ms"] = value(TOKEN_COMMAND_TIMEOUT_MS);
-            auth["refresh_interval_ms"] = value(TOKEN_REFRESH_INTERVAL_MS);
-            provider["auth"] = Item::Table(auth);
+            provider["auth"] = Item::Table(auth_hook(exe, "codex-token"));
         }
         Credential::EnvKey(var) => {
             provider["env_key"] = value(*var);
@@ -244,6 +257,17 @@ fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: 
     }
 
     provider
+}
+
+fn auth_hook(exe: &str, subcommand: &str) -> Table {
+    let mut auth = Table::new();
+    auth["command"] = value(exe);
+    let mut args = Array::new();
+    args.push(subcommand);
+    auth["args"] = value(args);
+    auth["timeout_ms"] = value(TOKEN_COMMAND_TIMEOUT_MS);
+    auth["refresh_interval_ms"] = value(TOKEN_REFRESH_INTERVAL_MS);
+    auth
 }
 
 fn secure_file(path: &PathBuf) -> Result<()> {
@@ -331,6 +355,49 @@ mod tests {
             "SSO path must not embed a static provider key"
         );
         assert!(provider.get("env_key").is_none());
+    }
+
+    #[test]
+    fn should_write_the_broker_hook_and_no_key_on_the_broker_path() {
+        let settings = settings_with_team(None);
+        let rendered = render_codex_config(
+            "experimental_bearer_token = \"sk-stale\"\n",
+            &settings,
+            &Credential::Broker,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
+        let doc = parse(&rendered);
+        let provider = &doc["model_providers"]["litellm"];
+
+        assert_eq!(
+            provider["auth"]["command"].as_str(),
+            Some("/opt/relay/litellm-relay")
+        );
+        assert_eq!(provider["auth"]["args"][0].as_str(), Some("credential"));
+        assert_eq!(
+            provider["auth"]["timeout_ms"].as_integer(),
+            Some(SIGN_IN_CEILING.as_millis() as i64)
+        );
+        assert_eq!(
+            provider["auth"]["refresh_interval_ms"].as_integer(),
+            Some(TOKEN_REFRESH_INTERVAL_MS)
+        );
+        assert!(provider.get("experimental_bearer_token").is_none());
+        assert!(provider.get("env_key").is_none());
+    }
+
+    #[test]
+    fn should_map_the_bearer_plan_onto_the_provider_auth_fields() {
+        assert_eq!(Credential::from(BearerPlan::Broker), Credential::Broker);
+        assert_eq!(
+            Credential::from(BearerPlan::LegacyHelper),
+            Credential::TokenHelper
+        );
+        assert_eq!(
+            Credential::from(BearerPlan::StaticKey("sk-1")),
+            Credential::StaticKey("sk-1")
+        );
     }
 
     #[test]

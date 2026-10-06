@@ -8,7 +8,9 @@ use serde_json::{json, Map, Value};
 
 use crate::{
     ai_tools::{
+        credential::{relay_executable, Host},
         gateway_credential::{ensure_gateway_credential, GatewayCredential, Renewal},
+        idp::SIGN_IN_CEILING,
         token::SignIn,
     },
     config::{load_settings, save_settings, DesktopSso, RelaySettings},
@@ -18,6 +20,17 @@ const MANAGED_SETTINGS_PATH_ENV: &str = "CLAUDE_DESKTOP_MANAGED_SETTINGS";
 const MACOS_MANAGED_PLIST: &str =
     "/Library/Managed Preferences/com.anthropic.claudefordesktop.plist";
 const LINUX_MANAGED_JSON: &str = "/etc/claude-desktop/managed-settings.json";
+/// Claude Desktop kills a credential helper after this many seconds; the app
+/// caps the value at ten minutes, and a browser sign-in needs the whole ceiling.
+const HELPER_TIMEOUT_SECONDS: u64 = min_u64(SIGN_IN_CEILING.as_secs(), 600);
+
+const fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
 
 /// Inputs for wiring Claude Desktop (third-party mode) to route through the
 /// Gateway. Supplied by the MDM package or interactively; any field left unset
@@ -94,7 +107,11 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     } else {
         SignIn::CachedOnly
     };
-    let credential = resolve_credential(&settings, sso, saved_key_use, || {
+    let helper = match Host::current() {
+        Host::MacOs => Some(relay_executable()?),
+        Host::Other => None,
+    };
+    let credential = resolve_credential(&settings, sso, saved_key_use, helper, || {
         ensure_gateway_credential(
             &settings,
             settings.claude.team.as_deref(),
@@ -126,6 +143,9 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
             DesktopCredential::Static(StaticCredential::Key(_)) => {
                 println!("Credential: static Gateway API key")
             }
+            DesktopCredential::Helper(_) => {
+                println!("Credential: `relay credential` helper backed by the Relay daemon")
+            }
         }
         println!("Wrote {}", written.path.display());
         println!("Restart Claude Desktop to pick up the managed configuration.");
@@ -151,6 +171,9 @@ impl StaticCredential {
 enum DesktopCredential {
     Sso(DesktopSso),
     Static(StaticCredential),
+    /// `relay credential` run by the app as the signed-in user: the daemon's
+    /// in-memory broker answers, so no key lands in the managed settings.
+    Helper(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,13 +192,16 @@ fn saved_key_use(passed_key: Option<&str>, saved_key_refused: bool) -> SavedKeyU
 }
 
 // OIDC flags win because the developer signs in inside the app, and an explicit
-// `--api-key` is the operator's choice. Otherwise a configured IdP means Relay
-// exchanges the developer's sign-in, and a saved key covers a Gateway without
-// the exchange or an exchange that failed, unless the Gateway refused that key.
+// `--api-key` is the operator's choice. On a host with the broker, the helper
+// serves either the IdP sign-in or the enrolled key, so nothing is exchanged
+// here and no key is written. Otherwise a configured IdP means Relay exchanges
+// the developer's sign-in, and a saved key covers a Gateway without the
+// exchange or an exchange that failed, unless the Gateway refused that key.
 fn resolve_credential(
     settings: &RelaySettings,
     sso: Option<DesktopSso>,
     saved_key_use: SavedKeyUse,
+    helper: Option<String>,
     exchange: impl FnOnce() -> Result<GatewayCredential>,
 ) -> Result<DesktopCredential> {
     if let Some(sso) = sso {
@@ -186,6 +212,11 @@ fn resolve_credential(
         .api_key
         .as_deref()
         .filter(|key| !key.is_empty());
+    let broker_has_a_source = settings.idp.is_configured()
+        || (enrolled_key.is_some() && saved_key_use != SavedKeyUse::Refused);
+    if let Some(helper) = helper.filter(|_| broker_has_a_source) {
+        return Ok(DesktopCredential::Helper(helper));
+    }
     if let Some(key) = enrolled_key.filter(|_| saved_key_use == SavedKeyUse::Explicit) {
         return Ok(DesktopCredential::Static(StaticCredential::Key(
             key.to_string(),
@@ -273,6 +304,24 @@ fn build_managed_settings(
             root.insert(
                 "inferenceGatewayApiKey".into(),
                 Value::String(credential.secret().to_string()),
+            );
+        }
+        DesktopCredential::Helper(command) => {
+            root.insert(
+                "inferenceCredentialKind".into(),
+                Value::String("helper-script".into()),
+            );
+            root.insert(
+                "inferenceCredentialHelper".into(),
+                Value::String(command.clone()),
+            );
+            root.insert(
+                "inferenceCredentialHelperArgs".into(),
+                json!(["credential"]),
+            );
+            root.insert(
+                "inferenceCredentialHelperTimeoutSec".into(),
+                json!(HELPER_TIMEOUT_SECONDS),
             );
         }
     }
@@ -559,8 +608,16 @@ mod tests {
     fn static_secret(credential: &DesktopCredential) -> &str {
         match credential {
             DesktopCredential::Static(credential) => credential.secret(),
-            DesktopCredential::Sso(_) => panic!("expected a static credential"),
+            DesktopCredential::Sso(_) | DesktopCredential::Helper(_) => {
+                panic!("expected a static credential")
+            }
         }
+    }
+
+    const HELPER: &str = "/opt/relay/litellm-relay";
+
+    fn helper() -> Option<String> {
+        Some(HELPER.into())
     }
 
     fn no_exchange() -> Result<GatewayCredential> {
@@ -667,6 +724,90 @@ mod tests {
     }
 
     #[test]
+    fn should_write_the_helper_script_and_no_key_on_the_broker_path() {
+        let settings = settings_with("https://gw.corp", Some("sk-secret"), "claude-sonnet-4-5");
+        let doc = build_managed_settings(&settings, &DesktopCredential::Helper(HELPER.into()));
+
+        assert_eq!(
+            doc["inferenceCredentialKind"],
+            Value::String("helper-script".into())
+        );
+        assert_eq!(
+            doc["inferenceCredentialHelper"],
+            Value::String(HELPER.into())
+        );
+        assert_eq!(doc["inferenceCredentialHelperArgs"], json!(["credential"]));
+        assert_eq!(
+            doc["inferenceCredentialHelperTimeoutSec"],
+            json!(SIGN_IN_CEILING.as_secs())
+        );
+        assert!(
+            !doc.contains_key("inferenceGatewayApiKey"),
+            "the broker path must leave no key in the managed settings"
+        );
+        assert!(!doc.contains_key("inferenceGatewayOidc"));
+        assert!(!Value::Object(doc).to_string().contains("sk-secret"));
+    }
+
+    #[test]
+    fn should_name_the_helper_instead_of_exchanging_when_the_broker_serves_the_host() {
+        let with_idp = settings_with_idp(None);
+        let credential = resolve_credential(
+            &with_idp,
+            None,
+            SavedKeyUse::Fallback,
+            helper(),
+            no_exchange,
+        )
+        .unwrap();
+        assert!(matches!(credential, DesktopCredential::Helper(command) if command == HELPER));
+
+        let with_saved_key =
+            settings_with("https://gw.corp", Some("sk-saved"), "claude-sonnet-4-5");
+        let credential = resolve_credential(
+            &with_saved_key,
+            None,
+            SavedKeyUse::Fallback,
+            helper(),
+            no_exchange,
+        )
+        .unwrap();
+        assert!(matches!(credential, DesktopCredential::Helper(_)));
+
+        let with_explicit_key = settings_with_idp(Some("sk-explicit"));
+        let credential = resolve_credential(
+            &with_explicit_key,
+            None,
+            SavedKeyUse::Explicit,
+            helper(),
+            no_exchange,
+        )
+        .unwrap();
+        assert!(matches!(credential, DesktopCredential::Helper(_)));
+    }
+
+    #[test]
+    fn should_not_name_the_helper_when_the_broker_would_have_nothing_to_serve() {
+        let refused_key_no_idp =
+            settings_with("https://gw.corp", Some("sk-refused"), "claude-sonnet-4-5");
+        let error = resolve_credential(
+            &refused_key_no_idp,
+            None,
+            SavedKeyUse::Refused,
+            helper(),
+            no_exchange,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--api-key"));
+
+        let nothing = settings_with("https://gw.corp", None, "claude-sonnet-4-5");
+        let error =
+            resolve_credential(&nothing, None, SavedKeyUse::Fallback, helper(), no_exchange)
+                .unwrap_err();
+        assert!(error.to_string().contains("--oidc-client-id"));
+    }
+
+    #[test]
     fn should_prefer_sso_over_every_other_credential() {
         let settings = settings_with_idp(Some("sk-saved"));
 
@@ -674,6 +815,7 @@ mod tests {
             &settings,
             Some(sso_config()),
             SavedKeyUse::Explicit,
+            Some("/opt/relay/litellm-relay".into()),
             no_exchange,
         )
         .unwrap();
@@ -686,7 +828,7 @@ mod tests {
         let settings = settings_with_idp(Some("sk-explicit"));
 
         let credential =
-            resolve_credential(&settings, None, SavedKeyUse::Explicit, no_exchange).unwrap();
+            resolve_credential(&settings, None, SavedKeyUse::Explicit, None, no_exchange).unwrap();
 
         assert_eq!(static_secret(&credential), "sk-explicit");
     }
@@ -695,7 +837,7 @@ mod tests {
     fn should_exchange_the_idp_sign_in_when_no_key_was_passed() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, None, || {
             Ok(GatewayCredential::Issued("sk-exchanged".into()))
         })
         .unwrap();
@@ -707,7 +849,7 @@ mod tests {
     fn should_fall_back_to_the_saved_key_when_the_gateway_has_no_exchange() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, None, || {
             Ok(GatewayCredential::Unsupported)
         })
         .unwrap();
@@ -719,7 +861,7 @@ mod tests {
     fn should_keep_the_saved_key_when_the_exchange_fails() {
         let settings = settings_with_idp(Some("sk-saved"));
 
-        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, None, || {
             bail!("no signed-in identity on this device")
         })
         .unwrap();
@@ -731,7 +873,7 @@ mod tests {
     fn should_surface_the_exchange_failure_when_no_key_is_saved() {
         let settings = settings_with_idp(None);
 
-        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, None, || {
             bail!("no signed-in identity on this device")
         })
         .unwrap_err();
@@ -743,7 +885,7 @@ mod tests {
     fn should_explain_when_the_gateway_has_no_exchange_and_nothing_else_is_configured() {
         let settings = settings_with_idp(None);
 
-        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, None, || {
             Ok(GatewayCredential::Unsupported)
         })
         .unwrap_err();
@@ -755,7 +897,7 @@ mod tests {
     fn should_exchange_the_idp_sign_in_when_the_gateway_refused_the_saved_key() {
         let settings = settings_with_idp(Some("sk-refused"));
 
-        let credential = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Refused, None, || {
             Ok(GatewayCredential::Issued("sk-exchanged".into()))
         })
         .unwrap();
@@ -767,7 +909,7 @@ mod tests {
     fn should_never_write_a_refused_saved_key_when_the_exchange_fails() {
         let settings = settings_with_idp(Some("sk-refused"));
 
-        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, None, || {
             bail!("no signed-in identity on this device")
         })
         .unwrap_err();
@@ -779,7 +921,7 @@ mod tests {
     fn should_never_write_a_refused_saved_key_when_the_gateway_has_no_exchange() {
         let settings = settings_with_idp(Some("sk-refused"));
 
-        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, None, || {
             Ok(GatewayCredential::Unsupported)
         })
         .unwrap_err();
@@ -801,7 +943,7 @@ mod tests {
         let settings = settings_with("https://gw.corp", Some("sk-saved"), "claude-sonnet-4-5");
 
         let credential =
-            resolve_credential(&settings, None, SavedKeyUse::Fallback, no_exchange).unwrap();
+            resolve_credential(&settings, None, SavedKeyUse::Fallback, None, no_exchange).unwrap();
 
         assert_eq!(static_secret(&credential), "sk-saved");
     }
@@ -810,8 +952,8 @@ mod tests {
     fn should_require_some_credential() {
         let settings = settings_with("https://gw.corp", None, "claude-sonnet-4-5");
 
-        let error =
-            resolve_credential(&settings, None, SavedKeyUse::Fallback, no_exchange).unwrap_err();
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, None, no_exchange)
+            .unwrap_err();
 
         assert!(error.to_string().contains("needs a Gateway credential"));
     }
@@ -1454,9 +1596,13 @@ mod tests {
         .unwrap();
 
         let on_disk: plist::Value = plist::from_file(&managed).unwrap();
+        let kind_for_a_key = match Host::current() {
+            Host::MacOs => "helper-script",
+            Host::Other => "static",
+        };
         assert_eq!(
             on_disk.as_dictionary().unwrap()["inferenceCredentialKind"],
-            plist::Value::String("static".into())
+            plist::Value::String(kind_for_a_key.into())
         );
         let saved = load_settings().unwrap();
         assert!(

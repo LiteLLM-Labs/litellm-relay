@@ -1,26 +1,43 @@
-use std::{env, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    ai_tools::gateway_credential::print_bearer,
+    ai_tools::{
+        credential::{bearer_plan, keep_key_for_broker, relay_executable, BearerPlan, Host},
+        gateway_credential::print_bearer,
+    },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
 };
 
 /// How Claude Code should obtain the Gateway bearer credential. These are
 /// mutually exclusive: a static key lives in the `ANTHROPIC_AUTH_TOKEN` env var,
-/// while the token helper is a top-level `apiKeyHelper` command.
-#[derive(Debug, Default)]
+/// while the helpers are a top-level `apiKeyHelper` command.
+#[derive(Debug, PartialEq, Eq)]
 enum Credential<'a> {
-    /// Top-level `apiKeyHelper` running Relay's token helper (default). Claude
-    /// fetches the Gateway credential on demand; no admin-issued key on the device.
-    #[default]
+    /// `apiKeyHelper` running `relay credential`: the daemon's in-memory broker
+    /// answers only a signed Claude Code process. The default on macOS.
+    Broker { helper: String },
+    /// `apiKeyHelper` running the on-disk token helper, for hosts without the
+    /// parent-process signature check.
     TokenHelper,
     /// Static gateway key written to `ANTHROPIC_AUTH_TOKEN` for environments
     /// without an IdP.
     StaticKey(&'a str),
+}
+
+impl<'a> Credential<'a> {
+    fn from_plan(plan: BearerPlan<'a>, exe: &str) -> Self {
+        match plan {
+            BearerPlan::Broker => Credential::Broker {
+                helper: helper_command(exe, "credential"),
+            },
+            BearerPlan::LegacyHelper => Credential::TokenHelper,
+            BearerPlan::StaticKey(key) => Credential::StaticKey(key),
+        }
+    }
 }
 
 /// Inputs for wiring Claude Code to route through the Gateway. Supplied by the
@@ -58,27 +75,25 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
         settings.claude.team = params.team;
     }
 
+    let host = Host::current();
+    let explicit_key = params.api_key.filter(|key| !key.trim().is_empty());
+    keep_key_for_broker(&mut settings, host, explicit_key.as_deref());
     // A static key resolves from --api-key, or from a saved gateway key when no
     // IdP is configured. A configured IdP is always preferred.
-    let static_key = params
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty())
-        .or_else(|| {
-            if !settings.idp.is_configured() {
-                settings
-                    .gateway
-                    .api_key
-                    .as_deref()
-                    .filter(|key| !key.trim().is_empty())
-            } else {
-                None
-            }
-        });
+    let static_key = explicit_key.as_deref().or_else(|| {
+        if !settings.idp.is_configured() {
+            settings
+                .gateway
+                .api_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        }
+    });
 
-    let credential = match static_key {
-        Some(key) => Credential::StaticKey(key),
-        None if settings.idp.is_configured() => Credential::TokenHelper,
+    let credential = match bearer_plan(host, settings.idp.is_configured(), static_key) {
+        Some(plan) => Credential::from_plan(plan, &relay_executable()?),
         None => bail!(
             "onboarding requires an IdP ({}) or a static Gateway key (--api-key or gateway.api_key)",
             settings.idp.setup_hint()
@@ -96,6 +111,12 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
         println!("Wrote {}", settings_path.display());
         match &credential {
             Credential::StaticKey(_) => println!("Using a static gateway key."),
+            Credential::Broker { .. } if settings.idp.is_configured() => {
+                println!("Run `claude` and sign in through your browser on first use.");
+            }
+            Credential::Broker { .. } => {
+                println!("Claude Code asks the Relay daemon for the configured gateway key.");
+            }
             Credential::TokenHelper => {
                 println!("Run `claude` and sign in through your browser on first use.");
             }
@@ -131,9 +152,9 @@ fn write_claude_settings(settings: &RelaySettings, credential: &Credential) -> R
 }
 
 /// Merges Relay's managed keys into an existing `settings.json` object,
-/// preserving all other keys. The two credential modes are mutually exclusive:
+/// preserving all other keys. The credential modes are mutually exclusive:
 /// StaticKey writes `ANTHROPIC_AUTH_TOKEN` and drops any `apiKeyHelper`, while
-/// TokenHelper writes `apiKeyHelper` and drops `ANTHROPIC_AUTH_TOKEN`.
+/// the helpers write `apiKeyHelper` and drop `ANTHROPIC_AUTH_TOKEN`.
 fn merge_claude_settings(
     mut root: Map<String, Value>,
     settings: &RelaySettings,
@@ -166,7 +187,7 @@ fn merge_claude_settings(
                 Value::String((*key).to_string()),
             );
         }
-        Credential::TokenHelper => {
+        Credential::TokenHelper | Credential::Broker { .. } => {
             env.remove("ANTHROPIC_AUTH_TOKEN");
         }
     }
@@ -178,8 +199,11 @@ fn merge_claude_settings(
         Credential::TokenHelper => {
             root.insert(
                 "apiKeyHelper".into(),
-                Value::String(token_helper_command()?),
+                Value::String(helper_command(&relay_executable()?, "claude-token")),
             );
+        }
+        Credential::Broker { helper } => {
+            root.insert("apiKeyHelper".into(), Value::String(helper.clone()));
         }
     }
 
@@ -207,12 +231,8 @@ fn env_object(root: &mut Map<String, Value>) -> &mut Map<String, Value> {
         .expect("env was just inserted as an object")
 }
 
-fn token_helper_command() -> Result<String> {
-    let exe = env::current_exe().context("failed to resolve the Relay executable path")?;
-    let exe = exe
-        .to_str()
-        .ok_or_else(|| anyhow!("Relay executable path is not valid UTF-8"))?;
-    Ok(format!("'{}' claude-token", exe.replace('\'', "'\\''")))
+fn helper_command(exe: &str, subcommand: &str) -> String {
+    format!("'{}' {subcommand}", exe.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -257,10 +277,67 @@ mod tests {
     }
 
     #[test]
-    fn should_quote_token_helper_command() {
-        let command = token_helper_command().unwrap();
-        assert!(command.ends_with("' claude-token"));
-        assert!(command.starts_with('\''));
+    fn should_quote_the_helper_command() {
+        assert_eq!(
+            helper_command("/opt/re'lay/litellm-relay", "credential"),
+            "'/opt/re'\\''lay/litellm-relay' credential"
+        );
+        assert_eq!(
+            helper_command("/opt/relay/litellm-relay", "claude-token"),
+            "'/opt/relay/litellm-relay' claude-token"
+        );
+    }
+
+    #[test]
+    fn should_map_the_bearer_plan_onto_the_settings_shape() {
+        let exe = "/opt/relay/litellm-relay";
+        assert_eq!(
+            Credential::from_plan(BearerPlan::Broker, exe),
+            Credential::Broker {
+                helper: "'/opt/relay/litellm-relay' credential".into()
+            }
+        );
+        assert_eq!(
+            Credential::from_plan(BearerPlan::LegacyHelper, exe),
+            Credential::TokenHelper
+        );
+        assert_eq!(
+            Credential::from_plan(BearerPlan::StaticKey("sk-1"), exe),
+            Credential::StaticKey("sk-1")
+        );
+    }
+
+    #[test]
+    fn should_write_the_broker_helper_and_no_token_on_the_broker_path() {
+        let settings = settings_with_team(Some("engineering"));
+        let existing = serde_json::from_str::<Value>(
+            r#"{"apiKeyHelper":"stale","env":{"ANTHROPIC_AUTH_TOKEN":"sk-stale","KEEP":"yes"}}"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+        let credential = Credential::Broker {
+            helper: "'/opt/relay/litellm-relay' credential".into(),
+        };
+
+        let root = merge_claude_settings(existing, &settings, &credential).unwrap();
+
+        assert_eq!(
+            root["apiKeyHelper"],
+            Value::String("'/opt/relay/litellm-relay' credential".into())
+        );
+        let env = root["env"].as_object().unwrap();
+        assert!(
+            !env.contains_key("ANTHROPIC_AUTH_TOKEN"),
+            "the broker path must leave no bearer in the settings file"
+        );
+        assert_eq!(env["KEEP"], Value::String("yes".into()));
+        assert_eq!(
+            env["ANTHROPIC_CUSTOM_HEADERS"],
+            Value::String("x-litellm-team: engineering".into())
+        );
+        assert!(!Value::Object(root).to_string().contains("sk-stale"));
     }
 
     fn settings_with_team(team: Option<&str>) -> RelaySettings {
