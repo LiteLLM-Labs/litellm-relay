@@ -101,6 +101,10 @@ impl SettingsSource for FileSettings {
     }
 }
 
+pub trait Handler: Send + Sync {
+    fn handle(&self, request: Request, peer: Peer) -> Reply;
+}
+
 pub trait CallerCheck: Send + Sync {
     fn check(&self, callers: &[caller::AllowedCaller], peer: Peer) -> Verdict;
 }
@@ -646,9 +650,15 @@ impl Broker {
         if current.version == Some(version) {
             return;
         }
-        if current.mode != next.mode || current.gateway_url != next.gateway_url {
-            eprintln!("broker: the Relay config changed its IdP or Gateway; signing out");
+        if current.mode != next.mode {
+            eprintln!("broker: the Relay config changed its IdP; signing out");
             self.forget(&current.gateway_url, true);
+        } else if current.gateway_url != next.gateway_url {
+            eprintln!(
+                "broker: the Relay config moved the Gateway from {} to {}; the next request exchanges there with the same IdP session",
+                current.gateway_url, next.gateway_url
+            );
+            self.forget(&current.gateway_url, false);
         } else if current.team != next.team {
             eprintln!(
                 "broker: the Relay config changed the team from {} to {}; the next request exchanges again",
@@ -1055,6 +1065,12 @@ impl Broker {
         self.renewal
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Handler for Broker {
+    fn handle(&self, request: Request, peer: Peer) -> Reply {
+        Broker::handle(self, request, peer)
     }
 }
 
@@ -1598,25 +1614,26 @@ mod tests {
     }
 
     #[test]
-    fn should_delete_the_key_at_the_old_gateway_when_the_config_moves_the_gateway() {
+    fn should_delete_the_key_at_the_old_gateway_and_keep_the_idp_session_when_the_config_moves_the_gateway(
+    ) {
         let rig = Rig::new(idp_settings(Some("team-a")));
         assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
         rig.settings.set(other_gateway_settings());
-        assert_eq!(
-            refused(credential(&rig, Context::NonInteractive)).reason(),
-            "signed_out"
-        );
+        let moved = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(moved.token, "sk-2");
+        assert_eq!(moved.source, Source::MintedKey);
         assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
         assert_eq!(
             rig.keys.deletes(),
             vec![("llm_session_1".to_string(), "sk-1".to_string())]
         );
-        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-2");
         assert_eq!(
             rig.keys.mints()[1].gateway_url,
             "https://other-gateway.example.com"
         );
-        assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(rig.auth.exchanges(), 2);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
     }
 
     #[test]
