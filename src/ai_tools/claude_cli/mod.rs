@@ -265,33 +265,36 @@ fn claude_json_path() -> PathBuf {
 }
 
 fn write_mcp_server(path: &Path, exe: &str) -> Result<()> {
-    let root = merge_mcp_server(read_existing_settings(path)?, exe);
+    let root = merge_mcp_server(read_existing_settings(path)?, exe)
+        .with_context(|| format!("refusing to rewrite {}", path.display()))?;
     let serialized = serde_json::to_string_pretty(&Value::Object(root))?;
     write_private(path, &format!("{serialized}\n"))
 }
 
-fn taken_object(root: &mut Map<String, Value>, key: &str) -> Map<String, Value> {
+fn taken_object(root: &mut Map<String, Value>, key: &str) -> Result<Map<String, Value>> {
     match root.remove(key) {
-        Some(Value::Object(map)) => map,
-        _ => Map::new(),
+        None => Ok(Map::new()),
+        Some(Value::Object(map)) => Ok(map),
+        Some(_) => bail!("`{key}` is not a JSON object"),
     }
 }
 
-fn merge_mcp_server(mut root: Map<String, Value>, exe: &str) -> Map<String, Value> {
-    let mut servers = taken_object(&mut root, "mcpServers");
+fn merge_mcp_server(mut root: Map<String, Value>, exe: &str) -> Result<Map<String, Value>> {
+    let mut servers = taken_object(&mut root, "mcpServers")?;
     servers.insert(
         CLIENT_SERVER_NAME.into(),
         json!({"type": "stdio", "command": exe, "args": ["mcp"]}),
     );
     root.insert("mcpServers".into(), Value::Object(servers));
-    root
+    Ok(root)
 }
 
-fn allow_mcp_tools(root: &mut Map<String, Value>) {
-    let mut permissions = taken_object(root, "permissions");
+fn allow_mcp_tools(root: &mut Map<String, Value>) -> Result<()> {
+    let mut permissions = taken_object(root, "permissions")?;
     let mut allow = match permissions.remove("allow") {
+        None => Vec::new(),
         Some(Value::Array(rules)) => rules,
-        _ => Vec::new(),
+        Some(_) => bail!("`permissions.allow` is not a JSON array"),
     };
     for tool in TOOL_NAMES {
         let rule = Value::String(format!("mcp__{CLIENT_SERVER_NAME}__{tool}"));
@@ -301,6 +304,7 @@ fn allow_mcp_tools(root: &mut Map<String, Value>) {
     }
     permissions.insert("allow".into(), Value::Array(allow));
     root.insert("permissions".into(), Value::Object(permissions));
+    Ok(())
 }
 
 fn write_claude_settings(settings: &RelaySettings, credential: &Credential) -> Result<PathBuf> {
@@ -311,7 +315,8 @@ fn write_claude_settings(settings: &RelaySettings, credential: &Credential) -> R
     }
 
     let root = read_existing_settings(&path)?;
-    let root = merge_claude_settings(root, settings, credential)?;
+    let root = merge_claude_settings(root, settings, credential)
+        .with_context(|| format!("refusing to rewrite {}", path.display()))?;
 
     let serialized = serde_json::to_string_pretty(&Value::Object(root))?;
     fs::write(&path, format!("{serialized}\n"))
@@ -372,7 +377,7 @@ fn merge_claude_settings(
         }
         Credential::Broker { helper } => {
             root.insert("apiKeyHelper".into(), Value::String(helper.clone()));
-            allow_mcp_tools(&mut root);
+            allow_mcp_tools(&mut root)?;
         }
     }
 
@@ -392,9 +397,18 @@ fn read_existing_settings(path: &Path) -> Result<Map<String, Value>> {
     }
     let contents =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    match serde_json::from_str::<Value>(&contents) {
-        Ok(Value::Object(map)) => Ok(map),
-        _ => Ok(Map::new()),
+    let parsed = serde_json::from_str::<Value>(&contents).with_context(|| {
+        format!(
+            "refusing to rewrite {}: it is not valid JSON",
+            path.display()
+        )
+    })?;
+    match parsed {
+        Value::Object(map) => Ok(map),
+        _ => bail!(
+            "refusing to rewrite {}: its top level is not a JSON object",
+            path.display()
+        ),
     }
 }
 
@@ -581,24 +595,28 @@ mod tests {
             json!({"mcpServers": {"litellm": {"type": "stdio", "command": "/opt/relay/litellm-relay", "args": ["mcp"]}}})
         );
 
-        fs::write(
-            &path,
-            r#"{"numStartups":3,"mcpServers":{"litellm":{"type":"stdio","command":"/old/relay","args":["mcp"]},"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}}}"#,
-        )
-        .unwrap();
+        let existing = json!({
+            "numStartups": 3,
+            "oauthAccount": {"accountUuid": "acc-1", "emailAddress": "dev@example.com"},
+            "projects": {"/home/dev/app": {"allowedTools": ["Bash"], "hasTrustDialogAccepted": true}},
+            "mcpServers": {
+                "litellm": {"type": "stdio", "command": "/old/relay", "args": ["mcp"]},
+                "github": {"type": "http", "url": "https://api.githubcopilot.com/mcp/"}
+            }
+        });
+        fs::write(&path, existing.to_string()).unwrap();
         write_mcp_server(&path, "/opt/relay/litellm-relay").unwrap();
+        let once = fs::read(&path).unwrap();
         write_mcp_server(&path, "/opt/relay/litellm-relay").unwrap();
-        let merged: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(merged["numStartups"], 3);
-        assert_eq!(
-            merged["mcpServers"]["github"],
-            json!({"type": "http", "url": "https://api.githubcopilot.com/mcp/"})
-        );
-        assert_eq!(
-            merged["mcpServers"]["litellm"],
-            json!({"type": "stdio", "command": "/opt/relay/litellm-relay", "args": ["mcp"]})
-        );
-        assert_eq!(merged["mcpServers"].as_object().unwrap().len(), 2);
+        assert_eq!(fs::read(&path).unwrap(), once);
+        let merged: Value = serde_json::from_slice(&once).unwrap();
+        let expected_servers = json!({
+            "litellm": {"type": "stdio", "command": "/opt/relay/litellm-relay", "args": ["mcp"]},
+            "github": {"type": "http", "url": "https://api.githubcopilot.com/mcp/"}
+        });
+        let mut expected = existing.clone();
+        expected["mcpServers"] = expected_servers;
+        assert_eq!(merged, expected);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -608,6 +626,46 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_refuse_to_rewrite_a_claude_json_whose_shape_is_not_expected() {
+        let dir = env::temp_dir().join(format!("relay-claude-json-shape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".claude.json");
+        let unexpected = [
+            r#"{"numStartups": 3, "#,
+            r#"["mcpServers"]"#,
+            r#"{"oauthAccount":{"accountUuid":"acc-1"},"mcpServers":["litellm"]}"#,
+            r#"{"mcpServers":null}"#,
+        ];
+
+        for contents in unexpected {
+            fs::write(&path, contents).unwrap();
+            let error = write_mcp_server(&path, "/opt/relay/litellm-relay")
+                .expect_err(contents)
+                .to_string();
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), contents, "{error}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_refuse_settings_whose_permissions_are_not_the_expected_shape() {
+        let settings = settings_with_team(None);
+        let credential = Credential::from_plan(BearerPlan::Broker, "/opt/relay/litellm-relay");
+        for existing in [
+            json!({"permissions": "allow-all"}),
+            json!({"permissions": {"allow": "mcp__litellm__call_tool"}}),
+        ] {
+            let root = existing.as_object().unwrap().clone();
+            let error = merge_claude_settings(root, &settings, &credential)
+                .expect_err(&existing.to_string())
+                .to_string();
+            assert!(error.contains("permissions"), "{error}");
+        }
     }
 
     fn settings_with_team(team: Option<&str>) -> RelaySettings {
