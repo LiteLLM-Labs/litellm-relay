@@ -6,7 +6,13 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 
-use crate::config::{load_settings, save_settings, DesktopSso, RelaySettings};
+use crate::{
+    ai_tools::{
+        gateway_credential::{ensure_gateway_credential, GatewayCredential, Renewal},
+        token::SignIn,
+    },
+    config::{load_settings, save_settings, DesktopSso, RelaySettings},
+};
 
 const MANAGED_SETTINGS_PATH_ENV: &str = "CLAUDE_DESKTOP_MANAGED_SETTINGS";
 const MACOS_MANAGED_PLIST: &str =
@@ -20,17 +26,23 @@ const LINUX_MANAGED_JSON: &str = "/etc/claude-desktop/managed-settings.json";
 /// When `oidc_client_id` and `oidc_issuer` are both set, the app is configured
 /// for single sign-on: each developer signs in against the corporate IdP and
 /// the resulting token is sent to the Gateway as the bearer credential, so no
-/// provider key ever lands on the device. Otherwise a static Gateway key is
-/// written.
+/// provider key ever lands on the device. Otherwise a static Gateway credential
+/// is written: the one passed as `api_key`, else one Relay exchanges the
+/// developer's IdP token for, else the key saved in the Relay config.
 #[derive(Debug, Default)]
 pub struct OnboardDesktopParams {
     pub gateway_url: Option<String>,
+    pub team: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub oidc_client_id: Option<String>,
     pub oidc_issuer: Option<String>,
     pub oidc_scopes: Option<String>,
     pub oidc_redirect_port: Option<u16>,
+    /// Whether obtaining the Gateway credential may open a browser sign-in.
+    /// The root autoconfigure daemon has no developer at the keyboard, so it
+    /// only reuses an identity the developer already signed in with.
+    pub allow_sign_in: bool,
     /// Suppress success output (used by autoconfigure, which prints its own
     /// summary). Standalone `relay onboard-claude-desktop` leaves this false.
     pub quiet: bool,
@@ -39,21 +51,26 @@ pub struct OnboardDesktopParams {
     /// sign-in mode the device was enrolled with; the standalone command
     /// leaves it false so its flags decide.
     pub reuse_saved_sso: bool,
+    pub saved_key_refused: bool,
 }
 
 /// Writes the managed configuration Claude Desktop reads on launch so it routes
 /// inference through the Gateway: the `com.anthropic.claudefordesktop` managed
 /// preferences plist on macOS, `/etc/claude-desktop/managed-settings.json` on
 /// Linux (see the Anthropic "LLM gateway" third-party docs). The app switches
-/// into gateway mode and — in SSO mode — prompts the developer to sign in
+/// into gateway mode and, in SSO mode, prompts the developer to sign in
 /// through their browser on first use.
 pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
     }
+    let saved_key_use = saved_key_use(params.api_key.as_deref(), params.saved_key_refused);
     if let Some(api_key) = params.api_key {
         settings.gateway.enroll_if_changed(api_key);
+    }
+    if params.team.is_some() {
+        settings.claude.team = params.team;
     }
     if let Some(model) = params.model {
         settings.claude.model = model;
@@ -72,14 +89,21 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     };
     settings.claude.desktop_sso = sso.clone();
 
-    if sso.is_none() && settings.gateway.api_key.as_deref().unwrap_or("").is_empty() {
-        bail!(
-            "Claude Desktop onboarding needs a Gateway credential: pass --api-key for a static \
-             key, or --oidc-client-id and --oidc-issuer for single sign-on"
-        );
-    }
+    let sign_in = if params.allow_sign_in {
+        SignIn::Allowed
+    } else {
+        SignIn::CachedOnly
+    };
+    let credential = resolve_credential(&settings, sso, saved_key_use, || {
+        ensure_gateway_credential(
+            &settings,
+            settings.claude.team.as_deref(),
+            sign_in,
+            Renewal::HalfLife,
+        )
+    })?;
 
-    let document = build_managed_settings(&settings, sso.as_ref());
+    let document = build_managed_settings(&settings, &credential);
     let written = write_managed_settings(&ManagedLayout::for_host(), &document)?;
     save_settings(&settings)?;
 
@@ -88,20 +112,117 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
     }
     if !params.quiet {
         println!("Claude Desktop is wired to {}", settings.gateway.url);
-        match &sso {
-            Some(sso) => {
+        match &credential {
+            DesktopCredential::Sso(sso) => {
                 println!(
                     "Sign-in: OIDC issuer {} (client {})",
                     sso.issuer, sso.client_id
                 );
                 println!("Developers click \"Sign in to your organization\" on first launch.");
             }
-            None => println!("Credential: static Gateway API key"),
+            DesktopCredential::Static(StaticCredential::Exchanged(_)) => {
+                println!("Credential: Gateway credential exchanged from your IdP sign-in")
+            }
+            DesktopCredential::Static(StaticCredential::Key(_)) => {
+                println!("Credential: static Gateway API key")
+            }
         }
         println!("Wrote {}", written.path.display());
         println!("Restart Claude Desktop to pick up the managed configuration.");
     }
     Ok(())
+}
+
+#[derive(Debug)]
+enum StaticCredential {
+    Key(String),
+    Exchanged(String),
+}
+
+impl StaticCredential {
+    fn secret(&self) -> &str {
+        match self {
+            Self::Key(secret) | Self::Exchanged(secret) => secret,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DesktopCredential {
+    Sso(DesktopSso),
+    Static(StaticCredential),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SavedKeyUse {
+    Explicit,
+    Fallback,
+    Refused,
+}
+
+fn saved_key_use(passed_key: Option<&str>, saved_key_refused: bool) -> SavedKeyUse {
+    match passed_key {
+        Some(key) if !key.is_empty() => SavedKeyUse::Explicit,
+        _ if saved_key_refused => SavedKeyUse::Refused,
+        _ => SavedKeyUse::Fallback,
+    }
+}
+
+// OIDC flags win because the developer signs in inside the app, and an explicit
+// `--api-key` is the operator's choice. Otherwise a configured IdP means Relay
+// exchanges the developer's sign-in, and a saved key covers a Gateway without
+// the exchange or an exchange that failed, unless the Gateway refused that key.
+fn resolve_credential(
+    settings: &RelaySettings,
+    sso: Option<DesktopSso>,
+    saved_key_use: SavedKeyUse,
+    exchange: impl FnOnce() -> Result<GatewayCredential>,
+) -> Result<DesktopCredential> {
+    if let Some(sso) = sso {
+        return Ok(DesktopCredential::Sso(sso));
+    }
+    let enrolled_key = settings
+        .gateway
+        .api_key
+        .as_deref()
+        .filter(|key| !key.is_empty());
+    if let Some(key) = enrolled_key.filter(|_| saved_key_use == SavedKeyUse::Explicit) {
+        return Ok(DesktopCredential::Static(StaticCredential::Key(
+            key.to_string(),
+        )));
+    }
+    let saved_key = enrolled_key.filter(|_| saved_key_use != SavedKeyUse::Refused);
+    if settings.idp.is_configured() {
+        match exchange() {
+            Ok(GatewayCredential::Issued(token)) => {
+                return Ok(DesktopCredential::Static(StaticCredential::Exchanged(
+                    token,
+                )))
+            }
+            Ok(GatewayCredential::Unsupported) if saved_key.is_none() => bail!(
+                "the gateway {} offers no IdP token exchange, so Claude Desktop needs a Gateway \
+                 credential: pass --api-key for a static key, or --oidc-client-id and \
+                 --oidc-issuer for single sign-on",
+                settings.gateway.url
+            ),
+            Ok(GatewayCredential::Unsupported) => {}
+            Err(error) if saved_key.is_none() => return Err(error),
+            Err(error) => eprintln!(
+                "could not exchange the IdP sign-in for a Gateway credential, keeping the \
+                 saved Gateway key: {error:#}"
+            ),
+        }
+    }
+    match saved_key {
+        Some(key) => Ok(DesktopCredential::Static(StaticCredential::Key(
+            key.to_string(),
+        ))),
+        None => bail!(
+            "Claude Desktop onboarding needs a Gateway credential: pass --api-key for a static \
+             key, --oidc-client-id and --oidc-issuer for single sign-on, or onboard an IdP with \
+             `relay onboard` so Relay can exchange your sign-in for one"
+        ),
+    }
 }
 
 /// Builds the top-level object Claude Desktop reads from its managed
@@ -110,7 +231,7 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
 /// Linux.
 fn build_managed_settings(
     settings: &RelaySettings,
-    sso: Option<&DesktopSso>,
+    credential: &DesktopCredential,
 ) -> Map<String, Value> {
     let mut root = Map::new();
     root.insert("inferenceProvider".into(), Value::String("gateway".into()));
@@ -127,8 +248,8 @@ fn build_managed_settings(
         Value::Array(vec![Value::String(settings.claude.model.clone())]),
     );
 
-    match sso {
-        Some(sso) => {
+    match credential {
+        DesktopCredential::Sso(sso) => {
             root.insert(
                 "inferenceCredentialKind".into(),
                 Value::String("interactive".into()),
@@ -144,17 +265,15 @@ fn build_managed_settings(
             }
             root.insert("inferenceGatewayOidc".into(), Value::Object(oidc));
         }
-        None => {
+        DesktopCredential::Static(credential) => {
             root.insert(
                 "inferenceCredentialKind".into(),
                 Value::String("static".into()),
             );
-            if let Some(api_key) = &settings.gateway.api_key {
-                root.insert(
-                    "inferenceGatewayApiKey".into(),
-                    Value::String(api_key.clone()),
-                );
-            }
+            root.insert(
+                "inferenceGatewayApiKey".into(),
+                Value::String(credential.secret().to_string()),
+            );
         }
     }
 
@@ -421,6 +540,13 @@ mod tests {
         settings
     }
 
+    fn settings_with_idp(key: Option<&str>) -> RelaySettings {
+        let mut settings = settings_with("https://gw.corp", key, "claude-sonnet-4-5");
+        settings.idp.issuer = "https://login.corp/v2.0".into();
+        settings.idp.client_id = "client-123".into();
+        settings
+    }
+
     fn sso_config() -> DesktopSso {
         DesktopSso {
             client_id: "client-123".into(),
@@ -428,6 +554,30 @@ mod tests {
             scopes: None,
             redirect_port: Some(53180),
         }
+    }
+
+    fn static_secret(credential: &DesktopCredential) -> &str {
+        match credential {
+            DesktopCredential::Static(credential) => credential.secret(),
+            DesktopCredential::Sso(_) => panic!("expected a static credential"),
+        }
+    }
+
+    fn no_exchange() -> Result<GatewayCredential> {
+        panic!("the exchange must not run")
+    }
+
+    fn saved_key(settings: &RelaySettings) -> DesktopCredential {
+        let key = settings
+            .gateway
+            .api_key
+            .clone()
+            .expect("the test settings carry a saved key");
+        DesktopCredential::Static(StaticCredential::Key(key))
+    }
+
+    fn static_doc(settings: &RelaySettings) -> Map<String, Value> {
+        build_managed_settings(settings, &saved_key(settings))
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
@@ -457,7 +607,8 @@ mod tests {
             Some("sk-test"),
             "claude-sonnet-4-5",
         );
-        let doc = build_managed_settings(&settings, None);
+        let credential = DesktopCredential::Static(StaticCredential::Key("sk-test".into()));
+        let doc = build_managed_settings(&settings, &credential);
 
         assert_eq!(doc["inferenceProvider"], Value::String("gateway".into()));
         assert_eq!(
@@ -477,9 +628,26 @@ mod tests {
     }
 
     #[test]
+    fn should_write_the_exchanged_gateway_credential_as_the_static_key() {
+        let settings = settings_with_idp(None);
+        let credential =
+            DesktopCredential::Static(StaticCredential::Exchanged("sk-exchanged".into()));
+        let doc = build_managed_settings(&settings, &credential);
+
+        assert_eq!(
+            doc["inferenceCredentialKind"],
+            Value::String("static".into())
+        );
+        assert_eq!(
+            doc["inferenceGatewayApiKey"],
+            Value::String("sk-exchanged".into())
+        );
+    }
+
+    #[test]
     fn should_write_interactive_sso_config_without_api_key() {
         let settings = settings_with("https://gw.corp", Some("sk-secret"), "claude-sonnet-4-5");
-        let doc = build_managed_settings(&settings, Some(&sso_config()));
+        let doc = build_managed_settings(&settings, &DesktopCredential::Sso(sso_config()));
 
         assert_eq!(
             doc["inferenceCredentialKind"],
@@ -496,6 +664,156 @@ mod tests {
             Value::String("https://login.corp/v2.0".into())
         );
         assert_eq!(oidc["redirectPort"], json!(53180));
+    }
+
+    #[test]
+    fn should_prefer_sso_over_every_other_credential() {
+        let settings = settings_with_idp(Some("sk-saved"));
+
+        let credential = resolve_credential(
+            &settings,
+            Some(sso_config()),
+            SavedKeyUse::Explicit,
+            no_exchange,
+        )
+        .unwrap();
+
+        assert!(matches!(credential, DesktopCredential::Sso(_)));
+    }
+
+    #[test]
+    fn should_prefer_an_explicit_api_key_over_the_exchange() {
+        let settings = settings_with_idp(Some("sk-explicit"));
+
+        let credential =
+            resolve_credential(&settings, None, SavedKeyUse::Explicit, no_exchange).unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-explicit");
+    }
+
+    #[test]
+    fn should_exchange_the_idp_sign_in_when_no_key_was_passed() {
+        let settings = settings_with_idp(Some("sk-saved"));
+
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+            Ok(GatewayCredential::Issued("sk-exchanged".into()))
+        })
+        .unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-exchanged");
+    }
+
+    #[test]
+    fn should_fall_back_to_the_saved_key_when_the_gateway_has_no_exchange() {
+        let settings = settings_with_idp(Some("sk-saved"));
+
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+            Ok(GatewayCredential::Unsupported)
+        })
+        .unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-saved");
+    }
+
+    #[test]
+    fn should_keep_the_saved_key_when_the_exchange_fails() {
+        let settings = settings_with_idp(Some("sk-saved"));
+
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+            bail!("no signed-in identity on this device")
+        })
+        .unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-saved");
+    }
+
+    #[test]
+    fn should_surface_the_exchange_failure_when_no_key_is_saved() {
+        let settings = settings_with_idp(None);
+
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+            bail!("no signed-in identity on this device")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no signed-in identity"));
+    }
+
+    #[test]
+    fn should_explain_when_the_gateway_has_no_exchange_and_nothing_else_is_configured() {
+        let settings = settings_with_idp(None);
+
+        let error = resolve_credential(&settings, None, SavedKeyUse::Fallback, || {
+            Ok(GatewayCredential::Unsupported)
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("offers no IdP token exchange"));
+    }
+
+    #[test]
+    fn should_exchange_the_idp_sign_in_when_the_gateway_refused_the_saved_key() {
+        let settings = settings_with_idp(Some("sk-refused"));
+
+        let credential = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+            Ok(GatewayCredential::Issued("sk-exchanged".into()))
+        })
+        .unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-exchanged");
+    }
+
+    #[test]
+    fn should_never_write_a_refused_saved_key_when_the_exchange_fails() {
+        let settings = settings_with_idp(Some("sk-refused"));
+
+        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+            bail!("no signed-in identity on this device")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no signed-in identity"));
+    }
+
+    #[test]
+    fn should_never_write_a_refused_saved_key_when_the_gateway_has_no_exchange() {
+        let settings = settings_with_idp(Some("sk-refused"));
+
+        let error = resolve_credential(&settings, None, SavedKeyUse::Refused, || {
+            Ok(GatewayCredential::Unsupported)
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("offers no IdP token exchange"));
+    }
+
+    #[test]
+    fn should_let_a_passed_key_win_over_a_refused_saved_key() {
+        assert_eq!(saved_key_use(Some("sk-flag"), true), SavedKeyUse::Explicit);
+        assert_eq!(saved_key_use(Some("sk-flag"), false), SavedKeyUse::Explicit);
+        assert_eq!(saved_key_use(None, true), SavedKeyUse::Refused);
+        assert_eq!(saved_key_use(Some(""), true), SavedKeyUse::Refused);
+        assert_eq!(saved_key_use(None, false), SavedKeyUse::Fallback);
+    }
+
+    #[test]
+    fn should_use_the_saved_key_without_an_idp() {
+        let settings = settings_with("https://gw.corp", Some("sk-saved"), "claude-sonnet-4-5");
+
+        let credential =
+            resolve_credential(&settings, None, SavedKeyUse::Fallback, no_exchange).unwrap();
+
+        assert_eq!(static_secret(&credential), "sk-saved");
+    }
+
+    #[test]
+    fn should_require_some_credential() {
+        let settings = settings_with("https://gw.corp", None, "claude-sonnet-4-5");
+
+        let error =
+            resolve_credential(&settings, None, SavedKeyUse::Fallback, no_exchange).unwrap_err();
+
+        assert!(error.to_string().contains("needs a Gateway credential"));
     }
 
     #[cfg(target_os = "macos")]
@@ -559,7 +877,7 @@ mod tests {
             None,
         );
         let settings = settings_with("https://gw.corp", None, "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, Some(&sso_config()));
+        let doc = build_managed_settings(&settings, &DesktopCredential::Sso(sso_config()));
 
         let written = write_managed_settings(&layout, &doc).unwrap();
 
@@ -609,7 +927,7 @@ mod tests {
             None,
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         write_managed_settings(&layout, &doc).unwrap();
 
@@ -638,7 +956,7 @@ mod tests {
             Some(stale.clone()),
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         let written = write_managed_settings(&layout, &doc).unwrap();
 
@@ -666,7 +984,7 @@ mod tests {
             Some(stale),
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         let written = write_managed_settings(&layout, &doc).unwrap();
 
@@ -690,7 +1008,7 @@ mod tests {
             Some(stale.clone()),
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         let written = write_managed_settings(&layout, &doc).unwrap();
 
@@ -713,17 +1031,18 @@ mod tests {
             .join("alice")
             .join("com.anthropic.claudefordesktop.plist");
         fs::create_dir_all(per_user.parent().unwrap()).unwrap();
-        let mdm_settings = build_managed_settings(
-            &settings_with("https://mdm.corp", Some("sk-mdm"), "claude-sonnet-5"),
-            None,
-        );
+        let mdm_settings = static_doc(&settings_with(
+            "https://mdm.corp",
+            Some("sk-mdm"),
+            "claude-sonnet-5",
+        ));
         fs::write(
             &per_user,
             render_managed_settings(ManagedFormat::MacOsPlist, &mdm_settings).unwrap(),
         )
         .unwrap();
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         let error = write_managed_settings(&layout, &doc)
             .unwrap_err()
@@ -763,7 +1082,7 @@ mod tests {
         )
         .unwrap();
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         write_managed_settings(&layout, &doc).unwrap();
 
@@ -783,7 +1102,7 @@ mod tests {
         fs::create_dir_all(layout.managed_dir()).unwrap();
         fs::write(&layout.path, b"not a plist").unwrap();
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         write_managed_settings(&layout, &doc).unwrap();
 
@@ -819,7 +1138,7 @@ mod tests {
         fs::write(&staged, b"").unwrap();
         fs::set_permissions(&staged, fs::Permissions::from_mode(0o600)).unwrap();
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         write_managed_settings(&layout, &doc).unwrap();
 
@@ -844,7 +1163,7 @@ mod tests {
             None,
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
         write_managed_settings(&layout, &doc).unwrap();
         let first_inode = fs::metadata(&layout.path).unwrap().ino();
 
@@ -868,11 +1187,12 @@ mod tests {
             None,
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
-        let other = build_managed_settings(
-            &settings_with("https://other.corp", Some("sk-test"), "claude-sonnet-5"),
-            None,
-        );
+        let doc = static_doc(&settings);
+        let other = static_doc(&settings_with(
+            "https://other.corp",
+            Some("sk-test"),
+            "claude-sonnet-5",
+        ));
         fs::create_dir_all(layout.managed_dir()).unwrap();
         fs::write(
             &layout.path,
@@ -902,7 +1222,7 @@ mod tests {
             None,
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
         fs::create_dir_all(layout.managed_dir()).unwrap();
         fs::write(&layout.path, b"{\"inferenceProvider\": \"gateway\"}\n").unwrap();
 
@@ -948,7 +1268,7 @@ mod tests {
             None,
         );
         let settings = settings_with("https://gw.corp", Some("sk-test"), "claude-sonnet-5");
-        let doc = build_managed_settings(&settings, None);
+        let doc = static_doc(&settings);
 
         write_managed_settings(&layout, &doc).unwrap();
 
@@ -1060,6 +1380,44 @@ mod tests {
             saved.gateway.expires_at,
             Some(expires_at),
             "handing the saved key back must keep the expiry setup recorded"
+        );
+
+        restore_env("HOME", old_home);
+        restore_env(MANAGED_SETTINGS_PATH_ENV, old_override);
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(managed.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn should_save_the_team_the_exchange_is_issued_for() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = scratch_dir("team-home");
+        let managed = scratch_dir("team").join("managed.plist");
+        let old_home = env::var_os("HOME");
+        let old_override = env::var_os(MANAGED_SETTINGS_PATH_ENV);
+        env::set_var("HOME", &home);
+        env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
+
+        onboard_desktop(OnboardDesktopParams {
+            gateway_url: Some("https://gw.corp".into()),
+            team: Some("eng".into()),
+            api_key: Some("sk-saved".into()),
+            quiet: true,
+            ..OnboardDesktopParams::default()
+        })
+        .unwrap();
+        assert_eq!(load_settings().unwrap().claude.team.as_deref(), Some("eng"));
+
+        onboard_desktop(OnboardDesktopParams {
+            api_key: Some("sk-saved".into()),
+            quiet: true,
+            ..OnboardDesktopParams::default()
+        })
+        .unwrap();
+        assert_eq!(
+            load_settings().unwrap().claude.team.as_deref(),
+            Some("eng"),
+            "a rerun without --team must keep the saved team"
         );
 
         restore_env("HOME", old_home);

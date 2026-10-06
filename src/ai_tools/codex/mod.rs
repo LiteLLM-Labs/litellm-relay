@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::{
-    ai_tools::{idp::SIGN_IN_CEILING, token::ensure_token},
+    ai_tools::{gateway_credential::print_bearer, idp::SIGN_IN_CEILING},
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
 };
@@ -15,7 +15,7 @@ use crate::{
 const WIRE_API: &str = "responses";
 
 /// How often Codex proactively refreshes the bearer token, matching its own
-/// default of five minutes so the short-lived identity token stays valid.
+/// default of five minutes so a Gateway credential nearing expiry is replaced in time.
 const TOKEN_REFRESH_INTERVAL_MS: i64 = 300_000;
 
 /// How long Codex waits for the token helper before killing it. Its default is
@@ -32,11 +32,11 @@ const CODEX_CONFIG_PATH_ENV: &str = "LITELLM_RELAY_CODEX_CONFIG";
 #[derive(Debug, Default)]
 enum Credential<'a> {
     /// Command-backed `auth` hook running Relay's token helper (default). Codex
-    /// fetches a short-lived identity token on demand; no key on the device.
+    /// fetches the Gateway credential on demand; no admin-issued key on the device.
     #[default]
     TokenHelper,
     /// Codex reads the bearer key from an environment variable (`env_key`).
-    /// Relay's token helper is expected to populate it with the identity token.
+    /// Relay's token helper is expected to populate it with the Gateway credential.
     EnvKey(&'a str),
     /// Static gateway key embedded as `experimental_bearer_token`.
     StaticKey(&'a str),
@@ -120,11 +120,11 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
         }
         match &credential {
             Credential::TokenHelper => {
-                println!("Codex fetches a short-lived identity token via `relay codex-token`.");
+                println!("Codex fetches a Gateway credential via `relay codex-token`.");
             }
             Credential::EnvKey(var) => {
                 println!(
-                    "Codex reads the bearer key from ${var}. Populate it with the identity token, e.g.\n  export {var}=\"$({exe} codex-token)\""
+                    "Codex reads the bearer key from ${var}. Populate it with the Gateway credential, e.g.\n  export {var}=\"$({exe} codex-token)\""
                 );
             }
             Credential::StaticKey(_) => {
@@ -137,12 +137,10 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
     Ok(())
 }
 
-/// Prints a valid IdP bearer token on stdout for Codex's `auth` command hook.
+/// Prints the Gateway credential on stdout for Codex's `auth` command hook.
 pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
-    let token = ensure_token(&settings.idp)?;
-    println!("{token}");
-    Ok(())
+    print_bearer(&settings, settings.codex.team.as_deref())
 }
 
 fn codex_config_path() -> PathBuf {

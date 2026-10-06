@@ -1,12 +1,15 @@
 //! Onboarding of AI coding tools onto the Gateway. `idp` and `token` hold the
-//! identity concerns shared across tools; each tool gets its own folder with a
-//! settings writer (`claude_cli` today, Codex next). See `CLAUDE.md`.
+//! identity concerns shared across tools and `gateway_credential` turns that
+//! identity into the Gateway credential the tools send; each tool gets its own
+//! folder with a settings writer. See `CLAUDE.md`.
 
 pub mod autoconfigure;
+pub mod blocking;
 pub mod claude_cli;
 pub mod claude_desktop;
 pub mod codex;
 pub mod detect;
+pub mod gateway_credential;
 pub mod idp;
 pub mod token;
 

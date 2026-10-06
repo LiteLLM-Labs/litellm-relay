@@ -43,6 +43,7 @@ pub struct AutoConfigureParams {
     /// so a key filled in by the saved-credential fallback does not read as an
     /// explicit static-key run.
     pub explicit_api_key: bool,
+    pub saved_key_refused: bool,
 }
 
 /// Whether the Gateway still accepts the static credential about to be written into tool configs.
@@ -53,6 +54,7 @@ pub enum CredentialGate {
     Restricted { detail: String },
     Rejected { detail: String },
     Unverifiable { gateway: String, detail: String },
+    DesktopFallbackRefused { detail: String },
 }
 
 /// Detect installed tools and onboard each one, continuing past any single
@@ -123,12 +125,8 @@ fn static_key_in_play(
         || tools
             .iter()
             .any(|tool| matches!(tool, AiTool::ClaudeCode | AiTool::Codex));
-    let explicit = params
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty());
     if explicit_key_lands {
-        if let Some(key) = explicit {
+        if let Some(key) = passed_key(params) {
             return Some(key.to_string());
         }
     }
@@ -158,24 +156,55 @@ async fn credential_gate(
         .gateway_url
         .clone()
         .unwrap_or_else(|| settings.gateway.url.clone());
-    let gate = match check_credential(&check_client(), &gateway_url, &api_key).await {
-        CredentialCheck::Valid => {
-            let expires_at = settings
-                .gateway
-                .expires_at
-                .filter(|_| settings.gateway.api_key.as_deref() == Some(api_key.as_str()));
-            CredentialGate::Verified {
-                expiry: expiry_state(expires_at, Utc::now()),
+    let expires_at = settings
+        .gateway
+        .expires_at
+        .filter(|_| settings.gateway.api_key.as_deref() == Some(api_key.as_str()));
+    let check = check_credential(&check_client(), &gateway_url, &api_key).await;
+    Ok(gate_for(
+        check,
+        saved_key_is_only_the_desktop_fallback(&params, settings.idp.is_configured()),
+        gateway_url,
+        expiry_state(expires_at, Utc::now()),
+    ))
+}
+
+fn saved_key_is_only_the_desktop_fallback(
+    params: &AutoConfigureParams,
+    saved_idp_configured: bool,
+) -> bool {
+    saved_idp_configured && passed_key(params).is_none()
+}
+
+fn passed_key(params: &AutoConfigureParams) -> Option<&str> {
+    params
+        .api_key
+        .as_deref()
+        .filter(|key| !key.trim().is_empty())
+}
+
+fn gate_for(
+    check: CredentialCheck,
+    desktop_fallback_only: bool,
+    gateway: String,
+    expiry: ExpiryState,
+) -> CredentialGate {
+    match check {
+        CredentialCheck::Valid => CredentialGate::Verified { expiry },
+        CredentialCheck::Restricted { detail } => CredentialGate::Restricted { detail },
+        CredentialCheck::Rejected { detail } if desktop_fallback_only => {
+            CredentialGate::DesktopFallbackRefused { detail }
+        }
+        CredentialCheck::Unverifiable { detail } if desktop_fallback_only => {
+            CredentialGate::DesktopFallbackRefused {
+                detail: format!("could not verify it against {gateway}: {detail}"),
             }
         }
-        CredentialCheck::Restricted { detail } => CredentialGate::Restricted { detail },
         CredentialCheck::Rejected { detail } => CredentialGate::Rejected { detail },
-        CredentialCheck::Unverifiable { detail } => CredentialGate::Unverifiable {
-            gateway: gateway_url,
-            detail,
-        },
-    };
-    Ok(gate)
+        CredentialCheck::Unverifiable { detail } => {
+            CredentialGate::Unverifiable { gateway, detail }
+        }
+    }
 }
 
 /// Result of attempting to configure one detected tool.
@@ -219,7 +248,19 @@ where
     println!();
 
     let tools: Vec<AiTool> = detected.iter().map(|d| d.tool).collect();
-    match gate(&tools).await? {
+    let gate_outcome = gate(&tools).await?;
+    let params = AutoConfigureParams {
+        saved_key_refused: matches!(gate_outcome, CredentialGate::DesktopFallbackRefused { .. }),
+        ..params
+    };
+    match gate_outcome {
+        CredentialGate::DesktopFallbackRefused { detail } => {
+            println!(
+                "  {}  The Gateway did not accept the saved credential: {detail}. Claude \
+                 Desktop only gets the credential Relay exchanges for the IdP sign-in.",
+                style("!").yellow().bold()
+            );
+        }
         CredentialGate::Restricted { detail } => {
             println!(
                 "  {}  The Gateway accepts the stored credential but does not allow it on \
@@ -334,14 +375,17 @@ fn configure_tool(tool: AiTool, params: &AutoConfigureParams) -> Result<()> {
         }),
         AiTool::ClaudeDesktop => onboard_desktop(OnboardDesktopParams {
             gateway_url: params.gateway_url.clone(),
+            team: params.team.clone(),
             api_key: params.api_key.clone(),
             model: None,
             oidc_client_id: params.idp.client_id.clone(),
             oidc_issuer: params.idp.issuer.clone(),
             oidc_scopes: params.idp.scopes.clone(),
             oidc_redirect_port: params.idp.redirect_port,
+            allow_sign_in: false,
             quiet: true,
             reuse_saved_sso: desktop_reuse_saved_sso(params),
+            saved_key_refused: params.saved_key_refused,
         }),
     }
 }
@@ -658,6 +702,136 @@ mod tests {
         );
         assert_eq!(attempted, 0, "no tool config may be written");
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn should_keep_configuring_when_only_the_desktop_fallback_key_was_refused() {
+        let home = temp_home("fallback-refused");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+
+        let mut seen: Vec<(AiTool, bool)> = Vec::new();
+        autoconfigure_with(
+            &ctx(&home),
+            AutoConfigureParams::default(),
+            &[],
+            gate(CredentialGate::DesktopFallbackRefused {
+                detail: "Authentication Error - Expired Key".into(),
+            }),
+            &mut |tool, params| {
+                seen.push((tool, params.saved_key_refused));
+                Ok(())
+            },
+        )
+        .await
+        .expect("a refused fallback key must not stop the tools that never write it");
+
+        assert_eq!(
+            seen,
+            vec![(AiTool::ClaudeCode, true), (AiTool::Codex, true)],
+            "every onboarder must learn the saved key was refused"
+        );
+
+        let mut verified: Vec<bool> = Vec::new();
+        autoconfigure_with(
+            &ctx(&home),
+            static_key_params(),
+            &[],
+            gate(CredentialGate::Verified {
+                expiry: ExpiryState::Unknown,
+            }),
+            &mut |_, params| {
+                verified.push(params.saved_key_refused);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified, vec![false, false]);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn should_only_stop_the_pass_for_a_refused_key_it_would_write() {
+        let gateway = "https://gw.corp".to_string();
+        let rejected = || CredentialCheck::Rejected {
+            detail: "Expired Key".into(),
+        };
+        let unreachable = || CredentialCheck::Unverifiable {
+            detail: "connection refused".into(),
+        };
+
+        assert_eq!(
+            gate_for(rejected(), true, gateway.clone(), ExpiryState::Unknown),
+            CredentialGate::DesktopFallbackRefused {
+                detail: "Expired Key".into()
+            }
+        );
+        assert_eq!(
+            gate_for(unreachable(), true, gateway.clone(), ExpiryState::Unknown),
+            CredentialGate::DesktopFallbackRefused {
+                detail: "could not verify it against https://gw.corp: connection refused".into()
+            }
+        );
+        assert_eq!(
+            gate_for(rejected(), false, gateway.clone(), ExpiryState::Unknown),
+            CredentialGate::Rejected {
+                detail: "Expired Key".into()
+            }
+        );
+        assert_eq!(
+            gate_for(unreachable(), false, gateway.clone(), ExpiryState::Unknown),
+            CredentialGate::Unverifiable {
+                gateway: gateway.clone(),
+                detail: "connection refused".into()
+            }
+        );
+        for desktop_fallback_only in [true, false] {
+            assert_eq!(
+                gate_for(
+                    CredentialCheck::Valid,
+                    desktop_fallback_only,
+                    gateway.clone(),
+                    ExpiryState::Unknown
+                ),
+                CredentialGate::Verified {
+                    expiry: ExpiryState::Unknown
+                }
+            );
+            assert_eq!(
+                gate_for(
+                    CredentialCheck::Restricted {
+                        detail: "route not allowed".into()
+                    },
+                    desktop_fallback_only,
+                    gateway.clone(),
+                    ExpiryState::Unknown
+                ),
+                CredentialGate::Restricted {
+                    detail: "route not allowed".into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn should_treat_the_saved_key_as_a_fallback_only_behind_a_saved_idp() {
+        let no_key = AutoConfigureParams::default();
+        let blank_key = AutoConfigureParams {
+            api_key: Some("  ".into()),
+            ..AutoConfigureParams::default()
+        };
+
+        assert!(saved_key_is_only_the_desktop_fallback(&no_key, true));
+        assert!(saved_key_is_only_the_desktop_fallback(&blank_key, true));
+        assert!(
+            !saved_key_is_only_the_desktop_fallback(&no_key, false),
+            "without an IdP the saved key is the credential Claude Desktop writes"
+        );
+        assert!(
+            !saved_key_is_only_the_desktop_fallback(&static_key_params(), true),
+            "a passed key is written as is, so its refusal stops the pass"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 name = "litellm-relay"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "Local endpoint relay for routing and auditing AI app traffic through LiteLLM Gateway."
 

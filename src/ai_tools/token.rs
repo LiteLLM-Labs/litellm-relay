@@ -1,6 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Write,
+    fs::{self, File},
     path::{Path, PathBuf},
 };
 
@@ -12,6 +11,7 @@ use crate::{
     ai_tools::idp::{self, token_expiry, Session},
     auth::open_browser,
     config::{relay_home, IdpSection},
+    system::{lock_private, write_private},
 };
 
 const REFRESH_AHEAD_SECONDS: i64 = 600;
@@ -27,6 +27,15 @@ struct CachedSession {
     refresh_token: Option<String>,
 }
 
+/// Whether a token hook may open the browser for an IdP sign-in when no cached
+/// session can be reused or refreshed. Unattended runs (the autoconfigure
+/// agents) must never block on a browser that nobody is watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignIn {
+    Allowed,
+    CachedOnly,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
     Reuse(String),
@@ -39,18 +48,26 @@ enum Step {
 
 /// Returns a valid IdP ID token for any onboarded tool. Reuses the cached token
 /// until it nears expiry, then renews it silently with the refresh token and
-/// only falls back to a browser sign-in when no refresh is possible. The token
-/// is identity-scoped, so it is shared across tools.
-pub fn ensure_token(idp: &IdpSection) -> Result<String> {
+/// only falls back to a browser sign-in when no refresh is possible and the
+/// caller allows one. The token is identity-scoped, so it is shared across
+/// tools.
+pub fn ensure_token(idp: &IdpSection, sign_in: SignIn) -> Result<String> {
     ensure_with(
         &token_cache_path(),
         idp,
         Utc::now().timestamp(),
+        sign_in,
         &open_browser,
     )
 }
 
-fn ensure_with(path: &Path, idp: &IdpSection, now: i64, browser: &dyn Fn(&str)) -> Result<String> {
+fn ensure_with(
+    path: &Path,
+    idp: &IdpSection,
+    now: i64,
+    sign_in: SignIn,
+    browser: &dyn Fn(&str),
+) -> Result<String> {
     if !idp.is_configured() {
         bail!("no IdP configured; {}", idp.setup_hint());
     }
@@ -60,7 +77,7 @@ fn ensure_with(path: &Path, idp: &IdpSection, now: i64, browser: &dyn Fn(&str)) 
     let _lock = lock_cache(path)?;
     match next_step(read_cache(path, idp)?, now) {
         Step::Reuse(token) => Ok(token),
-        Step::SignIn => store(path, idp, idp::sign_in(idp, browser)?),
+        Step::SignIn => store(path, idp, browser_sign_in(idp, sign_in, browser)?),
         Step::Refresh {
             refresh_token,
             still_valid,
@@ -73,10 +90,20 @@ fn ensure_with(path: &Path, idp: &IdpSection, now: i64, browser: &dyn Fn(&str)) 
                 Ok(token)
             }
             (Err(error), None) => {
-                eprintln!("Silent token refresh failed ({error:#}); signing in again.");
-                store(path, idp, idp::sign_in(idp, browser)?)
+                eprintln!("Silent token refresh failed ({error:#}).");
+                store(path, idp, browser_sign_in(idp, sign_in, browser)?)
             }
         },
+    }
+}
+
+fn browser_sign_in(idp: &IdpSection, sign_in: SignIn, browser: &dyn Fn(&str)) -> Result<Session> {
+    match sign_in {
+        SignIn::Allowed => idp::sign_in(idp, browser),
+        SignIn::CachedOnly => bail!(
+            "no signed-in identity on this device; run `relay claude-token` or \
+             `relay codex-token` once to sign in, then re-run"
+        ),
     }
 }
 
@@ -124,45 +151,11 @@ fn store(path: &Path, idp: &IdpSection, session: Session) -> Result<String> {
 }
 
 fn write_cache(path: &Path, cached: &CachedSession) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let staged = path.with_extension("json.tmp");
-    let _ = fs::remove_file(&staged);
-    private_file()
-        .create_new(true)
-        .open(&staged)
-        .and_then(|mut file| file.write_all(serde_json::to_string(cached)?.as_bytes()))
-        .with_context(|| format!("failed to write {}", staged.display()))?;
-    fs::rename(&staged, path).with_context(|| format!("failed to replace {}", path.display()))
+    write_private(path, &serde_json::to_string(cached)?)
 }
 
 fn lock_cache(path: &Path) -> Result<File> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let lock_path = path.with_extension("lock");
-    let file = private_file()
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("failed to open {}", lock_path.display()))?;
-    file.lock()
-        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
-    Ok(file)
-}
-
-fn private_file() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
+    lock_private(&path.with_extension("lock"))
 }
 
 fn token_cache_path() -> PathBuf {
@@ -286,7 +279,11 @@ mod tests {
             read_cache(&path, &idp).unwrap(),
             Some(cached(&idp, NOW + 3600, Some("refresh-1")))
         );
-        assert!(!path.with_extension("json.tmp").exists());
+        assert_eq!(
+            fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "the staged file must be renamed into place, not left behind"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -395,7 +392,7 @@ mod tests {
         let idp = unreachable_idp();
         write_cache(&path, &cached(&idp, NOW + 3600, Some("refresh-1"))).unwrap();
 
-        let token = ensure_with(&path, &idp, NOW, &panicking_browser).unwrap();
+        let token = ensure_with(&path, &idp, NOW, SignIn::Allowed, &panicking_browser).unwrap();
 
         assert_eq!(token, jwt_with_exp(NOW + 3600));
     }
@@ -410,7 +407,7 @@ mod tests {
         let idp = server.idp();
         write_cache(&path, &cached(&idp, NOW + 300, Some("refresh-1"))).unwrap();
 
-        let token = ensure_with(&path, &idp, NOW, &panicking_browser).unwrap();
+        let token = ensure_with(&path, &idp, NOW, SignIn::Allowed, &panicking_browser).unwrap();
 
         assert_eq!(token, jwt_with_exp(NOW + 3600));
         assert_eq!(
@@ -437,7 +434,7 @@ mod tests {
         let idp = server.idp();
         write_cache(&path, &cached(&idp, NOW + 300, Some("refresh-1"))).unwrap();
 
-        let token = ensure_with(&path, &idp, NOW, &panicking_browser).unwrap();
+        let token = ensure_with(&path, &idp, NOW, SignIn::Allowed, &panicking_browser).unwrap();
 
         assert_eq!(token, jwt_with_exp(NOW + 300));
         assert_eq!(
@@ -445,6 +442,45 @@ mod tests {
             Some(cached(&idp, NOW + 300, Some("refresh-1")))
         );
         assert_eq!(server.token_requests().len(), 1);
+    }
+
+    #[test]
+    fn should_refresh_silently_when_the_caller_allows_no_browser() {
+        let path = cache_path("unattended-refresh");
+        let server = FakeIdp::start(
+            None,
+            vec![token_reply(&jwt_with_exp(NOW + 3600), Some("refresh-2"))],
+        );
+        let idp = server.idp();
+        write_cache(&path, &cached(&idp, NOW + 300, Some("refresh-1"))).unwrap();
+
+        let token = ensure_with(&path, &idp, NOW, SignIn::CachedOnly, &panicking_browser).unwrap();
+
+        assert_eq!(token, jwt_with_exp(NOW + 3600));
+        assert_eq!(
+            read_cache(&path, &idp).unwrap(),
+            Some(cached(&idp, NOW + 3600, Some("refresh-2")))
+        );
+    }
+
+    #[test]
+    fn should_refuse_to_sign_in_when_the_caller_allows_no_browser() {
+        let path = cache_path("unattended-sign-in");
+        let idp = unreachable_idp();
+        write_cache(&path, &cached(&idp, NOW - 10, None)).unwrap();
+
+        let error =
+            ensure_with(&path, &idp, NOW, SignIn::CachedOnly, &panicking_browser).unwrap_err();
+
+        assert!(
+            error.to_string().contains("no signed-in identity"),
+            "{error:#}"
+        );
+        assert_eq!(
+            read_cache(&path, &idp).unwrap(),
+            Some(cached(&idp, NOW - 10, None)),
+            "an unattended run must leave the expired session for the next interactive one"
+        );
     }
 
     #[test]
@@ -461,7 +497,7 @@ mod tests {
         write_cache(&path, &cached(&idp, NOW - 10, Some("refresh-stale"))).unwrap();
         let browser = FakeBrowser::approving();
 
-        let token = ensure_with(&path, &idp, NOW, &browser.opener()).unwrap();
+        let token = ensure_with(&path, &idp, NOW, SignIn::Allowed, &browser.opener()).unwrap();
 
         assert_eq!(token, jwt_with_exp(NOW + 3600));
         assert_eq!(browser.seen.lock().unwrap().len(), 1);
@@ -485,7 +521,7 @@ mod tests {
         let idp = server.idp();
         let browser = FakeBrowser::approving();
 
-        let token = ensure_with(&path, &idp, NOW, &browser.opener()).unwrap();
+        let token = ensure_with(&path, &idp, NOW, SignIn::Allowed, &browser.opener()).unwrap();
 
         assert_eq!(token, jwt_with_exp(NOW + 3600));
         assert_eq!(
@@ -505,7 +541,14 @@ mod tests {
         .unwrap();
         let browser = FakeBrowser::approving();
 
-        let token = ensure_with(&path, &server.idp(), NOW, &browser.opener()).unwrap();
+        let token = ensure_with(
+            &path,
+            &server.idp(),
+            NOW,
+            SignIn::Allowed,
+            &browser.opener(),
+        )
+        .unwrap();
 
         assert_eq!(token, jwt_with_exp(NOW + 3600));
         assert_eq!(browser.seen.lock().unwrap().len(), 1);
@@ -516,8 +559,14 @@ mod tests {
         let path = cache_path("unconfigured");
         write_cache(&path, &cached(&unreachable_idp(), NOW + 3600, None)).unwrap();
 
-        let error =
-            ensure_with(&path, &IdpSection::default(), NOW, &panicking_browser).unwrap_err();
+        let error = ensure_with(
+            &path,
+            &IdpSection::default(),
+            NOW,
+            SignIn::Allowed,
+            &panicking_browser,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("--oidc-issuer"), "{error:#}");
     }
@@ -539,7 +588,7 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         barrier.wait();
-                        ensure_with(&path, &idp, NOW, &panicking_browser).unwrap()
+                        ensure_with(&path, &idp, NOW, SignIn::Allowed, &panicking_browser).unwrap()
                     })
                 })
                 .collect();

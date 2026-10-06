@@ -2,13 +2,13 @@
 
 Relay onboards the OpenAI Codex CLI onto your LiteLLM AI Gateway the same way it onboards Claude Code: it writes Codex's own config so `codex` routes through the Gateway with the developer's corporate identity, and no provider API key touches the device.
 
-Codex reads `~/.codex/config.toml`. Relay defines a custom OpenAI-compatible provider under `[model_providers.<id>]` (pointing `base_url` at the Gateway's `/v1`) and selects it with the top-level `model_provider`/`model` keys. For the credential it uses Codex's command-backed `auth` hook, which runs Relay's token command to fetch a short-lived identity bearer token on demand (Codex refreshes it on the `refresh_interval_ms` interval).
+Codex reads `~/.codex/config.toml`. Relay defines a custom OpenAI-compatible provider under `[model_providers.<id>]` (pointing `base_url` at the Gateway's `/v1`) and selects it with the top-level `model_provider`/`model` keys. For the credential it uses Codex's command-backed `auth` hook, which runs Relay's token command to fetch the Gateway credential on demand (Codex refreshes it on the `refresh_interval_ms` interval).
 
 > **Gateway must serve the Responses API.** Codex only supports `wire_api = "responses"` (`wire_api = "chat"` is rejected by the CLI), so the provider talks to the Gateway's `POST /v1/responses`. LiteLLM supports the Responses API — make sure it is enabled for the models you expose.
 
 ## Step 1: Enable JWT auth on the Gateway (admin, once)
 
-Same as [Claude Code](claude-code.md#gateway-configuration) — turn on JWT auth with `auto_register` so each SSO identity maps to its own virtual key and limits.
+Same as [Claude Code](claude-code.md#gateway-configuration) — turn on JWT auth so the Gateway exchanges each SSO identity for its own Gateway credential, attributed to the developer and their team.
 
 ```yaml
 general_settings:
@@ -16,13 +16,12 @@ general_settings:
   litellm_jwtauth:
     user_id_jwt_field: "sub"
     user_id_upsert: True
+    fallback_to_db_teams: True
     # team_id_jwt_field: "team_id"  # only when your IdP puts a team_id claim in the ID token
     # team_id_upsert: True
-    virtual_key_claim_field: "email"
-    unregistered_jwt_client_behavior: "auto_register"
 ```
 
-Leave the `team_id_*` lines out unless your IdP issues a `team_id` claim; the Gateway rejects tokens that lack a configured team claim (see [Claude Code](claude-code.md#gateway-configuration)).
+Leave the `team_id_*` lines out unless your IdP issues a `team_id` claim; the Gateway rejects tokens that lack a configured team claim. The `--team` below must be a team the Gateway grants the signed-in developer, through that claim or through their team membership on the Gateway under `fallback_to_db_teams`, or the exchange is refused (see [Claude Code](claude-code.md#gateway-configuration) for the error and the fix).
 
 ## Step 2: Run `relay onboard-codex` on the device
 
@@ -56,17 +55,17 @@ timeout_ms = 390000
 refresh_interval_ms = 300000
 ```
 
-There is no API key in the file. `relay codex-token` prints a valid IdP bearer token on stdout, which is exactly what Codex's `auth` hook expects. `timeout_ms` raises Codex's five-second ceiling on the helper to the length of a whole browser sign-in, so the first `codex` run can complete the IdP flow instead of being killed mid sign-in. The file is written with `0600` permissions.
+There is no API key in the file. `relay codex-token` prints a Gateway credential for the configured team on stdout, which is exactly what Codex's `auth` hook expects: Relay exchanges the developer's IdP sign-in for it at the Gateway's `/token` endpoint and refreshes it before it expires (the exchange is described in [claude-code.md](claude-code.md)). `timeout_ms` raises Codex's five-second ceiling on the helper to the length of a whole browser sign-in, so the first `codex` run can complete the IdP flow instead of being killed mid sign-in. The file is written with `0600` permissions.
 
 ## Step 3: Start Codex and sign in
 
-The developer runs `codex` with no key and no exports. On first use Relay opens the corporate IdP sign-in in the browser (OIDC authorization code with PKCE), caches the identity session, and hands Codex a short-lived bearer token for each request, renewing it with the refresh token so the browser does not open again when the token expires. Spend is tracked per-user in LiteLLM, exactly as with Claude Code.
+The developer runs `codex` with no key and no exports. On first use Relay opens the corporate IdP sign-in in the browser (OIDC authorization code with PKCE), caches the identity session, exchanges it for a Gateway credential, and hands Codex that credential each time the hook runs, renewing both with their refresh tokens so the browser does not open again when they expire. Spend is tracked per-user in LiteLLM, exactly as with Claude Code.
 
 ## Credential alternatives
 
 The `auth` hook is the default and keeps no key on the device. Codex treats `auth`, `env_key`, and `experimental_bearer_token` as mutually exclusive, so Relay writes exactly one.
 
-- `--env-key <VAR>`: Codex reads the bearer key from an environment variable (`env_key = "<VAR>"`) rather than invoking the hook. Populate it with the identity token from your shell profile:
+- `--env-key <VAR>`: Codex reads the bearer key from an environment variable (`env_key = "<VAR>"`) rather than invoking the hook. Populate it with the Gateway credential from your shell profile:
 
   ```bash
   relay onboard-codex --gateway-url https://gateway.yourco.com --env-key LITELLM_API_KEY

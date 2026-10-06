@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    ai_tools::token::ensure_token,
+    ai_tools::gateway_credential::print_bearer,
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
     system::home_dir,
 };
@@ -15,7 +15,7 @@ use crate::{
 #[derive(Debug, Default)]
 enum Credential<'a> {
     /// Top-level `apiKeyHelper` running Relay's token helper (default). Claude
-    /// fetches a short-lived identity token on demand; no key on the device.
+    /// fetches the Gateway credential on demand; no admin-issued key on the device.
     #[default]
     TokenHelper,
     /// Static gateway key written to `ANTHROPIC_AUTH_TOKEN` for environments
@@ -104,12 +104,10 @@ pub fn onboard(params: OnboardParams) -> Result<()> {
     Ok(())
 }
 
-/// Prints a valid IdP bearer token on stdout for Claude Code's `apiKeyHelper`.
+/// Prints the Gateway credential on stdout for Claude Code's `apiKeyHelper`.
 pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
-    let token = ensure_token(&settings.idp)?;
-    println!("{token}");
-    Ok(())
+    print_bearer(&settings, settings.claude.team.as_deref())
 }
 
 fn claude_settings_path() -> PathBuf {

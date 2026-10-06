@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     io::{ErrorKind, Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     thread,
@@ -13,7 +12,7 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 use uuid::Uuid;
 
-use crate::config::IdpSection;
+use crate::{ai_tools::blocking::call, config::IdpSection};
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -297,24 +296,6 @@ fn http_client() -> Result<reqwest::Client> {
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("failed to build the IdP HTTP client")
-}
-
-fn call<T, F, Fut>(work: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T>>,
-{
-    let worker = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to start the IdP HTTP runtime")?;
-        runtime.block_on(work())
-    });
-    worker
-        .join()
-        .map_err(|_| anyhow!("the IdP HTTP worker panicked"))?
 }
 
 fn scope_string(idp: &IdpSection, supported: Option<&[String]>) -> String {

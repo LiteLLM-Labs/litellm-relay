@@ -121,10 +121,15 @@ a corporate proxy need a coordinated PAC file rather than a second competing
 profile.
 
 Using `--api-key` (or `gateway.api_key` in the managed config) writes a static
-Gateway key to every device. Prefer per-user browser SSO where your Gateway
-supports it. The credential check also runs when `--api-key` is combined with
-the `--oidc-*` flags, since Codex and Claude Code prefer the explicit key over
-the IdP.
+Gateway key to every device. With an IdP onboarded, Relay exchanges each
+developer's sign-in for their own Gateway credential instead, so the flag is
+only needed for Gateways without the authorization server. A push has no
+terminal, so it never opens a browser: it uses the identity the developer
+already signed in with, renewing it silently with its refresh token, and keeps
+a saved Gateway key when there is none. Prefer per-user browser SSO where your
+Gateway supports it. The credential check also runs when `--api-key` is
+combined with the `--oidc-*` flags, since Codex and Claude Code prefer the
+explicit key over the IdP.
 
 The `--oidc-*` flags on `relay autoconfigure` set the IdP for Claude Code,
 Codex, and Claude Desktop alike, and Relay saves it under `idp:` in
@@ -136,12 +141,32 @@ on SSO and keep Claude Code and Codex on a static key, pass the flags to
 `relay onboard-claude-desktop` instead
 
 The per-user LaunchAgent re-runs `autoconfigure` at login and on its interval.
-Each run checks the stored Gateway credential first. If the Gateway rejects it,
-the run leaves the Codex, Claude Code, and Claude Desktop configs untouched and
-exits non-zero, so an expired SSO session shows up in the LaunchAgent's exit
-status and in the `credential` block of `/api/status` instead of being rewritten
-into the tools every hour. The check also covers the saved key Claude Desktop
-falls back to when it is not given OIDC flags, so an IdP setup cannot copy a
-rejected key into the desktop app. `/api/status` reflects the credential
+Each run checks the stored Gateway credential first. Without an IdP, if the
+Gateway rejects it, the run leaves the Codex, Claude Code, and Claude Desktop
+configs untouched and exits non-zero, so an expired session shows up in the
+LaunchAgent's exit status and in the `credential` block of `/api/status`
+instead of being rewritten into the tools every hour. With an IdP saved, a
+rejected or unreachable saved key is only a warning on stderr: the run still
+exchanges the developer's sign-in for every tool, never writes the refused key,
+and exits non-zero only when no tool could be configured. The check also covers
+the saved key Claude Desktop falls back to when it is not given OIDC flags, so
+an IdP setup cannot copy a rejected key into the desktop app. Claude Desktop
+reads its managed file at launch, so a renewed credential reaches an app that
+has been running longer than the credential's lifetime only after a restart.
+
+Upgrading a fleet from a Relay that sent the ID token itself: the Gateway now
+has to accept the device's `--team` for the signed-in developer, through a
+`team_id` claim in the ID token or the developer's team membership on the
+Gateway under `fallback_to_db_teams: True`. A team it does not accept stops
+the tools with `the gateway refused the token exchange (HTTP 400
+invalid_request: subject_token was rejected by the gateway's JWT auth)` where
+the older Relay's ID token was accepted and the team ignored, so add the
+developers to their teams on the Gateway before the rollout, or push a
+`--team` the Gateway accepts. `/.well-known/litellm-cli-auth`, `/register`,
+and `/token` are reached without a bearer, so let them through any proxy or
+WAF in front of the Gateway unauthenticated; while they are blocked, Claude
+Code and Codex send the ID token itself with a notice on stderr, as the older
+Relay did, and Claude Desktop keeps its saved key or reports the failure (see
+[claude-code.md](claude-code.md#gateway-configuration)). `/api/status` reflects the credential
 currently saved in `config.yaml`, so re-running `litellm-relay setup` updates
 the dashboard without restarting Relay

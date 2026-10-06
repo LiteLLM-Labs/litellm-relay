@@ -66,7 +66,10 @@ that key against the Gateway with `GET /v1/models`. If the Gateway rejects it
 with 401 (for example the session credential from `relay setup` has expired) or
 cannot be reached, the run leaves every tool config untouched, prints
 `Run litellm-relay setup to sign in again`, and exits non-zero, so the scheduled
-job fails visibly instead of rewriting a dead key every hour. A key the Gateway
+job fails visibly instead of rewriting a dead key every hour. The one exception
+is a saved key that is only Claude Desktop's fallback behind the IdP exchange:
+the run reports the refusal, keeps configuring, and Claude Desktop gets the
+exchanged credential or nothing, never the refused key. A key the Gateway
 authenticates but answers 403 for (its `allowed_routes` or `key_type` leaves out
 `/v1/models`) is still written, with a warning that quotes the Gateway. The
 check only runs once a supported tool is detected. When the Gateway reported an
