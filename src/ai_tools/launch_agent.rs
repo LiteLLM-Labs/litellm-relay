@@ -140,6 +140,16 @@ fn xml_text(value: &str) -> String {
 
 pub struct Launchd;
 
+const LAUNCHD_SERVICE_VARIABLE: &str = "XPC_SERVICE_NAME";
+
+pub fn runs_as_agent() -> bool {
+    launched_as(std::env::var(LAUNCHD_SERVICE_VARIABLE).ok().as_deref())
+}
+
+fn launched_as(service: Option<&str>) -> bool {
+    service == Some(LAUNCH_AGENT_LABEL)
+}
+
 pub fn host_plist() -> Result<String> {
     live::plist().map_err(|reason| anyhow!(reason))
 }
@@ -512,6 +522,14 @@ mod tests {
             .expect_err("a failed start must fail the command");
         assert!(error.to_string().ends_with("failed: denied"));
         assert!(require_daemon(&FakeHost::down(), true).is_ok());
+    }
+
+    #[test]
+    fn should_recognize_only_the_process_launchd_started_for_the_label() {
+        assert!(launched_as(Some(LAUNCH_AGENT_LABEL)));
+        assert!(!launched_as(Some("0")));
+        assert!(!launched_as(Some("ai.litellm.relay.autoconfigure")));
+        assert!(!launched_as(None));
     }
 
     #[test]

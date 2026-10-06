@@ -148,9 +148,10 @@ different `HOME`. The label exists once per login session, so a second Relay
 home cannot get its own agent while another one holds `ai.litellm.relay`.
 `relay credential` never starts the agent: launchd keeps it alive and starts it
 at login, and a daemon someone stopped on purpose stays stopped until an
-onboard command or `relay serve` runs. While a daemon answers, a second `relay
-serve` exits with an error and `relay` prints where the dashboard is instead of
-opening the trace view. To stop the agent run `launchctl bootout
+onboard command or `relay serve` runs. While the agent is loaded or a daemon
+answers, a second `relay serve` exits with an error (so a terminal never races
+the agent for the socket), and while a daemon answers `relay` prints where the
+dashboard is instead of opening the trace view. To stop the agent run `launchctl bootout
 gui/$(id -u)/ai.litellm.relay`, and delete the plist to keep it from loading at
 the next login
 

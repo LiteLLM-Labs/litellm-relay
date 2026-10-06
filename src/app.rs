@@ -10,7 +10,7 @@ use crate::{
             daemon_answers, run_credential, run_sign_in, run_sign_out, Host, LAUNCH_AGENT_LABEL,
         },
         detect::AiTool,
-        launch_agent::host_plist,
+        launch_agent::{host_plist, runs_as_agent, DaemonHost, Launchd},
         onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
         AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
@@ -213,8 +213,32 @@ async fn run_interactive_default() -> Result<()> {
     serve(settings).await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeRefusal {
+    DaemonAnswers,
+    AgentLoaded,
+}
+
 fn another_daemon_answers(host: Host, answers: impl FnOnce() -> bool) -> bool {
     host == Host::MacOs && answers()
+}
+
+fn serve_refusal(
+    host: Host,
+    this_process_is_the_agent: bool,
+    answers: impl FnOnce() -> bool,
+    agent_loaded: impl FnOnce() -> bool,
+) -> Option<ServeRefusal> {
+    if host != Host::MacOs {
+        return None;
+    }
+    if answers() {
+        return Some(ServeRefusal::DaemonAnswers);
+    }
+    if !this_process_is_the_agent && agent_loaded() {
+        return Some(ServeRefusal::AgentLoaded);
+    }
+    None
 }
 
 async fn run_command(command: CommandKind) -> Result<()> {
@@ -345,12 +369,24 @@ async fn serve(settings: RelaySettings) -> Result<()> {
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
 
     let path = socket_path();
-    if another_daemon_answers(Host::current(), || daemon_answers(&path)) {
-        anyhow::bail!(
+    let refusal = serve_refusal(
+        Host::current(),
+        runs_as_agent(),
+        || daemon_answers(&path),
+        || Launchd.agent_loaded(),
+    );
+    match refusal {
+        Some(ServeRefusal::DaemonAnswers) => anyhow::bail!(
             "Relay is already running: a daemon answers on {}; stop it before starting another \
              (launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL} stops the LaunchAgent)",
             path.display()
-        );
+        ),
+        Some(ServeRefusal::AgentLoaded) => anyhow::bail!(
+            "Relay is installed as the {LAUNCH_AGENT_LABEL} LaunchAgent, which launchd keeps \
+             running; stop it before serving from a terminal \
+             (launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL})"
+        ),
+        None => {}
     }
     let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
     let proxy = RelayProxy::new(settings.to_config()).with_broker(Arc::clone(&broker));
@@ -484,6 +520,17 @@ mod tests {
         assert!(another_daemon_answers(Host::MacOs, || true));
         assert!(!another_daemon_answers(Host::MacOs, || false));
         assert!(!another_daemon_answers(Host::Other, || true));
+        assert_eq!(
+            serve_refusal(Host::MacOs, false, || true, || true),
+            Some(ServeRefusal::DaemonAnswers)
+        );
+        assert_eq!(
+            serve_refusal(Host::MacOs, false, || false, || true),
+            Some(ServeRefusal::AgentLoaded)
+        );
+        assert_eq!(serve_refusal(Host::MacOs, true, || false, || true), None);
+        assert_eq!(serve_refusal(Host::MacOs, false, || false, || false), None);
+        assert_eq!(serve_refusal(Host::Other, false, || true, || true), None);
         assert_eq!(
             describe(&daemon_command(&["relay", "launch-agent"])),
             "launch-agent"
