@@ -58,6 +58,8 @@ Relay reads `<issuer>/.well-known/openid-configuration` to find the authorizatio
 
 No provider API key is written to the device. The identity session (ID token plus refresh token) is cached under `~/.litellm-relay/identity-token.json` and the Gateway credential (one per Gateway and team, with its refresh token) under `~/.litellm-relay/gateway-credentials.json`, both with `0600` permissions on Unix.
 
+On macOS `relay onboard` also registers the Gateway's MCP tools as the server `litellm` in `~/.claude.json` (`{"type":"stdio","command":"<relay>","args":["mcp"]}`, other servers kept) and allows its four tools, `mcp__litellm__search_tools`, `mcp__litellm__describe_tool`, `mcp__litellm__call_tool`, and `mcp__litellm__activate_server`, in `permissions.allow` of the user settings file above, so Claude Code's own per-tool prompt stays out of the way. `relay mcp` holds nothing: each call goes to the daemon over `~/.litellm-relay/mcp.sock`, which checks the caller and runs the tool with the signed-in user's credential. A tool the daemon cannot show to be read-only, and every server activation, shows a confirmation dialog in Claude Code before anything runs, and a headless `claude -p` answers that dialog with cancel. The verdict rules and the `mcp.allow` and `mcp.max_concurrent_calls` keys are in [mdm.md](mdm.md#mcp-relay).
+
 ## Gateway configuration
 
 The Gateway validates the ID token Relay presents at `/token` against your IdP's JWKS through its JWT auth, resolves the developer and their team from it, and issues the Gateway credential the tools then send as their bearer. The exchange needs the Gateway's database, and the same JWT auth validates the ID token an older Relay sends directly:

@@ -257,6 +257,63 @@ Linux hosts have no code-signature check, so there the tools keep the on-disk
 config as before. Those commands and their caches under `~/.litellm-relay`
 still exist on macOS too for now and are removed in a follow-up
 
+## MCP relay
+
+Claude Code and Codex reach the Gateway's MCP tools through `relay mcp`, a
+stdio MCP server that the onboarding commands register in each client as the
+server `litellm`. It holds no credential and no catalog: every tool call opens
+one connection to the daemon's second socket, `~/.litellm-relay/mcp.sock`,
+which runs the same caller check as `broker.sock` on the asking process chain
+(the client is the parent of `relay mcp`), and the daemon does the rest with
+the signed-in user's credential against `<gateway.url>/mcp`. Calls therefore
+show on the Logs page under that user, and a client that is not an allowed
+caller gets `caller_refused` and nothing else
+
+The server exposes four tools. `search_tools(query)` answers from the daemon's
+in-memory catalog with at most five tool names from the servers the user
+activated, plus the names of inactive servers that have matching tools.
+`describe_tool(name)` returns the tool's description, input schema, upstream
+annotations, and its verdict. `call_tool(name, arguments)` runs the tool on the
+Gateway and returns its result unchanged. `activate_server(server)` makes a
+server's tools available for the rest of the signed-in session. The catalog is
+fetched when a session signs in and every five minutes after that, and dropped
+on sign-out
+
+Every catalog entry carries a verdict. A tool is allow only when its name says
+it reads (it starts with a word such as get, list, read, or search, contains no
+write word such as create, delete, or send, and its upstream annotations do not
+claim otherwise); everything else is ask. An allow tool runs with no prompt.
+An ask tool, and every `activate_server`, runs only after the user confirms it
+in the client: the daemon sends one question over the connection, `relay mcp`
+turns it into an MCP elicitation, and the client shows its own dialog. Claude
+Code shows a yes/no prompt naming the server, the tool, and the arguments, in
+its default and bypass modes alike, and answers cancel when it runs headless
+(`claude -p`). Codex shows a True/False dialog, where False and Esc both
+refuse, and refuses without a dialog under `--ask-for-approval never` or its
+bypass flag. Nothing the model passes as an argument counts as a confirmation.
+A call that runs waits at most 300 seconds for the Gateway
+
+Two keys in the managed config tune this. `mcp.allow` lists exact,
+case-sensitive Gateway tool names (`<server>-<tool>`) that run with no prompt
+even though their names do not show they read; it has no wildcards and never
+hides or denies a tool. `mcp.max_concurrent_calls` caps the tool calls in
+flight across every client on the device, 16 when the key is missing or 0; a
+call beyond the cap waits its turn
+
+On the broker plan (macOS) the writers register the server in each client and
+keep the client's own per-tool prompt out of the way, so the daemon's question
+is the one gate. Claude Code gets `mcpServers.litellm` (`type` `stdio`,
+`command` the Relay executable, `args` `["mcp"]`) in `~/.claude.json`, which
+is created as `{}` when missing, and the four rules `mcp__litellm__search_tools`,
+`mcp__litellm__describe_tool`, `mcp__litellm__call_tool`, and
+`mcp__litellm__activate_server` in `permissions.allow` of Claude Code's user
+settings file (`settings.json` under `~/.claude`); other servers and rules are
+kept. Codex gets `[mcp_servers.litellm]` with `command`, `args = ["mcp"]`, and
+`default_tools_approval_mode = "approve"` in `~/.codex/config.toml`, next to
+any other `[mcp_servers.*]` table. Both files stay owner-only. Off the broker
+plan nothing about MCP is written, and Claude Desktop is left alone in this
+step
+
 ## Notes
 
 macOS has a single Global HTTP Proxy payload per device. Customers already using
