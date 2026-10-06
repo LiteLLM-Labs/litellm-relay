@@ -207,20 +207,46 @@ Without an IdP, the daemon serves `gateway.api_key` from `config.yaml` to the
 same allowed clients, so a static-key rollout gets the caller check too. The
 daemon re-reads `config.yaml` on the next request or tick after it changes, so
 a re-run of `relay autoconfigure` or `relay onboard` needs no daemon restart,
-and a changed IdP or Gateway signs the daemon out while a changed team only
-re-mints the key. A changed `credential.allowed_callers` list applies from the
-next request and leaves the key in place, so a client taken off the list is
-refused the next time it runs the helper
+and a changed IdP signs the daemon out while a changed Gateway or team keeps
+the IdP session, deletes the key on the Gateway it leaves, and exchanges again
+on the next request without a browser. A changed `credential.allowed_callers`
+list applies from the next request and leaves the key in place, so a client
+taken off the list is refused the next time it runs the helper
 
 Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
 `scheduled-task` when nobody is at the keyboard; those requests never open a
 browser and answer `signed_out` until a developer runs the app interactively or
 `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
-sign-in and `relay sign-out` deletes the key and forgets the session. The
-`broker` block of `/api/status` shows `signed_in`, `user_id`, `team`,
-`key_expires_at`, `key_extended_at`, the `source` of the last answer
-(`minted_key`, `session_credential`, `identity_token`, or `static_key`), and
-`refused_callers`, never a token
+sign-in and `relay sign-out` deletes the key and forgets the session.
+`relay switch-team <team>` and `relay switch-environment <name>` move the
+daemon to another team or Gateway (see below) and print the outcome as one
+JSON line: `team`, `environment`, `gateway_url`, `key_expires_at`, and
+`source` on stdout when the switch went through, or
+`{"refused": "<reason>", "message": "..."}` on stderr with exit code 1 when it
+did not. The `broker` block of `/api/status` shows `signed_in`, `user_id`,
+`display_name` (from the ID token's `name`, `preferred_username`, or `email`),
+`team`, `environment`, `gateway_url`, `key_expires_at`, `key_extended_at`, the
+`source` of the last answer (`minted_key`, `session_credential`,
+`identity_token`, or `static_key`), and `refused_callers`, never a token
+
+### Environments and teams
+
+`environments` in `config.yaml` lists the Gateways a developer may switch
+between, each with a `name`, a `url`, and an optional `team` that is that
+Gateway's default team. The entry whose `url` equals `gateway.url` is the
+current one, and every entry shares the `idp` section, so one sign-in serves
+them all. The team the daemon mints keys for is `gateway.team` when set, else
+the current environment's `team`, else `claude.team`, else `codex.team`. A
+switch (`relay switch-team`, `relay switch-environment`, or RelayBar) writes
+`gateway.url` and `gateway.team` back into `config.yaml`, where an environment
+switch clears `gateway.team` so the new environment's default team applies,
+deletes the key on the Gateway it leaves, keeps the IdP session, and exchanges
+and mints again on the new Gateway or team without a browser. A switch the new
+Gateway refuses writes the previous values back and answers `switch_failed`
+with the Gateway's reason; a name missing from the list answers
+`unknown_environment` with the configured names. Without an `environments`
+list the daemon serves the one `gateway.url`, and `relay switch-team` still
+works against it
 
 ## Local inference proxy
 
