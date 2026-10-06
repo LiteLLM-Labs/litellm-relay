@@ -271,6 +271,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn should_decide_the_review_table_from_the_gateway_name() {
+        let table: [(&str, &str, Verdict); 17] = [
+            ("s-get_and_delete", "s", Verdict::Ask),
+            ("s-listThenRemove", "s", Verdict::Ask),
+            ("s-search-and-replace", "s", Verdict::Ask),
+            ("s-GetUser", "s", Verdict::Allow),
+            ("s-read_write", "s", Verdict::Ask),
+            ("s-info", "s", Verdict::Allow),
+            ("s-status_update", "s", Verdict::Ask),
+            ("s-fetchAndRun", "s", Verdict::Ask),
+            ("s-describe", "s", Verdict::Allow),
+            ("s-get", "s", Verdict::Allow),
+            ("s-get_issue2", "s", Verdict::Allow),
+            ("s-list.issues", "s", Verdict::Allow),
+            ("s-Get-Issue", "s", Verdict::Allow),
+            ("github-get-issue", "github", Verdict::Allow),
+            ("a-b-c", "a", Verdict::Ask),
+            ("Get-Issue", "Get", Verdict::Ask),
+            ("search-and-replace", "search", Verdict::Ask),
+        ];
+        let catalog = Catalog::build(
+            table.iter().map(|(name, _, _)| tool(name, "")).collect(),
+            &[],
+        );
+        for (name, server, verdict) in table {
+            let entry = catalog.get(name).expect(name);
+            assert_eq!(
+                (entry.server.as_str(), entry.verdict),
+                (server, verdict),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn should_keep_a_name_listed_twice_once_and_never_allow_it() {
         let allow = ["github-get_issue".to_string()];
         let catalog = Catalog::build(
