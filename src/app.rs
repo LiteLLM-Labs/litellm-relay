@@ -7,8 +7,8 @@ use crate::{
     ai_tools::{
         autoconfigure,
         credential::{
-            daemon_answers, run_credential, run_sign_in, run_sign_out, Audience, Host,
-            LAUNCH_AGENT_LABEL,
+            daemon_answers, run_credential, run_sign_in, run_sign_out, run_switch_environment,
+            run_switch_team, Audience, Host, LAUNCH_AGENT_LABEL,
         },
         detect::AiTool,
         launch_agent::{host_plist, runs_as_agent, DaemonHost, Launchd},
@@ -56,6 +56,12 @@ enum HelperCommand {
     SignIn,
     /// Forget the daemon's IdP session and delete its Gateway key.
     SignOut,
+    /// Mint the Gateway key under another team, keeping the IdP session; prints
+    /// one JSON line.
+    SwitchTeam { team: String },
+    /// Point the daemon at a configured environment's Gateway, keeping the IdP
+    /// session; prints one JSON line.
+    SwitchEnvironment { environment: String },
     /// Serve the Gateway's MCP tools to the calling client over stdio; every
     /// call goes to the daemon, which holds the credential and the catalog.
     Mcp,
@@ -202,6 +208,10 @@ pub async fn run() -> Result<ExitCode> {
         }
         Some(Command::Helper(HelperCommand::SignIn)) => Ok(run_sign_in()),
         Some(Command::Helper(HelperCommand::SignOut)) => Ok(run_sign_out()),
+        Some(Command::Helper(HelperCommand::SwitchTeam { team })) => Ok(run_switch_team(&team)),
+        Some(Command::Helper(HelperCommand::SwitchEnvironment { environment })) => {
+            Ok(run_switch_environment(&environment))
+        }
         Some(Command::Helper(HelperCommand::Mcp)) => Ok(run_mcp().await),
     }
 }
@@ -551,22 +561,42 @@ mod tests {
     #[test]
     fn should_parse_the_helper_commands_next_to_the_daemon_ones() {
         for (args, expected) in [
-            (["relay", "credential"], "credential"),
-            (["relay", "sign-in"], "sign-in"),
-            (["relay", "sign-out"], "sign-out"),
-            (["relay", "mcp"], "mcp"),
+            (vec!["relay", "credential"], "credential".to_string()),
+            (vec!["relay", "sign-in"], "sign-in".to_string()),
+            (vec!["relay", "sign-out"], "sign-out".to_string()),
+            (
+                vec!["relay", "switch-team", "eng"],
+                "switch-team eng".to_string(),
+            ),
+            (
+                vec!["relay", "switch-environment", "uat"],
+                "switch-environment uat".to_string(),
+            ),
+            (vec!["relay", "mcp"], "mcp".to_string()),
         ] {
             let cli = Cli::try_parse_from(args).expect("the command line must parse");
             let parsed = match cli.command.expect("a subcommand") {
-                Command::Helper(HelperCommand::Credential { proxy: false }) => "credential",
-                Command::Helper(HelperCommand::Credential { proxy: true }) => "credential --proxy",
-                Command::Helper(HelperCommand::SignIn) => "sign-in",
-                Command::Helper(HelperCommand::SignOut) => "sign-out",
-                Command::Helper(HelperCommand::Mcp) => "mcp",
-                Command::Daemon(other) => describe(&other),
+                Command::Helper(HelperCommand::Credential { proxy: false }) => {
+                    "credential".to_string()
+                }
+                Command::Helper(HelperCommand::Credential { proxy: true }) => {
+                    "credential --proxy".to_string()
+                }
+                Command::Helper(HelperCommand::SignIn) => "sign-in".to_string(),
+                Command::Helper(HelperCommand::SignOut) => "sign-out".to_string(),
+                Command::Helper(HelperCommand::SwitchTeam { team }) => {
+                    format!("switch-team {team}")
+                }
+                Command::Helper(HelperCommand::SwitchEnvironment { environment }) => {
+                    format!("switch-environment {environment}")
+                }
+                Command::Helper(HelperCommand::Mcp) => "mcp".to_string(),
+                Command::Daemon(other) => describe(&other).to_string(),
             };
             assert_eq!(parsed, expected);
         }
+        assert!(Cli::try_parse_from(["relay", "switch-team"]).is_err());
+        assert!(Cli::try_parse_from(["relay", "switch-environment"]).is_err());
         assert_eq!(describe(&daemon_command(&["relay", "serve"])), "serve");
         assert_eq!(
             describe(&daemon_command(&["relay", "claude-token"])),

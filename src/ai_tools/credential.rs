@@ -6,7 +6,7 @@
 use std::{env, path::Path, process::ExitCode, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     ai_tools::idp::SIGN_IN_CEILING,
@@ -93,6 +93,8 @@ pub fn relay_executable() -> Result<String> {
 pub(crate) enum Outcome {
     Token(String),
     Done(String),
+    Json(Value),
+    Refused(Value),
     Failed(String),
 }
 
@@ -128,6 +130,18 @@ pub fn run_sign_out() -> ExitCode {
     finish(ask(Request::SignOut))
 }
 
+pub fn run_switch_team(team: &str) -> ExitCode {
+    finish(ask(Request::SwitchTeam {
+        team: team.to_string(),
+    }))
+}
+
+pub fn run_switch_environment(environment: &str) -> ExitCode {
+    finish(ask(Request::SwitchEnvironment {
+        environment: environment.to_string(),
+    }))
+}
+
 fn finish(outcome: Outcome) -> ExitCode {
     match outcome {
         Outcome::Token(token) => {
@@ -137,6 +151,14 @@ fn finish(outcome: Outcome) -> ExitCode {
         Outcome::Done(message) => {
             println!("{message}");
             ExitCode::SUCCESS
+        }
+        Outcome::Json(body) => {
+            println!("{body}");
+            ExitCode::SUCCESS
+        }
+        Outcome::Refused(body) => {
+            eprintln!("{body}");
+            ExitCode::FAILURE
         }
         Outcome::Failed(message) => {
             eprintln!("{message}");
@@ -163,15 +185,43 @@ fn ask(request: Request) -> Outcome {
     let path = crate::broker::socket_path();
     match transport::exchange(&path, &request, SIGN_IN_CEILING + REPLY_GRACE) {
         Ok(reply) => interpret(&request, &reply),
-        Err(transport::Failure::NoDaemon) => Outcome::Failed(format!(
-            "relay credential: the Relay daemon is not running (no socket at {}); run `relay \
-             autoconfigure` or your onboard command again to start the {LAUNCH_AGENT_LABEL} \
-             LaunchAgent, or run `relay serve` in a terminal",
+        Err(failure) => unreachable_daemon(&request, &path, failure),
+    }
+}
+
+fn unreachable_daemon(request: &Request, path: &Path, failure: transport::Failure) -> Outcome {
+    let message = match failure {
+        transport::Failure::NoDaemon => format!(
+            "the Relay daemon is not running (no socket at {}); run `relay autoconfigure` or your \
+             onboard command again to start the {LAUNCH_AGENT_LABEL} LaunchAgent, or run `relay \
+             serve` in a terminal",
             path.display()
-        )),
-        Err(transport::Failure::Broken(message)) => {
-            Outcome::Failed(format!("relay credential: {message}"))
-        }
+        ),
+        transport::Failure::Broken(message) => message,
+    };
+    match is_switch(request) {
+        true => Outcome::Refused(json!({ "refused": "daemon_unavailable", "message": message })),
+        false => Outcome::Failed(format!("relay credential: {message}")),
+    }
+}
+
+fn is_switch(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. }
+    )
+}
+
+fn without_ok(reply: &Value) -> Value {
+    match reply {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .filter(|(key, _)| key.as_str() != "ok")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -181,7 +231,10 @@ pub(crate) fn interpret(request: &Request, reply: &Value) -> Outcome {
         let message = reply["message"]
             .as_str()
             .unwrap_or("the daemon answered with an error");
-        return Outcome::Failed(format!("relay credential: {reason}: {message}"));
+        return match is_switch(request) {
+            true => Outcome::Refused(json!({ "refused": reason, "message": message })),
+            false => Outcome::Failed(format!("relay credential: {reason}: {message}")),
+        };
     }
     match request {
         Request::Credential { .. } | Request::ProxyCredential { .. } => {
@@ -199,8 +252,9 @@ pub(crate) fn interpret(request: &Request, reply: &Value) -> Outcome {
         Request::SignOut => {
             Outcome::Done("Signed out; the session and its key are gone.".to_string())
         }
-        Request::Status | Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. } => {
-            Outcome::Done(reply.to_string())
+        Request::Status => Outcome::Done(reply.to_string()),
+        Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. } => {
+            Outcome::Json(without_ok(reply))
         }
     }
 }
@@ -274,7 +328,6 @@ mod transport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn should_print_a_bare_token_only_for_an_ok_credential_reply() {
@@ -319,6 +372,101 @@ mod tests {
             interpret(&Request::SignOut, &json!({"ok": true, "signed_in": false})),
             Outcome::Done(_)
         ));
+    }
+
+    #[test]
+    fn should_print_a_switch_reply_as_its_fields_and_a_refusal_as_refused_json() {
+        let request = Request::SwitchTeam {
+            team: "eng".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({"op": "switch_team", "team": "eng"})
+        );
+        assert_eq!(
+            interpret(
+                &request,
+                &json!({
+                    "ok": true,
+                    "team": "eng",
+                    "environment": "uat",
+                    "gateway_url": "https://uat.example.com",
+                    "key_expires_at": "2027-01-15T08:00:00Z",
+                    "source": "minted_key"
+                })
+            ),
+            Outcome::Json(json!({
+                "team": "eng",
+                "environment": "uat",
+                "gateway_url": "https://uat.example.com",
+                "key_expires_at": "2027-01-15T08:00:00Z",
+                "source": "minted_key"
+            }))
+        );
+        let environment = Request::SwitchEnvironment {
+            environment: "qa".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&environment).unwrap(),
+            json!({"op": "switch_environment", "environment": "qa"})
+        );
+        assert_eq!(
+            interpret(
+                &environment,
+                &json!({
+                    "ok": false,
+                    "reason": "unknown_environment",
+                    "message": "no environment named \"qa\"; configured: prod, uat"
+                })
+            ),
+            Outcome::Refused(json!({
+                "refused": "unknown_environment",
+                "message": "no environment named \"qa\"; configured: prod, uat"
+            }))
+        );
+    }
+
+    #[test]
+    fn should_answer_a_missing_daemon_as_refused_json_only_for_a_switch() {
+        let path = Path::new("/nonexistent/broker.sock");
+        let switch = unreachable_daemon(
+            &Request::SwitchTeam {
+                team: "eng".to_string(),
+            },
+            path,
+            transport::Failure::NoDaemon,
+        );
+        let Outcome::Refused(body) = switch else {
+            panic!("expected refused JSON, got {switch:?}");
+        };
+        assert_eq!(body["refused"], "daemon_unavailable");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("relay serve")),
+            "{body}"
+        );
+        let broken = unreachable_daemon(
+            &Request::SwitchEnvironment {
+                environment: "uat".to_string(),
+            },
+            path,
+            transport::Failure::Broken("no answer from the daemon".to_string()),
+        );
+        assert_eq!(
+            broken,
+            Outcome::Refused(
+                json!({"refused": "daemon_unavailable", "message": "no answer from the daemon"})
+            )
+        );
+        assert_eq!(
+            unreachable_daemon(&Request::SignIn, path, transport::Failure::NoDaemon),
+            Outcome::Failed(format!(
+                "relay credential: the Relay daemon is not running (no socket at {}); start it \
+                 with `relay serve` or load the {LAUNCH_AGENT_LABEL} LaunchAgent",
+                path.display()
+            ))
+        );
     }
 
     #[test]
