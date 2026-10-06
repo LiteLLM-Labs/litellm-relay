@@ -26,6 +26,7 @@ use crate::{
         scrub_request_target, should_close, write_response, ProtocolCompatibilityDecision,
     },
     inference::{forward, gateway_client, is_inference_target, Head},
+    mcp::service::McpService,
     pac::build_pac,
     terminal::{print_runtime_panel, print_trace_event},
     traffic::{classify_captured_traffic, CapturedTraffic, TrafficClassification},
@@ -41,6 +42,7 @@ pub struct RelayProxy {
     config: Arc<RelayConfig>,
     gateway: GatewayClient,
     broker: Option<Arc<Broker>>,
+    mcp: Option<Arc<McpService>>,
     inference: reqwest::Client,
 }
 
@@ -52,6 +54,7 @@ impl RelayProxy {
             config,
             gateway,
             broker: None,
+            mcp: None,
             inference: gateway_client(),
         }
     }
@@ -61,6 +64,13 @@ impl RelayProxy {
     pub fn with_broker(self, broker: Arc<Broker>) -> Self {
         Self {
             broker: Some(broker),
+            ..self
+        }
+    }
+
+    pub fn with_mcp(self, mcp: Arc<McpService>) -> Self {
+        Self {
+            mcp: Some(mcp),
             ..self
         }
     }
@@ -678,6 +688,7 @@ impl RelayProxy {
             "runtime": "rust",
             "credential": credential,
             "broker": self.broker.as_ref().map(|broker| broker.status()),
+            "mcp": self.mcp.as_ref().map(|mcp| mcp.status()),
         }))
     }
 
@@ -823,6 +834,7 @@ mod tests {
                 "known_apps",
                 "listen",
                 "log_path",
+                "mcp",
                 "mitm_ca_path",
                 "notion_domains",
                 "runtime",
@@ -831,6 +843,46 @@ mod tests {
         );
         assert_eq!(payload["credential"], json!({"state": "rejected"}));
         assert_eq!(payload["broker"], Value::Null);
+        assert_eq!(payload["mcp"], Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_report_the_mcp_catalog_size_and_servers_on_status() {
+        use crate::mcp::{
+            catalog::tests::tool,
+            test_support::{service_on, FakeUpstream},
+        };
+
+        let settings = static_key_settings("sk-status-secret");
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let upstream = FakeUpstream::serving(vec![
+            tool("github-get_issue", "Read one issue"),
+            tool("jira-search", "Search issues"),
+        ]);
+        let (_rig, service) = service_on(settings, &upstream);
+        let proxy = RelayProxy::new(config).with_mcp(Arc::clone(&service));
+        let before = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("payload");
+        assert_eq!(before["mcp"], json!({"catalog_tools": null, "servers": {}}));
+
+        service.check_session().await;
+        let after = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("payload");
+        assert_eq!(
+            after["mcp"],
+            json!({
+                "catalog_tools": 2,
+                "servers": {
+                    "github": {"tools": 1, "active": false},
+                    "jira": {"tools": 1, "active": false},
+                },
+            })
+        );
+        assert!(!after.to_string().contains("sk-status-secret"));
     }
 
     #[test]

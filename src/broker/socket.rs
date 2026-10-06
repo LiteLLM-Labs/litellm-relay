@@ -107,7 +107,7 @@ async fn read_request(stream: &mut UnixStream) -> Result<Request, Refusal> {
     }
 }
 
-fn identity(stream: &UnixStream) -> Option<PeerIdentity> {
+pub(crate) fn identity(stream: &UnixStream) -> Option<PeerIdentity> {
     let credentials = stream.peer_cred().ok()?;
     Some(PeerIdentity {
         uid: credentials.uid(),

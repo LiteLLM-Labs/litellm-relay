@@ -378,6 +378,11 @@ async fn serve(settings: RelaySettings) -> Result<()> {
     use std::sync::Arc;
 
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
+    use crate::mcp::{
+        service::{watch_session, McpDependencies, McpService, SESSION_CHECK_INTERVAL},
+        socket as mcp_socket,
+        upstream::RmcpUpstream,
+    };
 
     let path = socket_path();
     let refusal = serve_refusal(
@@ -400,7 +405,6 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         None => {}
     }
     let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
-    let proxy = RelayProxy::new(settings.to_config()).with_broker(Arc::clone(&broker));
     let listener = socket::bind(&path)?;
     eprintln!("broker: listening on {}", path.display());
     let socket_task = tokio::spawn(socket::serve(
@@ -409,6 +413,27 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         socket::daemon_uid(),
     ));
     let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
+    let mcp = Arc::new(McpService::new(
+        Arc::clone(&broker),
+        &settings.mcp,
+        McpDependencies {
+            upstream: Arc::new(RmcpUpstream::default()),
+            settings: Box::new(crate::broker::FileSettings),
+            clock: Box::new(crate::broker::SystemClock),
+        },
+    ));
+    let proxy = RelayProxy::new(settings.to_config())
+        .with_broker(Arc::clone(&broker))
+        .with_mcp(Arc::clone(&mcp));
+    let mcp_path = mcp_socket::socket_path();
+    let mcp_listener = mcp_socket::bind(&mcp_path)?;
+    eprintln!("mcp: listening on {}", mcp_path.display());
+    let mcp_socket_task = tokio::spawn(mcp_socket::serve(
+        Arc::clone(&mcp),
+        mcp_listener,
+        socket::daemon_uid(),
+    ));
+    let mcp_watcher = tokio::spawn(watch_session(Arc::clone(&mcp), SESSION_CHECK_INTERVAL));
 
     let outcome = tokio::select! {
         served = proxy.serve_forever() => served,
@@ -416,12 +441,17 @@ async fn serve(settings: RelaySettings) -> Result<()> {
             Ok(served) => served,
             Err(error) => Err(anyhow::anyhow!("broker socket task stopped: {error}")),
         },
+        joined = mcp_socket_task => match joined {
+            Ok(served) => served,
+            Err(error) => Err(anyhow::anyhow!("mcp socket task stopped: {error}")),
+        },
         () = shutdown_signal() => {
             eprintln!("broker: stopping");
             Ok(())
         }
     };
     ticker.abort();
+    mcp_watcher.abort();
     tokio::task::spawn_blocking(move || broker.shutdown()).await?;
     outcome
 }
