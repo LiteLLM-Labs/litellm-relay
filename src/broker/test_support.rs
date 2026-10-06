@@ -1,8 +1,8 @@
 use std::{
     collections::{HashSet, VecDeque},
     sync::{
-        atomic::{AtomicI64, AtomicU64, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        Arc, Barrier, Mutex,
     },
     thread,
     time::Duration,
@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use super::{
     caller::{AllowedCaller, Peer, Verdict},
     key::{ExtendOutcome, KeyServer, MintOutcome, MintRequest, Minted},
-    Broker, CallerCheck, Clock, Dependencies,
+    Broker, CallerCheck, Clock, Dependencies, SettingsSource, SettingsVersion,
 };
 use crate::{
     ai_tools::{
@@ -244,6 +244,7 @@ impl IdentityProvider for FakeIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MintCall {
+    pub gateway_url: String,
     pub bearer: String,
     pub team: String,
     pub alias: String,
@@ -257,6 +258,7 @@ struct KeysState {
     mints: Vec<MintCall>,
     extends: Vec<(String, String)>,
     deletes: Vec<(String, String)>,
+    delete_urls: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -282,12 +284,17 @@ impl FakeKeys {
     pub(crate) fn deletes(&self) -> Vec<(String, String)> {
         self.0.lock().unwrap().deletes.clone()
     }
+
+    pub(crate) fn delete_urls(&self) -> Vec<String> {
+        self.0.lock().unwrap().delete_urls.clone()
+    }
 }
 
 impl KeyServer for FakeKeys {
-    fn mint(&self, _gateway_url: &str, bearer: &str, request: &MintRequest) -> Result<MintOutcome> {
+    fn mint(&self, gateway_url: &str, bearer: &str, request: &MintRequest) -> Result<MintOutcome> {
         let mut state = self.0.lock().unwrap();
         state.mints.push(MintCall {
+            gateway_url: gateway_url.to_string(),
             bearer: bearer.to_string(),
             team: request.team_id.clone(),
             alias: request.alias.clone(),
@@ -311,12 +318,10 @@ impl KeyServer for FakeKeys {
             .unwrap_or(Ok(ExtendOutcome::Extended { expires_at: None }))
     }
 
-    fn delete(&self, _gateway_url: &str, bearer: &str, key: &str) -> Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .deletes
-            .push((bearer.to_string(), key.to_string()));
+    fn delete(&self, gateway_url: &str, bearer: &str, key: &str) -> Result<()> {
+        let mut state = self.0.lock().unwrap();
+        state.deletes.push((bearer.to_string(), key.to_string()));
+        state.delete_urls.push(gateway_url.to_string());
         Ok(())
     }
 }
@@ -325,6 +330,7 @@ impl KeyServer for FakeKeys {
 pub(crate) struct FakeCallers {
     checks: Arc<AtomicU64>,
     verdict: Arc<Mutex<Verdict>>,
+    gate: Arc<Mutex<Option<Arc<Barrier>>>>,
 }
 
 impl FakeCallers {
@@ -335,7 +341,14 @@ impl FakeCallers {
                 caller: AllowedCaller::new("com.anthropic.claude-code", Some("Q6L2SF6YDW")),
                 level: 1,
             })),
+            gate: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) fn gate_next_check(&self) -> Arc<Barrier> {
+        let gate = Arc::new(Barrier::new(2));
+        *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        gate
     }
 
     pub(crate) fn refuse(&self, chain: &[&str]) {
@@ -352,7 +365,50 @@ impl FakeCallers {
 impl CallerCheck for FakeCallers {
     fn check(&self, _peer: Peer) -> Verdict {
         self.checks.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = self.gate.lock().unwrap().take() {
+            gate.wait();
+            gate.wait();
+        }
         self.verdict.lock().unwrap().clone()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FakeSettings {
+    version: Arc<AtomicU64>,
+    settings: Arc<Mutex<RelaySettings>>,
+    fail_next_load: Arc<AtomicBool>,
+}
+
+impl FakeSettings {
+    fn new(settings: RelaySettings) -> Self {
+        Self {
+            version: Arc::new(AtomicU64::new(0)),
+            settings: Arc::new(Mutex::new(settings)),
+            fail_next_load: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn set(&self, settings: RelaySettings) {
+        *self.settings.lock().unwrap() = settings;
+        self.version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_next_load(&self) {
+        self.fail_next_load.store(true, Ordering::SeqCst);
+    }
+}
+
+impl SettingsSource for FakeSettings {
+    fn version(&self) -> Option<SettingsVersion> {
+        Some(SettingsVersion(self.version.load(Ordering::SeqCst)))
+    }
+
+    fn load(&self) -> Option<RelaySettings> {
+        if self.fail_next_load.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        Some(self.settings.lock().unwrap().clone())
     }
 }
 
@@ -363,6 +419,7 @@ pub(crate) struct Rig {
     pub keys: FakeKeys,
     pub identity: FakeIdentity,
     pub callers: FakeCallers,
+    pub settings: FakeSettings,
     browser_opens: Arc<AtomicU64>,
 }
 
@@ -382,6 +439,7 @@ impl Rig {
         let keys = FakeKeys::default();
         let identity = FakeIdentity::new(clock.clone());
         let callers = FakeCallers::allowing();
+        let source = FakeSettings::new(settings.clone());
         let browser_opens = Arc::new(AtomicU64::new(0));
         let opens = Arc::clone(&browser_opens);
         let deps = Dependencies {
@@ -394,6 +452,7 @@ impl Rig {
                 opens.fetch_add(1, Ordering::SeqCst);
             }),
             hostname: HOSTNAME.to_string(),
+            settings: Box::new(source.clone()),
         };
         Self {
             broker: Arc::new(Broker::new(&settings, deps)),
@@ -402,6 +461,7 @@ impl Rig {
             keys,
             identity,
             callers,
+            settings: source,
             browser_opens,
         }
     }

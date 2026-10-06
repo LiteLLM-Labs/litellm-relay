@@ -13,6 +13,9 @@ pub mod socket;
 pub(crate) mod test_support;
 
 use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
     path::PathBuf,
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -35,7 +38,7 @@ use crate::{
         },
     },
     auth::open_browser,
-    config::{relay_home, IdpSection, RelaySettings},
+    config::{config_path, load_settings, relay_home, IdpSection, RelaySettings},
     system::hostname,
 };
 use caller::{effective_callers, Peer, Verdict};
@@ -61,6 +64,39 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> i64 {
         Utc::now().timestamp()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsVersion(u64);
+
+pub trait SettingsSource: Send + Sync {
+    fn version(&self) -> Option<SettingsVersion>;
+    fn load(&self) -> Option<RelaySettings>;
+}
+
+pub struct FileSettings;
+
+impl SettingsSource for FileSettings {
+    fn version(&self) -> Option<SettingsVersion> {
+        let metadata = fs::metadata(config_path()).ok()?;
+        let modified = metadata.modified().ok()?;
+        let mut hasher = DefaultHasher::new();
+        modified.hash(&mut hasher);
+        metadata.len().hash(&mut hasher);
+        Some(SettingsVersion(hasher.finish()))
+    }
+
+    fn load(&self) -> Option<RelaySettings> {
+        match load_settings() {
+            Ok(settings) => Some(settings),
+            Err(error) => {
+                eprintln!(
+                    "broker: the Relay config could not be reloaded, keeping the current settings: {error:#}"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -258,6 +294,7 @@ pub fn rfc3339(timestamp: i64) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
+#[derive(Clone, PartialEq, Eq)]
 enum Mode {
     Idp(IdpSection),
     StaticKey(String),
@@ -281,6 +318,25 @@ impl Mode {
                 "no IdP or Gateway key configured on this device; {}",
                 settings.idp.setup_hint()
             )),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Target {
+    version: Option<SettingsVersion>,
+    mode: Mode,
+    gateway_url: String,
+    team: Option<String>,
+}
+
+impl Target {
+    fn from_settings(settings: &RelaySettings, version: Option<SettingsVersion>) -> Self {
+        Self {
+            version,
+            mode: Mode::from_settings(settings),
+            gateway_url: settings.gateway.url.trim_end_matches('/').to_string(),
+            team: managed_team(settings),
         }
     }
 }
@@ -323,6 +379,7 @@ pub struct Dependencies {
     pub callers: Box<dyn CallerCheck>,
     pub browser: Box<dyn Fn(&str) + Send + Sync>,
     pub hostname: String,
+    pub settings: Box<dyn SettingsSource>,
 }
 
 impl Dependencies {
@@ -335,14 +392,13 @@ impl Dependencies {
             callers: host_caller_check(settings),
             browser: Box::new(open_browser),
             hostname: hostname(),
+            settings: Box::new(FileSettings),
         }
     }
 }
 
 pub struct Broker {
-    mode: Mode,
-    gateway_url: String,
-    team: Option<String>,
+    target: Mutex<Target>,
     deps: Dependencies,
     state: Mutex<State>,
     renewal: Mutex<()>,
@@ -350,11 +406,9 @@ pub struct Broker {
 
 impl Broker {
     pub fn new(settings: &RelaySettings, deps: Dependencies) -> Self {
-        let team = managed_team(settings);
+        let version = deps.settings.version();
         Self {
-            mode: Mode::from_settings(settings),
-            gateway_url: settings.gateway.url.trim_end_matches('/').to_string(),
-            team,
+            target: Mutex::new(Target::from_settings(settings, version)),
             deps,
             state: Mutex::new(State::default()),
             renewal: Mutex::new(()),
@@ -371,6 +425,8 @@ impl Broker {
     }
 
     pub fn credential(&self, context: Context, peer: Peer) -> Reply {
+        self.refresh();
+        let target = self.lock_target().clone();
         let verdict = self.deps.callers.check(peer);
         if let Some(message) = verdict.refusal_message() {
             self.lock_state().refused_callers += 1;
@@ -384,18 +440,20 @@ impl Broker {
                 peer.pid
             );
         }
-        self.issue(context)
+        self.issue(&target, context)
     }
 
     pub fn sign_in(&self) -> Reply {
-        let Mode::Idp(idp) = &self.mode else {
+        self.refresh();
+        let _renewal = self.lock_renewal();
+        let target = self.lock_target().clone();
+        if !matches!(target.mode, Mode::Idp(_)) {
             return Reply::Refused(Refusal::GatewayError(
                 "sign-in needs an IdP; this device serves the configured Gateway key".to_string(),
             ));
-        };
-        let _renewal = self.lock_renewal();
-        self.forget(true);
-        match self.issue_under_renewal_lock(idp, Context::Interactive) {
+        }
+        self.forget(&target.gateway_url, true);
+        match self.issue_under_renewal_lock(&target, Context::Interactive) {
             Reply::Credential(_) => Reply::SignedIn {
                 user_id: self
                     .lock_state()
@@ -409,24 +467,28 @@ impl Broker {
 
     pub fn sign_out(&self) -> Reply {
         let _renewal = self.lock_renewal();
-        self.forget(true);
+        let gateway_url = self.lock_target().gateway_url.clone();
+        self.forget(&gateway_url, true);
         Reply::SignedOut
     }
 
     pub fn shutdown(&self) {
         let _renewal = self.lock_renewal();
-        self.forget(false);
+        let gateway_url = self.lock_target().gateway_url.clone();
+        self.forget(&gateway_url, false);
     }
 
     pub fn status(&self) -> BrokerStatus {
+        self.refresh();
+        let target = self.lock_target().clone();
         let now = self.deps.clock.now();
         let state = self.lock_state();
         let credential = state.credential.as_ref();
         BrokerStatus {
-            signed_in: matches!(self.mode, Mode::StaticKey(_))
+            signed_in: matches!(target.mode, Mode::StaticKey(_))
                 || credential.is_some_and(|credential| credential.is_valid(now)),
             user_id: credential.and_then(|credential| credential.user_id.clone()),
-            team: self.team.clone(),
+            team: target.team,
             key_expires_at: state.key.as_ref().map(|key| rfc3339(key.expires_at)),
             key_extended_at: state
                 .key
@@ -441,17 +503,19 @@ impl Broker {
     /// Runs once a minute: renews the session credential at its half-life and
     /// extends the minted key at its own, both without a browser.
     pub fn tick(&self) {
-        let Mode::Idp(idp) = &self.mode else {
+        self.refresh();
+        let _renewal = self.lock_renewal();
+        let target = self.lock_target().clone();
+        let Mode::Idp(idp) = &target.mode else {
             return;
         };
-        let _renewal = self.lock_renewal();
         let now = self.deps.clock.now();
         let Some(credential) = self.lock_state().credential.clone() else {
             return;
         };
         let bearer = match credential.is_fresh(now, Renewal::HalfLife) {
             true => credential,
-            false => match self.session_credential(idp, Context::NonInteractive, now) {
+            false => match self.session_credential(&target, idp, Context::NonInteractive, now) {
                 Ok(Bearer::Credential(renewed)) => renewed,
                 Ok(Bearer::IdentityToken { .. }) => return,
                 Err(refusal) => {
@@ -463,11 +527,41 @@ impl Broker {
                 }
             },
         };
-        self.extend_key(idp, &bearer, now);
+        self.extend_key(&target, idp, &bearer, now);
     }
 
-    fn issue(&self, context: Context) -> Reply {
-        match &self.mode {
+    fn refresh(&self) {
+        let Some(version) = self.deps.settings.version() else {
+            return;
+        };
+        if self.lock_target().version == Some(version) {
+            return;
+        }
+        let Some(settings) = self.deps.settings.load() else {
+            return;
+        };
+        let next = Target::from_settings(&settings, Some(version));
+        let _renewal = self.lock_renewal();
+        let current = self.lock_target().clone();
+        if current.version == Some(version) {
+            return;
+        }
+        if current.mode != next.mode || current.gateway_url != next.gateway_url {
+            eprintln!("broker: the Relay config changed its IdP or Gateway; signing out");
+            self.forget(&current.gateway_url, true);
+        } else if current.team != next.team {
+            eprintln!(
+                "broker: the Relay config changed the team from {} to {}; the next request exchanges again",
+                current.team.as_deref().unwrap_or("none"),
+                next.team.as_deref().unwrap_or("none")
+            );
+            self.forget(&current.gateway_url, false);
+        }
+        *self.lock_target() = next;
+    }
+
+    fn issue(&self, target: &Target, context: Context) -> Reply {
+        match &target.mode {
             Mode::Unconfigured(hint) => Reply::Refused(Refusal::GatewayError(hint.clone())),
             Mode::StaticKey(key) => self.serve(Issued {
                 token: key.clone(),
@@ -475,37 +569,43 @@ impl Broker {
                 source: Source::StaticKey,
                 notice: None,
             }),
-            Mode::Idp(idp) => self.issue_from_idp(idp, context),
+            Mode::Idp(_) => self.issue_from_idp(context),
         }
     }
 
-    fn issue_from_idp(&self, idp: &IdpSection, context: Context) -> Reply {
+    fn issue_from_idp(&self, context: Context) -> Reply {
         if let Some(issued) = self.fresh_key(self.deps.clock.now()) {
             return self.serve(issued);
         }
         let _renewal = self.lock_renewal();
-        self.issue_under_renewal_lock(idp, context)
+        let target = self.lock_target().clone();
+        self.issue_under_renewal_lock(&target, context)
     }
 
-    fn issue_under_renewal_lock(&self, idp: &IdpSection, context: Context) -> Reply {
+    fn issue_under_renewal_lock(&self, target: &Target, context: Context) -> Reply {
+        let Mode::Idp(idp) = &target.mode else {
+            return self.issue(target, context);
+        };
         let now = self.deps.clock.now();
         if let Some(issued) = self.fresh_key(now) {
             return self.serve(issued);
         }
-        let issued = match self.session_credential(idp, context, now) {
-            Ok(Bearer::Credential(credential)) => match self.key_or_credential(&credential, now) {
-                KeyOutcome::Issued(issued) => issued,
-                KeyOutcome::DeadBearer => {
-                    return self.issue_after_dead_bearer(idp, context, &credential)
+        let issued = match self.session_credential(target, idp, context, now) {
+            Ok(Bearer::Credential(credential)) => {
+                match self.key_or_credential(target, &credential, now) {
+                    KeyOutcome::Issued(issued) => issued,
+                    KeyOutcome::DeadBearer => {
+                        return self.issue_after_dead_bearer(target, idp, context, &credential)
+                    }
                 }
-            },
+            }
             Ok(Bearer::IdentityToken { token, expires_at }) => Issued {
                 token,
                 expires_at: Some(expires_at),
                 source: Source::IdentityToken,
                 notice: Some(format!(
                     "gateway {} offers no IdP token exchange; serving the identity token instead",
-                    self.gateway_url
+                    target.gateway_url
                 )),
             },
             Err(refusal) => return Reply::Refused(refusal),
@@ -515,21 +615,25 @@ impl Broker {
 
     fn issue_after_dead_bearer(
         &self,
+        target: &Target,
         idp: &IdpSection,
         context: Context,
         dead: &CachedCredential,
     ) -> Reply {
         let now = self.deps.clock.now();
         self.mark_dead(dead, now);
-        let issued = match self.session_credential(idp, context, now) {
-            Ok(Bearer::Credential(credential)) => match self.key_or_credential(&credential, now) {
-                KeyOutcome::Issued(issued) => issued,
-                KeyOutcome::DeadBearer => {
-                    return Reply::Refused(Refusal::GatewayError(
-                        "the gateway refused the freshly exchanged session credential".to_string(),
-                    ))
+        let issued = match self.session_credential(target, idp, context, now) {
+            Ok(Bearer::Credential(credential)) => {
+                match self.key_or_credential(target, &credential, now) {
+                    KeyOutcome::Issued(issued) => issued,
+                    KeyOutcome::DeadBearer => {
+                        return Reply::Refused(Refusal::GatewayError(
+                            "the gateway refused the freshly exchanged session credential"
+                                .to_string(),
+                        ))
+                    }
                 }
-            },
+            }
             Ok(Bearer::IdentityToken { .. }) => {
                 return Reply::Refused(Refusal::GatewayError(
                     "the gateway stopped offering the token exchange".to_string(),
@@ -560,6 +664,7 @@ impl Broker {
 
     fn session_credential(
         &self,
+        target: &Target,
         idp: &IdpSection,
         context: Context,
         now: i64,
@@ -573,8 +678,8 @@ impl Broker {
             )
         };
         let request = CredentialRequest {
-            gateway_url: &self.gateway_url,
-            team: self.team.as_deref(),
+            gateway_url: &target.gateway_url,
+            team: target.team.as_deref(),
             renewal: Renewal::HalfLife,
         };
         let resolved = {
@@ -650,7 +755,12 @@ impl Broker {
         }
     }
 
-    fn key_or_credential(&self, credential: &CachedCredential, now: i64) -> KeyOutcome {
+    fn key_or_credential(
+        &self,
+        target: &Target,
+        credential: &CachedCredential,
+        now: i64,
+    ) -> KeyOutcome {
         let session_credential = |notice: Option<String>| {
             KeyOutcome::Issued(Issued {
                 token: credential.access_token.clone(),
@@ -659,7 +769,7 @@ impl Broker {
                 notice,
             })
         };
-        let Some(team) = self.team.as_deref() else {
+        let Some(team) = target.team.as_deref() else {
             return session_credential(None);
         };
         let sticky = self
@@ -674,7 +784,7 @@ impl Broker {
         let minted = self
             .deps
             .keys
-            .mint(&self.gateway_url, &credential.access_token, &request);
+            .mint(&target.gateway_url, &credential.access_token, &request);
         match minted {
             Ok(MintOutcome::Minted(minted)) => {
                 let expires_at = minted.expires_at.unwrap_or(now + KEY_LIFETIME_SECONDS);
@@ -726,7 +836,7 @@ impl Broker {
         }
     }
 
-    fn extend_key(&self, idp: &IdpSection, bearer: &CachedCredential, now: i64) {
+    fn extend_key(&self, target: &Target, idp: &IdpSection, bearer: &CachedCredential, now: i64) {
         let due =
             self.lock_state().key.clone().filter(|key| {
                 key.expires_at > now && key.expires_at - now <= KEY_HALF_LIFE_SECONDS
@@ -737,7 +847,7 @@ impl Broker {
         let extended = self
             .deps
             .keys
-            .extend(&self.gateway_url, &bearer.access_token, &key.token);
+            .extend(&target.gateway_url, &bearer.access_token, &key.token);
         match extended {
             Ok(ExtendOutcome::Extended { expires_at }) => {
                 let expires_at = expires_at.unwrap_or(now + KEY_LIFETIME_SECONDS);
@@ -763,9 +873,9 @@ impl Broker {
                 );
                 self.mark_dead(bearer, now);
                 if let Ok(Bearer::Credential(renewed)) =
-                    self.session_credential(idp, Context::NonInteractive, now)
+                    self.session_credential(target, idp, Context::NonInteractive, now)
                 {
-                    let _ = self.key_or_credential(&renewed, now);
+                    let _ = self.key_or_credential(target, &renewed, now);
                 }
             }
             Err(error) => {
@@ -795,7 +905,7 @@ impl Broker {
         state.mint_refusal = None;
     }
 
-    fn forget(&self, clear_session: bool) {
+    fn forget(&self, gateway_url: &str, clear_session: bool) {
         let (key, credential) = {
             let mut state = self.lock_state();
             let key = state.key.take();
@@ -813,7 +923,7 @@ impl Broker {
         match self
             .deps
             .keys
-            .delete(&self.gateway_url, &credential.access_token, &key.token)
+            .delete(gateway_url, &credential.access_token, &key.token)
         {
             Ok(()) => eprintln!("broker: deleted key {}", key.alias),
             Err(error) => eprintln!(
@@ -822,6 +932,12 @@ impl Broker {
                 rfc3339(key.expires_at)
             ),
         }
+    }
+
+    fn lock_target(&self) -> MutexGuard<'_, Target> {
+        self.target
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn lock_state(&self) -> MutexGuard<'_, State> {
@@ -895,7 +1011,7 @@ mod tests {
 
     use super::{
         key::{ExtendOutcome, MintOutcome, MintRefusal},
-        test_support::{idp_settings, static_key_settings, Rig, HOSTNAME, NOW},
+        test_support::{idp_settings, static_key_settings, Rig, GATEWAY, HOSTNAME, NOW},
         *,
     };
 
@@ -918,6 +1034,18 @@ mod tests {
             Reply::Refused(refusal) => refusal,
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    fn other_idp_settings() -> RelaySettings {
+        let mut settings = idp_settings(Some("team-a"));
+        settings.idp.issuer = "https://other-idp.example.com".to_string();
+        settings
+    }
+
+    fn other_gateway_settings() -> RelaySettings {
+        let mut settings = idp_settings(Some("team-a"));
+        settings.gateway.url = "https://other-gateway.example.com/".to_string();
+        settings
     }
 
     #[test]
@@ -1305,6 +1433,144 @@ mod tests {
             issued(credential(&rig, Context::NonInteractive)).token,
             "sk-2"
         );
+    }
+
+    #[test]
+    fn should_mint_for_a_team_added_to_the_config_after_start_without_a_browser() {
+        let rig = Rig::new(idp_settings(None));
+        let first = issued(credential(&rig, Context::Interactive));
+        assert_eq!(first.source, Source::SessionCredential);
+        assert_eq!(rig.auth.exchanges(), 1);
+        rig.settings.set(idp_settings(Some("team-a")));
+        let second = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(second.source, Source::MintedKey);
+        assert_eq!(second.token, "sk-1");
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.auth.exchanges(), 2);
+        assert_eq!(rig.keys.mints()[0].team, "team-a");
+        assert_eq!(rig.keys.deletes().len(), 0);
+    }
+
+    #[test]
+    fn should_sign_out_when_the_config_changes_its_idp_and_sign_in_again_on_request() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.settings.set(other_idp_settings());
+        assert_eq!(
+            refused(credential(&rig, Context::NonInteractive)).reason(),
+            "signed_out"
+        );
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+        assert_eq!(rig.browser_opens(), 1);
+        let issued = issued(credential(&rig, Context::Interactive));
+        assert_eq!(issued.token, "sk-2");
+        assert_eq!(issued.source, Source::MintedKey);
+        assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(rig.browser_opens(), 2);
+        assert_eq!(rig.keys.mints()[1].bearer, "llm_session_2");
+    }
+
+    #[test]
+    fn should_delete_the_key_at_the_old_gateway_when_the_config_moves_the_gateway() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.settings.set(other_gateway_settings());
+        assert_eq!(
+            refused(credential(&rig, Context::NonInteractive)).reason(),
+            "signed_out"
+        );
+        assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-2");
+        assert_eq!(
+            rig.keys.mints()[1].gateway_url,
+            "https://other-gateway.example.com"
+        );
+        assert_eq!(rig.identity.sign_ins(), 2);
+    }
+
+    #[test]
+    fn should_keep_serving_when_a_changed_config_fails_to_load_and_apply_it_once_it_loads() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.settings.fail_next_load();
+        rig.settings.set(idp_settings(Some("team-a")));
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(rig.auth.exchanges(), 1);
+        assert_eq!(rig.keys.deletes().len(), 0);
+        rig.settings.fail_next_load();
+        rig.settings.set(idp_settings(Some("team-b")));
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(rig.auth.exchanges(), 1);
+        let moved = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(moved.token, "sk-2");
+        assert_eq!(rig.auth.exchanges(), 2);
+        assert_eq!(rig.keys.mints()[1].team, "team-b");
+        assert_eq!(rig.browser_opens(), 1);
+    }
+
+    #[test]
+    fn should_report_the_new_team_in_status_after_a_config_change() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.settings.set(idp_settings(Some("team-b")));
+        let status = rig.broker.status();
+        assert_eq!(status.team.as_deref(), Some("team-b"));
+        assert_eq!(status.key_expires_at, None);
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+        let issued = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(issued.token, "sk-2");
+        assert_eq!(rig.keys.mints()[1].team, "team-b");
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
+    }
+
+    #[test]
+    fn should_mint_for_the_config_that_landed_while_a_request_was_being_checked() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let gate = rig.callers.gate_next_check();
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let waiting = thread::spawn(move || {
+            broker.handle(
+                Request::Credential {
+                    context: Context::NonInteractive,
+                },
+                peer,
+            )
+        });
+        gate.wait();
+        rig.settings.set(idp_settings(Some("team-b")));
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
+        gate.wait();
+        let issued = issued(waiting.join().expect("worker"));
+        assert_eq!(issued.token, "sk-2");
+        let mints = rig.keys.mints();
+        assert_eq!(mints.len(), 2);
+        assert_eq!(mints[1].team, "team-b");
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
     }
 
     #[test]

@@ -192,7 +192,7 @@ impl Default for TimeoutSection {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IdpSection {
     pub issuer: String,
