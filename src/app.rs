@@ -319,7 +319,7 @@ async fn serve(settings: RelaySettings) -> Result<()> {
 
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
 
-    let broker = Arc::new(Broker::new(&settings, Dependencies::live(&settings)));
+    let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
     let proxy = RelayProxy::new(settings.to_config()).with_broker(Arc::clone(&broker));
     let path = socket_path();
     let listener = socket::bind(&path)?;

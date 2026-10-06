@@ -157,7 +157,9 @@ same allowed clients, so a static-key rollout gets the caller check too. The
 daemon re-reads `config.yaml` on the next request or tick after it changes, so
 a re-run of `relay autoconfigure` or `relay onboard` needs no daemon restart,
 and a changed IdP or Gateway signs the daemon out while a changed team only
-re-mints the key
+re-mints the key. A changed `credential.allowed_callers` list applies from the
+next request and leaves the key in place, so a client taken off the list is
+refused the next time it runs the helper
 
 Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
 `scheduled-task` when nobody is at the keyboard; those requests never open a

@@ -101,18 +101,16 @@ impl SettingsSource for FileSettings {
 }
 
 pub trait CallerCheck: Send + Sync {
-    fn check(&self, peer: Peer) -> Verdict;
+    fn check(&self, callers: &[caller::AllowedCaller], peer: Peer) -> Verdict;
 }
 
 #[cfg(target_os = "macos")]
-pub struct SignatureCallerCheck {
-    callers: Vec<caller::AllowedCaller>,
-}
+pub struct SignatureCallerCheck;
 
 #[cfg(target_os = "macos")]
 impl CallerCheck for SignatureCallerCheck {
-    fn check(&self, peer: Peer) -> Verdict {
-        caller::walk(&macos::MacProcessTable, &self.callers, peer)
+    fn check(&self, callers: &[caller::AllowedCaller], peer: Peer) -> Verdict {
+        caller::walk(&macos::MacProcessTable, callers, peer)
     }
 }
 
@@ -121,13 +119,12 @@ pub struct UnsupportedCallerCheck;
 
 #[cfg(not(target_os = "macos"))]
 impl CallerCheck for UnsupportedCallerCheck {
-    fn check(&self, _peer: Peer) -> Verdict {
+    fn check(&self, _callers: &[caller::AllowedCaller], _peer: Peer) -> Verdict {
         Verdict::Unsupported
     }
 }
 
-pub fn host_caller_check(settings: &RelaySettings) -> Box<dyn CallerCheck> {
-    let callers = effective_callers(settings.credential.allowed_callers.as_deref());
+fn announce_callers(callers: &[caller::AllowedCaller]) {
     eprintln!(
         "broker: serving credentials to [{}]",
         callers
@@ -145,9 +142,12 @@ pub fn host_caller_check(settings: &RelaySettings) -> Box<dyn CallerCheck> {
             unusable.describe()
         );
     }
+}
+
+pub fn host_caller_check() -> Box<dyn CallerCheck> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(SignatureCallerCheck { callers })
+        Box::new(SignatureCallerCheck)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -304,7 +304,10 @@ enum Mode {
 impl Mode {
     fn from_settings(settings: &RelaySettings) -> Self {
         if settings.idp.is_configured() {
-            return Mode::Idp(settings.idp.clone());
+            return Mode::Idp(IdpSection {
+                authorize_url: String::new(),
+                ..settings.idp.clone()
+            });
         }
         let static_key = settings
             .gateway
@@ -328,6 +331,7 @@ struct Target {
     mode: Mode,
     gateway_url: String,
     team: Option<String>,
+    callers: Vec<caller::AllowedCaller>,
 }
 
 impl Target {
@@ -337,6 +341,7 @@ impl Target {
             mode: Mode::from_settings(settings),
             gateway_url: settings.gateway.url.trim_end_matches('/').to_string(),
             team: managed_team(settings),
+            callers: effective_callers(settings.credential.allowed_callers.as_deref()),
         }
     }
 }
@@ -383,13 +388,13 @@ pub struct Dependencies {
 }
 
 impl Dependencies {
-    pub fn live(settings: &RelaySettings) -> Self {
+    pub fn live() -> Self {
         Self {
             auth: Box::new(HttpAuthorizationServer),
             keys: Box::new(HttpKeyServer),
             identity: Box::new(OidcProvider),
             clock: Box::new(SystemClock),
-            callers: host_caller_check(settings),
+            callers: host_caller_check(),
             browser: Box::new(open_browser),
             hostname: hostname(),
             settings: Box::new(FileSettings),
@@ -407,8 +412,10 @@ pub struct Broker {
 impl Broker {
     pub fn new(settings: &RelaySettings, deps: Dependencies) -> Self {
         let version = deps.settings.version();
+        let target = Target::from_settings(settings, version);
+        announce_callers(&target.callers);
         Self {
-            target: Mutex::new(Target::from_settings(settings, version)),
+            target: Mutex::new(target),
             deps,
             state: Mutex::new(State::default()),
             renewal: Mutex::new(()),
@@ -427,7 +434,7 @@ impl Broker {
     pub fn credential(&self, context: Context, peer: Peer) -> Reply {
         self.refresh();
         let target = self.lock_target().clone();
-        let verdict = self.deps.callers.check(peer);
+        let verdict = self.deps.callers.check(&target.callers, peer);
         if let Some(message) = verdict.refusal_message() {
             self.lock_state().refused_callers += 1;
             eprintln!("broker: {message} (peer pid {})", peer.pid);
@@ -556,6 +563,9 @@ impl Broker {
                 next.team.as_deref().unwrap_or("none")
             );
             self.forget(&current.gateway_url, false);
+        }
+        if current.callers != next.callers {
+            announce_callers(&next.callers);
         }
         *self.lock_target() = next;
     }
@@ -1450,6 +1460,47 @@ mod tests {
         assert_eq!(rig.auth.exchanges(), 2);
         assert_eq!(rig.keys.mints()[0].team, "team-a");
         assert_eq!(rig.keys.deletes().len(), 0);
+    }
+
+    #[test]
+    fn should_check_callers_against_the_allowlist_of_a_config_changed_after_start() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        assert_eq!(
+            rig.callers.last_allowlist(),
+            super::caller::default_callers()
+        );
+        let managed = vec![super::caller::AllowedCaller::new(
+            "com.example.tool",
+            Some("TEAM123456"),
+        )];
+        let mut changed = idp_settings(Some("team-a"));
+        changed.credential.allowed_callers = Some(managed.clone());
+        rig.settings.set(changed);
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(rig.callers.last_allowlist(), managed);
+        assert_eq!(rig.keys.deletes().len(), 0);
+        assert_eq!(rig.identity.sign_ins(), 1);
+    }
+
+    #[test]
+    fn should_keep_the_session_when_a_rewritten_config_only_drops_the_legacy_authorize_url() {
+        let mut legacy = idp_settings(Some("team-a"));
+        legacy.idp.authorize_url = "https://idp.example.com/authorize".to_string();
+        let rig = Rig::new(legacy);
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.settings.set(idp_settings(Some("team-a")));
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(rig.keys.deletes().len(), 0);
+        assert_eq!(rig.keys.mints().len(), 1);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
     }
 
     #[test]

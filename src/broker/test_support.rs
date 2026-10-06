@@ -331,6 +331,7 @@ pub(crate) struct FakeCallers {
     checks: Arc<AtomicU64>,
     verdict: Arc<Mutex<Verdict>>,
     gate: Arc<Mutex<Option<Arc<Barrier>>>>,
+    allowlist: Arc<Mutex<Vec<AllowedCaller>>>,
 }
 
 impl FakeCallers {
@@ -342,6 +343,7 @@ impl FakeCallers {
                 level: 1,
             })),
             gate: Arc::new(Mutex::new(None)),
+            allowlist: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -360,11 +362,16 @@ impl FakeCallers {
     pub(crate) fn checks(&self) -> u64 {
         self.checks.load(Ordering::SeqCst)
     }
+
+    pub(crate) fn last_allowlist(&self) -> Vec<AllowedCaller> {
+        self.allowlist.lock().unwrap().clone()
+    }
 }
 
 impl CallerCheck for FakeCallers {
-    fn check(&self, _peer: Peer) -> Verdict {
+    fn check(&self, callers: &[AllowedCaller], _peer: Peer) -> Verdict {
         self.checks.fetch_add(1, Ordering::SeqCst);
+        *self.allowlist.lock().unwrap() = callers.to_vec();
         if let Some(gate) = self.gate.lock().unwrap().take() {
             gate.wait();
             gate.wait();
