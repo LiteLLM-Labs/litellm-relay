@@ -1,4 +1,6 @@
 use std::{
+    error::Error,
+    fmt,
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -17,14 +19,68 @@ use crate::{
 const REFRESH_AHEAD_SECONDS: i64 = 600;
 const EXPIRY_MARGIN_SECONDS: i64 = 60;
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct CachedSession {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct CachedSession {
     issuer: String,
     client_id: String,
-    token: String,
-    exp: i64,
+    pub(crate) token: String,
+    pub(crate) exp: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+}
+
+impl CachedSession {
+    fn from_session(idp: &IdpSection, session: Session) -> Result<Self> {
+        let exp = token_expiry(&session.id_token)
+            .context("the IdP issued an ID token without a readable exp claim")?;
+        Ok(Self {
+            issuer: idp.normalized_issuer().to_string(),
+            client_id: idp.client_id.trim().to_string(),
+            token: session.id_token,
+            exp,
+            refresh_token: session.refresh_token,
+        })
+    }
+}
+
+/// The IdP calls a session renewal needs, so the broker can run the same steps
+/// against a scripted IdP in tests.
+pub(crate) trait IdentityProvider {
+    fn sign_in(&self, idp: &IdpSection, browser: &dyn Fn(&str)) -> Result<Session>;
+    fn refresh(&self, idp: &IdpSection, refresh_token: &str) -> Result<Session>;
+}
+
+pub(crate) struct OidcProvider;
+
+impl IdentityProvider for OidcProvider {
+    fn sign_in(&self, idp: &IdpSection, browser: &dyn Fn(&str)) -> Result<Session> {
+        idp::sign_in(idp, browser)
+    }
+
+    fn refresh(&self, idp: &IdpSection, refresh_token: &str) -> Result<Session> {
+        idp::refresh(idp, refresh_token)
+    }
+}
+
+/// A browser sign-in was the only way forward and the caller disallowed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SignInRequired;
+
+impl fmt::Display for SignInRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "no signed-in identity on this device; run `relay claude-token` or \
+             `relay codex-token` once to sign in, then re-run",
+        )
+    }
+}
+
+impl Error for SignInRequired {}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Advanced {
+    Reused(String),
+    Renewed(CachedSession),
 }
 
 /// Whether a token hook may open the browser for an IdP sign-in when no cached
@@ -75,35 +131,61 @@ fn ensure_with(
         return Ok(token);
     }
     let _lock = lock_cache(path)?;
-    match next_step(read_cache(path, idp)?, now) {
-        Step::Reuse(token) => Ok(token),
-        Step::SignIn => store(path, idp, browser_sign_in(idp, sign_in, browser)?),
+    let cached = read_cache(path, idp)?;
+    match advance(&OidcProvider, idp, cached, now, sign_in, browser)? {
+        Advanced::Reused(token) => Ok(token),
+        Advanced::Renewed(session) => {
+            write_cache(path, &session)?;
+            Ok(session.token)
+        }
+    }
+}
+
+/// Moves one cached session forward: reused while fresh, refreshed near expiry,
+/// signed in again when nothing else works and the caller allows a browser.
+pub(crate) fn advance(
+    provider: &dyn IdentityProvider,
+    idp: &IdpSection,
+    cached: Option<CachedSession>,
+    now: i64,
+    sign_in: SignIn,
+    browser: &dyn Fn(&str),
+) -> Result<Advanced> {
+    match next_step(cached, now) {
+        Step::Reuse(token) => Ok(Advanced::Reused(token)),
+        Step::SignIn => renewed(idp, browser_sign_in(provider, idp, sign_in, browser)?),
         Step::Refresh {
             refresh_token,
             still_valid,
-        } => match (idp::refresh(idp, &refresh_token), still_valid) {
-            (Ok(session), _) => store(path, idp, session),
+        } => match (provider.refresh(idp, &refresh_token), still_valid) {
+            (Ok(session), _) => renewed(idp, session),
             (Err(error), Some(token)) => {
                 eprintln!(
                     "Silent token refresh failed ({error:#}); using the current token until it expires."
                 );
-                Ok(token)
+                Ok(Advanced::Reused(token))
             }
             (Err(error), None) => {
                 eprintln!("Silent token refresh failed ({error:#}).");
-                store(path, idp, browser_sign_in(idp, sign_in, browser)?)
+                renewed(idp, browser_sign_in(provider, idp, sign_in, browser)?)
             }
         },
     }
 }
 
-fn browser_sign_in(idp: &IdpSection, sign_in: SignIn, browser: &dyn Fn(&str)) -> Result<Session> {
+fn renewed(idp: &IdpSection, session: Session) -> Result<Advanced> {
+    CachedSession::from_session(idp, session).map(Advanced::Renewed)
+}
+
+fn browser_sign_in(
+    provider: &dyn IdentityProvider,
+    idp: &IdpSection,
+    sign_in: SignIn,
+    browser: &dyn Fn(&str),
+) -> Result<Session> {
     match sign_in {
-        SignIn::Allowed => idp::sign_in(idp, browser),
-        SignIn::CachedOnly => bail!(
-            "no signed-in identity on this device; run `relay claude-token` or \
-             `relay codex-token` once to sign in, then re-run"
-        ),
+        SignIn::Allowed => provider.sign_in(idp, browser),
+        SignIn::CachedOnly => Err(anyhow::Error::new(SignInRequired)),
     }
 }
 
@@ -134,20 +216,6 @@ fn read_cache(path: &Path, idp: &IdpSection) -> Result<Option<CachedSession>> {
         .filter(|cached| {
             cached.issuer == idp.normalized_issuer() && cached.client_id == idp.client_id.trim()
         }))
-}
-
-fn store(path: &Path, idp: &IdpSection, session: Session) -> Result<String> {
-    let exp = token_expiry(&session.id_token)
-        .context("the IdP issued an ID token without a readable exp claim")?;
-    let cached = CachedSession {
-        issuer: idp.normalized_issuer().to_string(),
-        client_id: idp.client_id.trim().to_string(),
-        token: session.id_token,
-        exp,
-        refresh_token: session.refresh_token,
-    };
-    write_cache(path, &cached)?;
-    Ok(cached.token)
 }
 
 fn write_cache(path: &Path, cached: &CachedSession) -> Result<()> {
@@ -193,6 +261,12 @@ mod tests {
             client_id: CLIENT_ID.into(),
             ..IdpSection::default()
         }
+    }
+
+    fn store(path: &Path, idp: &IdpSection, session: Session) -> Result<String> {
+        let cached = CachedSession::from_session(idp, session)?;
+        write_cache(path, &cached)?;
+        Ok(cached.token)
     }
 
     fn panicking_browser(_: &str) {

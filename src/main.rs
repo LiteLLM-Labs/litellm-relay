@@ -2,6 +2,7 @@ mod ai_tools;
 mod app;
 mod apps;
 mod auth;
+mod broker;
 mod cert;
 mod config;
 mod credential;

@@ -32,3 +32,10 @@ url = "2.5"
 uuid = { version = "1.10", features = ["v4"] }
 webpki-roots = "0.26"
 zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework = "3.7"

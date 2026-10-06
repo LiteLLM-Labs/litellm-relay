@@ -72,6 +72,12 @@ impl Error for ExchangeRefused {}
 #[derive(Debug)]
 pub struct SignInFailed(anyhow::Error);
 
+impl SignInFailed {
+    pub(crate) fn cause(&self) -> &anyhow::Error {
+        &self.0
+    }
+}
+
 impl fmt::Display for SignInFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
@@ -254,21 +260,21 @@ pub trait AuthorizationServer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-struct CachedCredential {
+pub(crate) struct CachedCredential {
     gateway_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     team: Option<String>,
     client_id: String,
-    access_token: String,
+    pub(crate) access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
-    expires_at: i64,
+    pub(crate) expires_at: i64,
     #[serde(default)]
-    issued_at: i64,
+    pub(crate) issued_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    user_id: Option<String>,
+    pub(crate) user_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    team_id: Option<String>,
+    pub(crate) team_id: Option<String>,
 }
 
 impl CachedCredential {
@@ -276,15 +282,25 @@ impl CachedCredential {
         self.gateway_url == request.gateway_url && self.team.as_deref() == request.team
     }
 
-    fn is_fresh(&self, now: i64, renewal: Renewal) -> bool {
+    pub(crate) fn is_fresh(&self, now: i64, renewal: Renewal) -> bool {
         match renewal {
             Renewal::NearExpiry => self.expires_at > now + CREDENTIAL_REFRESH_SKEW_SECONDS,
             Renewal::HalfLife => self.expires_at - now > (self.expires_at - self.issued_at) / 2,
         }
     }
 
-    fn is_valid(&self, now: i64) -> bool {
+    pub(crate) fn is_valid(&self, now: i64) -> bool {
         self.expires_at > now
+    }
+
+    /// The same credential marked dead, so the next resolution renews it by the
+    /// usual fall-through (refresh, exchange, re-register) instead of serving
+    /// a bearer the Gateway stopped accepting.
+    pub(crate) fn dead(&self, now: i64) -> Self {
+        Self {
+            expires_at: now,
+            ..self.clone()
+        }
     }
 
     fn issued(
@@ -331,7 +347,7 @@ struct CredentialStore {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Resolved {
+pub(crate) enum Resolved {
     Issued {
         credential: CachedCredential,
         changed: bool,
@@ -355,8 +371,8 @@ fn fresh<'a>(
         .filter(|credential| credential.is_fresh(now, request.renewal))
 }
 
-fn resolve(
-    server: &impl AuthorizationServer,
+pub(crate) fn resolve(
+    server: &dyn AuthorizationServer,
     identity_token: &mut dyn FnMut() -> Result<String>,
     store: &[CachedCredential],
     request: CredentialRequest<'_>,
@@ -376,7 +392,7 @@ fn resolve(
 }
 
 fn renew(
-    server: &impl AuthorizationServer,
+    server: &dyn AuthorizationServer,
     identity_token: &mut dyn FnMut() -> Result<String>,
     cached: Option<&CachedCredential>,
     request: CredentialRequest<'_>,
@@ -422,7 +438,7 @@ fn reuse_while_valid(
 }
 
 fn refresh(
-    server: &impl AuthorizationServer,
+    server: &dyn AuthorizationServer,
     document: &AuthorizationServerDocument,
     credential: &CachedCredential,
 ) -> Result<Option<IssuedTokens>> {
@@ -440,7 +456,7 @@ fn refresh(
 }
 
 fn exchange(
-    server: &impl AuthorizationServer,
+    server: &dyn AuthorizationServer,
     document: &AuthorizationServerDocument,
     subject_token: &str,
     request: CredentialRequest<'_>,
@@ -463,7 +479,7 @@ fn exchange(
 }
 
 fn attempt_exchange(
-    server: &impl AuthorizationServer,
+    server: &dyn AuthorizationServer,
     document: &AuthorizationServerDocument,
     client_id: &str,
     subject_token: &str,
