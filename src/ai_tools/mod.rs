@@ -8,6 +8,7 @@ pub mod blocking;
 pub mod claude_cli;
 pub mod claude_desktop;
 pub mod codex;
+pub mod credential;
 pub mod detect;
 pub mod gateway_credential;
 pub mod idp;
