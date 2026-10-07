@@ -33,6 +33,8 @@ const HOP_BY_HOP: [&str; 9] = [
     "upgrade",
 ];
 
+const DECODE_ROUNDS: usize = 3;
+
 pub fn gateway_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -43,22 +45,23 @@ pub fn gateway_client() -> reqwest::Client {
 
 pub fn is_inference_target(target: &str) -> bool {
     let raw_path = target.split('?').next().unwrap_or(target);
-    let decoded_path = fully_decoded(raw_path);
     is_inference_path(raw_path)
         && is_inference_path(&parse_route(target).path)
-        && is_inference_path(&decoded_path)
-        && !decoded_path.contains('\\')
-        && !decoded_path
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
+        && decoded_within(raw_path.to_string(), DECODE_ROUNDS).is_some_and(|decoded| {
+            is_inference_path(&decoded)
+                && !decoded.contains('\\')
+                && !decoded
+                    .split('/')
+                    .any(|segment| segment == "." || segment == "..")
+        })
 }
 
-fn fully_decoded(path: &str) -> String {
-    let decoded = percent_decode_str(path).decode_utf8_lossy().into_owned();
-    if decoded == path {
-        decoded
-    } else {
-        fully_decoded(&decoded)
+fn decoded_within(path: String, rounds_left: usize) -> Option<String> {
+    let decoded = percent_decode_str(&path).decode_utf8_lossy().into_owned();
+    match (decoded == path, rounds_left) {
+        (true, _) => Some(decoded),
+        (false, 0) => None,
+        (false, _) => decoded_within(decoded, rounds_left - 1),
     }
 }
 

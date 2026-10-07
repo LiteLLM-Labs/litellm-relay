@@ -1195,7 +1195,9 @@ mod tests {
     async fn should_forward_nothing_outside_v1_even_with_a_valid_token() {
         let upstream = Upstream::answering(&[JSON_OK]).await;
         let daemon = daemon(&upstream.url);
+        let nested_hundred_thousand_layers = format!("/v1/%{}2e/key/info", "25".repeat(100_000));
         for target in [
+            nested_hundred_thousand_layers.as_str(),
             "/v1/../key/info",
             "/v1/%2e%2e/key/info",
             "/v1/%2e%2e%2fkey/info",
@@ -1219,6 +1221,13 @@ mod tests {
             );
         }
         assert!(upstream.requests().is_empty());
+        let request = format!(
+            "GET /v1/models HTTP/1.1\r\nAuthorization: Bearer {}\r\n\r\n",
+            daemon.token
+        );
+        let answer = exchange(&daemon.proxy, None, &request).await;
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        assert_eq!(upstream.requests().len(), 1);
         for target in [
             "/v1",
             "/v1?x=1",
