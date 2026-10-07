@@ -229,6 +229,26 @@ did not. The `broker` block of `/api/status` shows `signed_in`, `user_id`,
 `source` of the last answer (`minted_key`, `session_credential`,
 `identity_token`, or `static_key`), and `refused_callers`, never a token
 
+The daemon also keeps an `account` block there. Every 60 seconds it asks
+`GET <gateway.url>/health/liveliness` without a credential, and every 300
+seconds, plus once after a sign-in and after a switch, it reads
+`GET /user/info` and `GET /team/info?team_id=<team>` with the signed-in user's
+credential. The block shows `user` (`id`, `email`), `teams` (the `id` and
+`alias` of every team the user may attribute spend to, null until the first
+read), `teams_error`, `team` (the current team's `id`, `alias`, `spend`,
+`max_budget`, and `budget_reset_at` as the Gateway reports them, null when no
+team is selected), `budget_error`, `gateway` (`url`, `reachable`, `checked_at`,
+`error`), and `polled_at`. When `/user/info` fails or lists nothing, `teams`
+falls back to the current team alone and `teams_error` says why; when
+`/team/info` refuses the team, the budget comes from the `/user/info` entry and
+`budget_error` says why. `relay recheck` runs both reads and the probe now and
+prints the block as one JSON line, or `{"refused": "daemon_unavailable",
+"message": "..."}` on stderr with exit code 1 when the daemon is not running.
+The `environments` block of `/api/status` shows the `current` environment name
+and the `available` entries (`name`, `url`) from `config.yaml`. A
+`relay switch-team` to a team missing from a known list answers `unknown_team`
+with the known ids and changes nothing; with no list the Gateway decides
+
 ### Environments and teams
 
 `environments` in `config.yaml` lists the Gateways a developer may switch
@@ -237,7 +257,8 @@ Gateway's default team. The entry whose `url` equals `gateway.url` is the
 current one, and every entry shares the `idp` section, so one sign-in serves
 them all. The team the daemon mints keys for is `gateway.team` when set, else
 the current environment's `team`, else `claude.team`, else `codex.team`. A
-switch (`relay switch-team`, `relay switch-environment`, or RelayBar) writes
+switch (`relay switch-team`, `relay switch-environment`, the MCP tools of the
+same names, or RelayBar) writes
 `gateway.url` and `gateway.team` back into `config.yaml`, where an environment
 switch clears `gateway.team` so the new environment's default team applies,
 deletes the key on the Gateway it leaves, keeps the IdP session, and exchanges
@@ -295,25 +316,33 @@ the signed-in user's credential against `<gateway.url>/mcp`. Calls therefore
 show on the Logs page under that user, and a client that is not an allowed
 caller gets `caller_refused` and nothing else
 
-The server exposes four tools. `search_tools(query)` answers from the daemon's
+The server exposes six tools. `search_tools(query)` answers from the daemon's
 in-memory catalog with at most five tool names from the servers the user
 activated, plus the names of inactive servers that have matching tools.
 `describe_tool(name)` returns the tool's description, input schema, upstream
 annotations, and its verdict. `call_tool(name, arguments)` runs the tool on the
 Gateway and returns its result unchanged. `activate_server(server)` makes a
-server's tools available for the rest of the signed-in session. The catalog is
-fetched when a session signs in and every five minutes after that, and dropped
-on sign-out
+server's tools available for the rest of the signed-in session.
+`switch_team(team)` and `switch_environment(environment)` move every client on
+the device to another team or Gateway, the same as `relay switch-team` and
+`relay switch-environment`: called without an argument they answer the current
+selection (`team`, `environment`, `gateway_url`, `teams`, `teams_error`, and
+`environments`) and ask nothing, and with one they run only after the user
+confirms the switch and answer the switch outcome plus the same selection. A
+team switch refetches the catalog at once so team-scoped servers show on the
+next call. The catalog is fetched when a session signs in and every five
+minutes after that, and dropped on sign-out
 
 Every catalog entry carries a verdict. A tool is allow only when its name says
 it reads (it starts with a word such as get, list, read, or search, contains no
 write word such as create, delete, or send, and its upstream annotations do not
 claim otherwise); everything else is ask. An allow tool runs with no prompt.
-An ask tool, and every `activate_server`, runs only after the user confirms it
-in the client: the daemon sends one question over the connection, `relay mcp`
-turns it into an MCP elicitation (a request of its own on a 2025 connection, an
-`input_required` tool result the client answers by retrying the call on a
-2026-07-28 one), and the client shows its own dialog. Claude
+An ask tool, every `activate_server`, and every switch with an argument runs
+only after the user confirms it in the client: the daemon sends one question
+over the connection, `relay mcp` turns it into an MCP elicitation (a request of
+its own on a 2025 connection, an `input_required` tool result the client
+answers by retrying the call on a 2026-07-28 one), and the client shows its
+own dialog. Claude
 Code shows a yes/no prompt naming the server, the tool, and the arguments, in
 its default and bypass modes alike, and answers cancel when it runs headless
 (`claude -p`). Codex shows a True/False dialog, where False and Esc both
@@ -338,9 +367,10 @@ On the broker plan (macOS) the writers register the server in each client and
 keep the client's own per-tool prompt out of the way, so the daemon's question
 is the one gate. Claude Code gets `mcpServers.litellm` (`type` `stdio`,
 `command` the Relay executable, `args` `["mcp"]`) in `~/.claude.json`, which
-is created as `{}` when missing, and the four rules `mcp__litellm__search_tools`,
-`mcp__litellm__describe_tool`, `mcp__litellm__call_tool`, and
-`mcp__litellm__activate_server` in `permissions.allow` of Claude Code's user
+is created as `{}` when missing, and the six rules `mcp__litellm__search_tools`,
+`mcp__litellm__describe_tool`, `mcp__litellm__call_tool`,
+`mcp__litellm__activate_server`, `mcp__litellm__switch_team`, and
+`mcp__litellm__switch_environment` in `permissions.allow` of Claude Code's user
 settings file (`settings.json` under `~/.claude`); other servers and rules are
 kept. Codex gets `[mcp_servers.litellm]` with `command`, `args = ["mcp"]`, and
 `default_tools_approval_mode = "approve"` in `~/.codex/config.toml`, next to
