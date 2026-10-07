@@ -1,9 +1,0 @@
-/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/signal_hook_registry-44315c5ee3b6624c.d: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
-
-/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/libsignal_hook_registry-44315c5ee3b6624c.rlib: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
-
-/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/libsignal_hook_registry-44315c5ee3b6624c.rmeta: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
-
-/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs:
-/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs:
-/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs:
