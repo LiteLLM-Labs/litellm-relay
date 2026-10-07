@@ -402,6 +402,9 @@ fn parse_only(values: &[String]) -> Result<Vec<AiTool>> {
 async fn serve(settings: RelaySettings) -> Result<()> {
     use std::sync::Arc;
 
+    use crate::account::{
+        poll_forever, AccountDependencies, AccountService, HttpAccount, POLL_TICK,
+    };
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
     use crate::mcp::{
         service::{watch_session, McpDependencies, McpService, SESSION_CHECK_INTERVAL},
@@ -438,6 +441,15 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         socket::daemon_uid(),
     ));
     let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
+    let account = Arc::new(AccountService::new(
+        Arc::clone(&broker),
+        AccountDependencies {
+            http: Arc::new(HttpAccount),
+            clock: Arc::new(crate::broker::SystemClock),
+            settings: Box::new(crate::broker::FileSettings),
+        },
+    ));
+    let poller = tokio::spawn(poll_forever(Arc::clone(&account), POLL_TICK));
     let mcp = Arc::new(McpService::new(
         Arc::clone(&broker),
         &settings.mcp,
@@ -449,7 +461,8 @@ async fn serve(settings: RelaySettings) -> Result<()> {
     ));
     let proxy = RelayProxy::new(settings.to_config())
         .with_broker(Arc::clone(&broker))
-        .with_mcp(Arc::clone(&mcp));
+        .with_mcp(Arc::clone(&mcp))
+        .with_account(Arc::clone(&account));
     let mcp_path = mcp_socket::socket_path();
     let mcp_listener = mcp_socket::bind(&mcp_path)?;
     eprintln!("mcp: listening on {}", mcp_path.display());
@@ -476,6 +489,7 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         }
     };
     ticker.abort();
+    poller.abort();
     mcp_watcher.abort();
     tokio::task::spawn_blocking(move || broker.shutdown()).await?;
     outcome
