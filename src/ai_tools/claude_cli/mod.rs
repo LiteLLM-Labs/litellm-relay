@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     env,
     ffi::OsStr,
     fs,
@@ -158,21 +159,43 @@ fn claude_binary(path: Option<&OsStr>, home: &Path) -> Option<PathBuf> {
 }
 
 fn install_dirs(home: &Path) -> Vec<PathBuf> {
-    let mut nvm_versions: Vec<PathBuf> = fs::read_dir(home.join(".nvm/versions/node"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|version| version.path().join("bin"))
-        .collect();
-    nvm_versions.sort();
+    let mut nvm_versions: Vec<((u64, u64, u64), PathBuf)> =
+        fs::read_dir(home.join(".nvm/versions/node"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|version| {
+                (
+                    node_version(&version.file_name()),
+                    version.path().join("bin"),
+                )
+            })
+            .collect();
+    nvm_versions.sort_by_key(|(version, _)| Reverse(*version));
     [
         home.join(".local/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]
     .into_iter()
-    .chain(nvm_versions)
+    .chain(nvm_versions.into_iter().map(|(_, bin)| bin))
     .collect()
+}
+
+/// nvm names a version directory `v<major>.<minor>.<patch>`; the newest one is
+/// the likeliest default, so it is tried first and a name that is no version last.
+fn node_version(name: &OsStr) -> (u64, u64, u64) {
+    let mut parts = name
+        .to_str()
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 /// npm releases of Claude Code up to 2.1.110 ran `cli.js` as a script under
@@ -600,6 +623,20 @@ mod tests {
             Some(nvm_bin.join("claude"))
         );
         assert_eq!(claude_binary(None, &home), Some(nvm_bin.join("claude")));
+
+        let newest_nvm_bin = home.join(".nvm/versions/node/v24.19.0/bin");
+        let other_nvm_bins = [
+            home.join(".nvm/versions/node/v24.3.0/bin"),
+            home.join(".nvm/versions/node/v9.0.0/bin"),
+        ];
+        for bin in other_nvm_bins.iter().chain([&newest_nvm_bin]) {
+            fs::create_dir_all(bin).unwrap();
+            fs::write(bin.join("claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
+        }
+        assert_eq!(
+            claude_binary(Some(&path), &home),
+            Some(newest_nvm_bin.join("claude"))
+        );
 
         fs::write(home.join(".local/bin/claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
         assert_eq!(
