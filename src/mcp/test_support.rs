@@ -131,6 +131,7 @@ impl Upstream for FakeUpstream {
 #[derive(Default)]
 pub(crate) struct FakeAsker {
     answers: VecDeque<Answer>,
+    before_answering: Option<Box<dyn Fn() + Send>>,
     pub(crate) questions: Vec<Question>,
 }
 
@@ -138,7 +139,18 @@ impl FakeAsker {
     pub(crate) fn answering(answers: &[Answer]) -> Self {
         Self {
             answers: answers.iter().copied().collect(),
+            before_answering: None,
             questions: Vec::new(),
+        }
+    }
+
+    pub(crate) fn doing_before_answering(
+        answers: &[Answer],
+        effect: impl Fn() + Send + 'static,
+    ) -> Self {
+        Self {
+            before_answering: Some(Box::new(effect)),
+            ..Self::answering(answers)
         }
     }
 }
@@ -150,6 +162,9 @@ impl Asker for FakeAsker {
     ) -> Pin<Box<dyn Future<Output = Answer> + Send + 'a>> {
         Box::pin(async move {
             self.questions.push(question);
+            if let Some(effect) = self.before_answering.as_ref() {
+                effect();
+            }
             self.answers.pop_front().unwrap_or(Answer::Unsupported)
         })
     }

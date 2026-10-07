@@ -1,4 +1,4 @@
-use super::{caller::Peer, Broker, Context, Refusal, Reply, Target};
+use super::{caller::Peer, Broker, Context, Mode, Refusal, Reply, Target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {
@@ -14,13 +14,19 @@ pub struct SessionBearer {
 
 impl Broker {
     pub fn session_identity(&self) -> Option<SessionIdentity> {
-        let status = self.status();
-        if !status.signed_in {
+        self.refresh();
+        let target = self.lock_target().clone();
+        let state = self.lock_state();
+        let held = matches!(target.mode, Mode::StaticKey(_)) || state.credential.is_some();
+        if !held {
             return None;
         }
         Some(SessionIdentity {
-            gateway_url: self.lock_target().gateway_url.clone(),
-            user_id: status.user_id,
+            gateway_url: target.gateway_url,
+            user_id: state
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_id.clone()),
         })
     }
 

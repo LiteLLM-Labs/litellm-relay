@@ -113,6 +113,70 @@ async fn should_fetch_the_catalog_on_sign_in_and_drop_it_with_the_activations_on
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_keep_the_catalog_and_activations_while_an_expired_credential_waits_for_its_renewal()
+{
+    let upstream = FakeUpstream::serving(tools());
+    let (rig, service) = service_on(idp_settings(None), &upstream);
+    let broker = Arc::clone(&rig.broker);
+    tokio::task::spawn_blocking(move || broker.sign_in())
+        .await
+        .expect("sign in");
+    service.check_session().await;
+    activate(&rig, &service, "github").await;
+    assert_eq!(upstream.lists().len(), 1);
+
+    let browser_opens_before_expiry = rig.browser_opens();
+    rig.clock.advance(3601);
+    assert!(!rig.broker.status().signed_in);
+    service.check_session().await;
+    assert_eq!(service.status()["catalog_tools"], 3);
+    assert_eq!(service.status()["servers"]["github"]["active"], true);
+    assert_eq!(upstream.lists().len(), 2);
+    assert_eq!(rig.auth.refreshes(), 1);
+    assert_eq!(rig.identity.sign_ins(), 1);
+    assert_eq!(rig.browser_opens(), browser_opens_before_expiry);
+    assert!(rig.broker.status().signed_in);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_refuse_a_confirmed_call_when_the_session_ended_during_the_dialog() {
+    let upstream = FakeUpstream::serving(tools());
+    let (rig, service) = service_on(idp_settings(None), &upstream);
+    activate(&rig, &service, "github").await;
+    let broker = Arc::clone(&rig.broker);
+    let mut asker = FakeAsker::doing_before_answering(&[Answer::Accept], move || {
+        let _signed_out = broker.sign_out();
+    });
+    let call =
+        json!({"op": "call_tool", "name": "github-create_issue", "arguments": {"title": "x"}});
+    assert_eq!(
+        reason(ask(&rig, &service, call, &mut asker).await),
+        "catalog_unavailable"
+    );
+    assert_eq!(asker.questions.len(), 1);
+    assert!(upstream.calls().is_empty());
+    assert_eq!(service.status()["catalog_tools"], Value::Null);
+
+    let broker = Arc::clone(&rig.broker);
+    let mut asker = FakeAsker::doing_before_answering(&[Answer::Accept], move || {
+        let _signed_out = broker.sign_out();
+    });
+    assert_eq!(
+        reason(
+            ask(
+                &rig,
+                &service,
+                json!({"op": "activate_server", "server": "github"}),
+                &mut asker
+            )
+            .await
+        ),
+        "catalog_unavailable"
+    );
+    assert_eq!(service.status()["servers"], json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_refresh_every_300_seconds_and_keep_the_catalog_when_a_refresh_fails() {
     let upstream = FakeUpstream::serving(tools());
     let (rig, service) = service_on(static_key_settings("sk-static"), &upstream);

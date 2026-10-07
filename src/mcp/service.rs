@@ -488,7 +488,7 @@ impl McpService {
     }
 
     async fn call(
-        &self,
+        self: &Arc<Self>,
         catalog: &Catalog,
         bearer: &SessionBearer,
         name: &str,
@@ -512,6 +512,7 @@ impl McpService {
         let _slot = self.slots.acquire().await.ok_or_else(|| {
             McpRefusal::UpstreamError("the daemon is no longer running tool calls".to_string())
         })?;
+        self.require_same_session(bearer).await?;
         let target = gateway_target(bearer);
         match timeout(
             CALL_CEILING,
@@ -529,7 +530,7 @@ impl McpService {
     }
 
     async fn activate(
-        &self,
+        self: &Arc<Self>,
         catalog: &Catalog,
         bearer: &SessionBearer,
         server: &str,
@@ -552,6 +553,7 @@ impl McpService {
             ),
         };
         confirm(question, asker).await?;
+        self.require_same_session(bearer).await?;
         let mut state = self.lock_state();
         let session = state
             .session
@@ -564,6 +566,30 @@ impl McpService {
             })?;
         session.active.activate(server);
         Ok(activated)
+    }
+
+    async fn require_same_session(
+        self: &Arc<Self>,
+        bearer: &SessionBearer,
+    ) -> Result<(), McpRefusal> {
+        let service = Arc::clone(self);
+        let identity = bearer.identity.clone();
+        let same = tokio::task::spawn_blocking(move || {
+            service.adopt(service.broker.session_identity().as_ref());
+            service
+                .lock_state()
+                .session
+                .as_ref()
+                .is_some_and(|session| session.identity == identity)
+        })
+        .await
+        .unwrap_or(false);
+        if same {
+            return Ok(());
+        }
+        Err(McpRefusal::CatalogUnavailable(
+            "the signed-in session changed while waiting; try again".to_string(),
+        ))
     }
 
     fn lock_state(&self) -> MutexGuard<'_, State> {
