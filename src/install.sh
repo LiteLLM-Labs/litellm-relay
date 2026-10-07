@@ -303,7 +303,13 @@ install_path_entry() {
   esac
 
   mkdir -p "$(dirname "$profile_path")"
-  touch "$profile_path"
+  if ! touch "$profile_path" 2>/dev/null || [[ ! -w "$profile_path" ]]; then
+    PATH_SKIPPED_PROFILE="$profile_path"
+    echo "warning: $profile_path is not writable by $(id -un) ($(ls -ld "$profile_path" 2>/dev/null | awk '{print $1, $3 ":" $4}')), so PATH was left alone; add this line to your shell profile:" >&2
+    echo "  export PATH=\"$bin_dir:\$PATH\"" >&2
+    export PATH="$bin_dir:$PATH"
+    return 0
+  fi
   if ! grep -Fqs "$bin_dir" "$profile_path"; then
     {
       printf '\n# LiteLLM Relay\n'
@@ -312,6 +318,28 @@ install_path_entry() {
     PATH_UPDATED_PROFILE="$profile_path"
   fi
   export PATH="$bin_dir:$PATH"
+}
+
+print_path_note() {
+  if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
+    cat <<DONE
+
+I added $INSTALL_BIN_DIR to PATH in:
+  $PATH_UPDATED_PROFILE
+
+Open a new terminal before running relay, or run:
+  export PATH="$INSTALL_BIN_DIR:\$PATH"
+  relay
+DONE
+  elif [[ -n "$PATH_SKIPPED_PROFILE" ]]; then
+    cat <<DONE
+
+PATH was not updated: $PATH_SKIPPED_PROFILE is not writable by $(id -un).
+Add this line to it, or run relay with:
+  export PATH="$INSTALL_BIN_DIR:\$PATH"
+  relay
+DONE
+  fi
 }
 
 stop_legacy_python_relay() {
@@ -468,6 +496,7 @@ fi
 
 INSTALL_BIN_DIR="$(choose_bin_dir)"
 PATH_UPDATED_PROFILE=""
+PATH_SKIPPED_PROFILE=""
 mkdir -p "$INSTALL_BIN_DIR"
 ln -sf "$RELAY_HOME/bin/litellm-relay" "$INSTALL_BIN_DIR/relay"
 ln -sf "$RELAY_HOME/bin/litellm-relay" "$INSTALL_BIN_DIR/litellm-relay"
@@ -535,17 +564,7 @@ Start the interactive setup:
 Setup wires your AI tools and keeps Relay running in the background as the
 ai.litellm.relay LaunchAgent, which the tools ask for their credential.
 DONE
-  if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
-    cat <<DONE
-
-I added $INSTALL_BIN_DIR to PATH in:
-  $PATH_UPDATED_PROFILE
-
-Open a new terminal before running relay, or run:
-  export PATH="$INSTALL_BIN_DIR:\$PATH"
-  relay
-DONE
-  fi
+  print_path_note
   exit 0
 fi
 
@@ -729,14 +748,4 @@ To verify interception without changing system settings:
 
 Gateway auth and Relay settings are saved in $RELAY_HOME/config.yaml.
 DONE
-if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
-  cat <<DONE
-
-I added $INSTALL_BIN_DIR to PATH in:
-  $PATH_UPDATED_PROFILE
-
-Open a new terminal before running relay, or run:
-  export PATH="$INSTALL_BIN_DIR:\$PATH"
-  relay
-DONE
-fi
+print_path_note
