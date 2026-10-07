@@ -4,7 +4,7 @@ Relay onboards Claude Code onto your LiteLLM AI Gateway with zero manual setup. 
 
 ## How it works
 
-An admin enables JWT auth on the Gateway once, and from then on onboarding a device is a single `relay onboard` call. The MDM package (Jamf/Intune) installs Claude Code from your internal registry (npm/Homebrew via JFrog) alongside Relay, then runs `relay onboard`, which writes `~/.claude/settings.json` so Claude Code points at the Gateway and pulls its bearer token from Relay's token helper
+An admin enables JWT auth on the Gateway once, and from then on onboarding a device is a single `relay onboard` call. The MDM package (Jamf/Intune) installs Claude Code from your internal registry (the native build from `claude.ai/install.sh`, Homebrew, or an npm release from 2.1.120 on, which ships that binary; on macOS an older npm release that still runs `cli.js` under `node` is refused at onboard, since the Relay daemon only answers Anthropic-signed processes) alongside Relay, then runs `relay onboard`, which writes `~/.claude/settings.json` so Claude Code points at the Gateway and pulls its bearer token from Relay's token helper
 
 When the developer runs `claude`, Relay signs them in through the corporate IdP on first use (OIDC authorization code with PKCE, so the app registration needs no client secret) and hands Claude Code the short-lived ID token. Relay keeps that session alive with the refresh token, so the browser opens once per device, not once per token lifetime. The Gateway validates the token, maps it to the developer's virtual key, enforces budget and limits, logs spend, and forwards upstream. No provider key ever touches the device, and offboarding is removing the identity from the SSO group, after which its tokens stop validating
 

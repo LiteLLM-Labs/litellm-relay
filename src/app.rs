@@ -1,15 +1,21 @@
-use std::io::IsTerminal;
+use std::{io::IsTerminal, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 use crate::{
     ai_tools::{
-        autoconfigure, detect::AiTool, onboard, onboard_codex, onboard_desktop, print_codex_token,
-        print_token, AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
+        autoconfigure,
+        credential::{
+            daemon_answers, run_credential, run_sign_in, run_sign_out, Host, LAUNCH_AGENT_LABEL,
+        },
+        detect::AiTool,
+        launch_agent::{host_plist, runs_as_agent, DaemonHost, Launchd},
+        onboard, onboard_codex, onboard_desktop, print_codex_token, print_token,
+        AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
     cert::ensure_ca,
-    config::{IdpOverrides, RelayConfig},
+    config::{load_settings, IdpOverrides, RelayConfig, RelaySettings},
     pac::build_pac,
     proxy::RelayProxy,
     setup::run_setup,
@@ -21,7 +27,29 @@ use crate::{
 #[command(about = "Local LiteLLM Gateway relay for AI app traffic")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<CommandKind>,
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Daemon(Box<CommandKind>),
+    #[command(flatten)]
+    Helper(HelperCommand),
+}
+
+/// Commands that talk to the running daemon over the broker socket. They
+/// never read the Relay config, so a client can run them with nothing but
+/// the executable path.
+#[derive(Subcommand)]
+enum HelperCommand {
+    /// Print the Gateway bearer for the calling client (used by Claude Code
+    /// and Codex as their credential helper).
+    Credential,
+    /// Sign in to the IdP through the browser and keep the session in the daemon.
+    SignIn,
+    /// Forget the daemon's IdP session and delete its Gateway key.
+    SignOut,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -58,6 +86,8 @@ enum CommandKind {
     Serve,
     /// Print the PAC file served by Relay.
     Pac,
+    /// Print the macOS LaunchAgent plist that keeps `relay serve` running.
+    LaunchAgent,
     /// Create the local CA and print its path.
     CaPath,
     /// Configure Gateway URL and API key for Relay ingest.
@@ -150,30 +180,77 @@ enum CommandKind {
     CodexToken,
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
-        None => run_interactive_default().await,
-        Some(command) => run_command(command).await,
+        None => run_interactive_default().await.map(|()| ExitCode::SUCCESS),
+        Some(Command::Daemon(command)) => run_command(*command).await.map(|()| ExitCode::SUCCESS),
+        Some(Command::Helper(HelperCommand::Credential)) => Ok(run_credential()),
+        Some(Command::Helper(HelperCommand::SignIn)) => Ok(run_sign_in()),
+        Some(Command::Helper(HelperCommand::SignOut)) => Ok(run_sign_out()),
     }
 }
 
 async fn run_interactive_default() -> Result<()> {
-    let mut config = RelayConfig::load()?;
-    if config.gateway_api_key.is_none() {
+    let mut settings = load_settings()?;
+    if settings.gateway.api_key.is_none() {
         println!("LiteLLM Relay is not set up yet. Starting setup.");
         run_setup(None, None).await?;
-        config = RelayConfig::load()?;
+        settings = load_settings()?;
     }
-    RelayProxy::new(config).serve_forever().await
+    if another_daemon_answers(Host::current(), || {
+        daemon_answers(&crate::broker::socket_path())
+    }) {
+        let config = settings.to_config();
+        println!(
+            "LiteLLM Relay is already running in the background (dashboard: http://{}:{}/). \
+             To watch traffic in this terminal instead, stop it first: \
+             launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL}",
+            config.host, config.port
+        );
+        return Ok(());
+    }
+    serve(settings).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeRefusal {
+    DaemonAnswers,
+    AgentLoaded,
+}
+
+fn another_daemon_answers(host: Host, answers: impl FnOnce() -> bool) -> bool {
+    host == Host::MacOs && answers()
+}
+
+fn serve_refusal(
+    host: Host,
+    this_process_is_the_agent: bool,
+    answers: impl FnOnce() -> bool,
+    agent_loaded: impl FnOnce() -> bool,
+) -> Option<ServeRefusal> {
+    if host != Host::MacOs {
+        return None;
+    }
+    if answers() {
+        return Some(ServeRefusal::DaemonAnswers);
+    }
+    if !this_process_is_the_agent && agent_loaded() {
+        return Some(ServeRefusal::AgentLoaded);
+    }
+    None
 }
 
 async fn run_command(command: CommandKind) -> Result<()> {
     let config = RelayConfig::load()?;
     match command {
-        CommandKind::Serve => RelayProxy::new(config).serve_forever().await,
+        CommandKind::Serve => serve(load_settings()?).await,
         CommandKind::Pac => {
             print!("{}", build_pac(&config));
+            Ok(())
+        }
+        CommandKind::LaunchAgent => {
+            print!("{}", host_plist()?);
             Ok(())
         }
         CommandKind::CaPath => {
@@ -282,13 +359,116 @@ fn parse_only(values: &[String]) -> Result<Vec<AiTool>> {
         .collect()
 }
 
+/// Runs the proxy together with the credential broker: the broker answers on
+/// its own Unix socket, extends its Gateway key on a timer, and deletes that
+/// key when the daemon is told to stop.
+#[cfg(unix)]
+async fn serve(settings: RelaySettings) -> Result<()> {
+    use std::sync::Arc;
+
+    use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
+
+    let path = socket_path();
+    let refusal = serve_refusal(
+        Host::current(),
+        runs_as_agent(),
+        || daemon_answers(&path),
+        || Launchd.agent_loaded(),
+    );
+    match refusal {
+        Some(ServeRefusal::DaemonAnswers) => anyhow::bail!(
+            "Relay is already running: a daemon answers on {}; stop it before starting another \
+             (launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL} stops the LaunchAgent)",
+            path.display()
+        ),
+        Some(ServeRefusal::AgentLoaded) => anyhow::bail!(
+            "Relay is installed as the {LAUNCH_AGENT_LABEL} LaunchAgent, which launchd keeps \
+             running; stop it before serving from a terminal \
+             (launchctl bootout gui/$(id -u)/{LAUNCH_AGENT_LABEL})"
+        ),
+        None => {}
+    }
+    let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
+    let proxy = RelayProxy::new(settings.to_config()).with_broker(Arc::clone(&broker));
+    let listener = socket::bind(&path)?;
+    eprintln!("broker: listening on {}", path.display());
+    let socket_task = tokio::spawn(socket::serve(
+        Arc::clone(&broker),
+        listener,
+        socket::daemon_uid(),
+    ));
+    let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
+
+    let outcome = tokio::select! {
+        served = proxy.serve_forever() => served,
+        joined = socket_task => match joined {
+            Ok(served) => served,
+            Err(error) => Err(anyhow::anyhow!("broker socket task stopped: {error}")),
+        },
+        () = shutdown_signal() => {
+            eprintln!("broker: stopping");
+            Ok(())
+        }
+    };
+    ticker.abort();
+    tokio::task::spawn_blocking(move || broker.shutdown()).await?;
+    outcome
+}
+
+#[cfg(not(unix))]
+async fn serve(settings: RelaySettings) -> Result<()> {
+    RelayProxy::new(settings.to_config()).serve_forever().await
+}
+
+#[cfg(unix)]
+async fn tick_forever(broker: std::sync::Arc<crate::broker::Broker>, every: std::time::Duration) {
+    let mut interval = tokio::time::interval(every);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let broker = std::sync::Arc::clone(&broker);
+        if tokio::task::spawn_blocking(move || broker.tick())
+            .await
+            .is_err()
+        {
+            eprintln!("broker: the renewal tick panicked; the next tick runs anyway");
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let terminate = signal(SignalKind::terminate());
+    match terminate {
+        Ok(mut terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        Err(error) => {
+            eprintln!("broker: cannot listen for SIGTERM ({error}); only Ctrl-C deletes the key");
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn overrides_of(args: &[&str]) -> IdpOverrides {
+    fn daemon_command(args: &[&str]) -> CommandKind {
         let cli = Cli::try_parse_from(args).expect("the command line must parse");
         match cli.command.expect("a subcommand") {
+            Command::Daemon(command) => *command,
+            Command::Helper(_) => panic!("expected a daemon command"),
+        }
+    }
+
+    fn overrides_of(args: &[&str]) -> IdpOverrides {
+        match daemon_command(args) {
             CommandKind::Onboard { oidc, .. }
             | CommandKind::OnboardCodex { oidc, .. }
             | CommandKind::Autoconfigure { oidc, .. } => oidc.into(),
@@ -300,6 +480,7 @@ mod tests {
         match command {
             CommandKind::Serve => "serve",
             CommandKind::Pac => "pac",
+            CommandKind::LaunchAgent => "launch-agent",
             CommandKind::CaPath => "ca-path",
             CommandKind::Setup { .. } => "setup",
             CommandKind::Autoconfigure { .. } => "autoconfigure",
@@ -309,6 +490,51 @@ mod tests {
             CommandKind::OnboardCodex { .. } => "onboard-codex",
             CommandKind::CodexToken => "codex-token",
         }
+    }
+
+    #[test]
+    fn should_parse_the_helper_commands_next_to_the_daemon_ones() {
+        for (args, expected) in [
+            (["relay", "credential"], "credential"),
+            (["relay", "sign-in"], "sign-in"),
+            (["relay", "sign-out"], "sign-out"),
+        ] {
+            let cli = Cli::try_parse_from(args).expect("the command line must parse");
+            let parsed = match cli.command.expect("a subcommand") {
+                Command::Helper(HelperCommand::Credential) => "credential",
+                Command::Helper(HelperCommand::SignIn) => "sign-in",
+                Command::Helper(HelperCommand::SignOut) => "sign-out",
+                Command::Daemon(other) => describe(&other),
+            };
+            assert_eq!(parsed, expected);
+        }
+        assert_eq!(describe(&daemon_command(&["relay", "serve"])), "serve");
+        assert_eq!(
+            describe(&daemon_command(&["relay", "claude-token"])),
+            "claude-token"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_second_daemon_only_on_macos_and_only_while_one_answers() {
+        assert!(another_daemon_answers(Host::MacOs, || true));
+        assert!(!another_daemon_answers(Host::MacOs, || false));
+        assert!(!another_daemon_answers(Host::Other, || true));
+        assert_eq!(
+            serve_refusal(Host::MacOs, false, || true, || true),
+            Some(ServeRefusal::DaemonAnswers)
+        );
+        assert_eq!(
+            serve_refusal(Host::MacOs, false, || false, || true),
+            Some(ServeRefusal::AgentLoaded)
+        );
+        assert_eq!(serve_refusal(Host::MacOs, true, || false, || true), None);
+        assert_eq!(serve_refusal(Host::MacOs, false, || false, || false), None);
+        assert_eq!(serve_refusal(Host::Other, false, || true, || true), None);
+        assert_eq!(
+            describe(&daemon_command(&["relay", "launch-agent"])),
+            "launch-agent"
+        );
     }
 
     #[test]
@@ -344,9 +570,7 @@ mod tests {
 
     #[test]
     fn should_accept_a_team_on_the_claude_desktop_onboard() {
-        let cli = Cli::try_parse_from(["relay", "onboard-claude-desktop", "--team", "eng"])
-            .expect("the command line must parse");
-        match cli.command.expect("a subcommand") {
+        match daemon_command(&["relay", "onboard-claude-desktop", "--team", "eng"]) {
             CommandKind::OnboardClaudeDesktop { team, .. } => {
                 assert_eq!(team.as_deref(), Some("eng"))
             }

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     apps::{classify_app_attribution, known_apps, AppAttribution},
+    broker::Broker,
     cert::{client_tls_config, ensure_ca, server_tls_config},
     config::{is_ai_host, is_notion_host, RelayConfig},
     events::{append_event, clear_events, read_events},
@@ -38,13 +39,27 @@ const DASHBOARD_FAVICON: &[u8] =
 pub struct RelayProxy {
     config: Arc<RelayConfig>,
     gateway: GatewayClient,
+    broker: Option<Arc<Broker>>,
 }
 
 impl RelayProxy {
     pub fn new(config: RelayConfig) -> Self {
         let config = Arc::new(config);
         let gateway = GatewayClient::new(Arc::clone(&config));
-        Self { config, gateway }
+        Self {
+            config,
+            gateway,
+            broker: None,
+        }
+    }
+
+    /// Reports the credential broker's state on `/api/status`; the broker
+    /// itself answers only over its own socket, never on this port.
+    pub fn with_broker(self, broker: Arc<Broker>) -> Self {
+        Self {
+            broker: Some(broker),
+            ..self
+        }
     }
 
     pub async fn serve_forever(self) -> Result<()> {
@@ -646,6 +661,7 @@ impl RelayProxy {
             },
             "runtime": "rust",
             "credential": credential,
+            "broker": self.broker.as_ref().map(|broker| broker.status()),
         }))
     }
 
@@ -752,7 +768,13 @@ fn event_with_attribution(mut event: Value, attribution: &AppAttribution) -> Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RelaySettings;
+    use crate::{
+        broker::{
+            test_support::{static_key_settings, Rig},
+            Context, Request,
+        },
+        config::RelaySettings,
+    };
 
     #[test]
     fn should_add_credential_to_status_payload_and_keep_every_existing_key() {
@@ -777,6 +799,7 @@ mod tests {
             [
                 "ai_domains",
                 "attribution",
+                "broker",
                 "capture_payloads",
                 "credential",
                 "events_loaded",
@@ -791,5 +814,36 @@ mod tests {
             ]
         );
         assert_eq!(payload["credential"], json!({"state": "rejected"}));
+        assert_eq!(payload["broker"], Value::Null);
+    }
+
+    #[test]
+    fn should_report_the_broker_state_on_status_without_any_token() {
+        let settings = static_key_settings("sk-status-secret");
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let rig = Rig::new(settings);
+        let proxy = RelayProxy::new(config).with_broker(Arc::clone(&rig.broker));
+
+        let before = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("status payload should build");
+        assert_eq!(before["broker"]["signed_in"], json!(true));
+        assert_eq!(before["broker"]["source"], Value::Null);
+
+        rig.broker.handle(
+            Request::Credential {
+                context: Context::Interactive,
+            },
+            rig.peer(),
+        );
+        let after = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("status payload should build");
+
+        assert_eq!(after["broker"]["source"], json!("static_key"));
+        assert_eq!(after["broker"]["refused_callers"], json!(0));
+        assert!(!after.to_string().contains("sk-status-secret"));
     }
 }

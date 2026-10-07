@@ -114,6 +114,117 @@ PAC profile so macOS stops using Auto Proxy:
 /usr/local/litellm-relay/uninstall.sh --unset-system-proxy "Wi-Fi" --remove-data
 ```
 
+## Credential broker
+
+On macOS the Relay daemon (`relay serve`, the `ai.litellm.relay` LaunchAgent)
+holds the Gateway credential for Claude Code and Codex. Both are wired with
+`relay credential` as their credential helper, which asks the daemon over the
+Unix socket `~/.litellm-relay/broker.sock` (directory 0700, socket 0600) and
+prints the bearer it gets back. The proxy port never serves credentials, and no
+key, token, or session is written into Claude Code's settings file or Codex's
+`config.toml`: the developer's IdP session and the Gateway key live in the
+daemon's memory and are gone when it stops. Claude Desktop is not on the broker
+yet: `relay onboard-claude-desktop` keeps writing the static key or the in-app
+OIDC settings into the managed file described in
+[claude-desktop.md](claude-desktop.md)
+
+Every command that writes the `relay credential` helper into a tool (`relay
+onboard`, `relay onboard-codex`, `relay autoconfigure`, and the setup wizard)
+makes sure that daemon is running before
+it returns. When something already answers on the socket, a foreground `relay
+serve` or an agent your MDM loaded, the command changes nothing. Otherwise it
+writes `~/Library/LaunchAgents/ai.litellm.relay.plist` (the plist `relay
+launch-agent` prints, which `install.sh --background` installs too), bootstraps
+it into the user's `gui/<uid>` domain, and waits up to 15 seconds for the socket
+to answer. When the label is already loaded but nothing answers within 3
+seconds, it restarts that agent with `launchctl kickstart -k` and leaves its
+plist alone. A start
+that fails prints one line and the command exits non-zero. The tool file it
+wrote keeps pointing at the helper, which refuses until a daemon answers, and
+Relay never falls back to a key or token on disk
+
+The agent pins `HOME` to the home directory the command ran with, the same way
+the Claude Desktop LaunchDaemon does, so the daemon reads the `~/.litellm-relay`
+the tool files point at even when the command ran through `sudo` or with a
+different `HOME`. The label exists once per login session, so a second Relay
+home cannot get its own agent while another one holds `ai.litellm.relay`.
+`relay credential` never starts the agent: launchd keeps it alive and starts it
+at login, and a daemon someone stopped on purpose stays stopped until an
+onboard command (a scheduled auto-configure pass included) or `relay serve` runs. While the agent is loaded or a daemon
+answers, a second `relay serve` exits with an error (so a terminal never races
+the agent for the socket), and while a daemon answers `relay` prints where the
+dashboard is instead of opening the trace view. To stop the agent run `launchctl bootout
+gui/$(id -u)/ai.litellm.relay`, and delete the plist to keep it from loading at
+the next login. On an `install.sh --background` install the
+`ai.litellm.relay.autoconfigure` agent runs those onboard commands every
+`RELAY_AUTOCONFIGURE_INTERVAL` seconds (3600 by default), so it brings the
+daemon back on its next pass unless you boot it out as well (`launchctl bootout
+gui/$(id -u)/ai.litellm.relay.autoconfigure`) and delete its plist
+
+Before answering, the daemon checks who is asking. It reads the connecting
+process's uid (it has to match the daemon's), its pid, and its audit token, and
+walks the peer and up to four of its ancestors, validating each against the
+Apple code signature requirement of an allowed client: the signing identifier
+plus the Team ID on the leaf certificate. The defaults are Claude Desktop
+(`com.anthropic.claudefordesktop` and its `.helper`, team `Q6L2SF6YDW`), Claude
+Code (`com.anthropic.claude-code`, team `Q6L2SF6YDW`), and Codex (`codex`, team
+`2DC432GLL2`). A shell, a script, or any other process that runs
+`relay credential` gets `caller_refused` and the chain it was refused on, and
+the refusal is counted in `/api/status`. `credential.allowed_callers` in
+`config.yaml` replaces the defaults (see `mdm/config.yaml.example`), so list
+every client you keep, each with its `team_id`: an identifier alone is
+satisfied by any ad hoc signature (`codesign -s - -i <identifier>` on any
+binary), so the daemon ignores an entry without a team and says so on stderr.
+npm releases of Claude Code up to 2.1.110 ran `cli.js` as a script under
+`node`, which carries the Node.js Foundation's signature and not Anthropic's,
+so the daemon refuses that chain; `relay onboard` refuses to wire a `claude`
+that is a node script before writing anything and names the native installer
+(`curl -fsSL https://claude.ai/install.sh | bash`). It looks for `claude` on
+PATH and then in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and
+nvm's `versions/node/*/bin` (newest version first), so the autoconfigure agent's bare PATH does not
+skip the check. Later npm releases
+hard-link Anthropic's native binary into the package, and the daemon accepts
+that build like the installer's
+
+With an IdP configured, the first interactive request runs the browser sign-in
+from the daemon, exchanges the ID token for a Gateway session credential the
+way the older helpers did, and mints a Gateway key scoped to the device's team
+(`claude.team`, or `codex.team` when no Claude Code team is set; one key serves
+both clients, so give them the same team or expect spend under the Claude Code
+one) through `POST /key/generate` with a 60 minute duration and the alias
+`relay-<hostname>-<timestamp>`. The daemon extends that key at its half-life
+with `POST /key/update`, replaces an expired one on the next request, and
+deletes it on `relay sign-out` and when the daemon stops. Minting needs the
+team to allow `/key/generate`, `/key/update`, and `/key/delete` for its members
+(`POST /team/permissions_update` on the Gateway); while it does not, the daemon
+serves the session credential itself and prints the fix once on stderr. A 401
+on a mint or an extension means the Gateway no longer accepts the session
+credential (its sealing key rotated), so the daemon exchanges the IdP session
+again and mints anew, without a browser while the IdP session is still valid.
+Without an IdP, the daemon serves `gateway.api_key` from `config.yaml` to the
+same allowed clients, so a static-key rollout gets the caller check too. The
+daemon re-reads `config.yaml` on the next request or tick after it changes, so
+a re-run of `relay autoconfigure` or `relay onboard` needs no daemon restart,
+and a changed IdP or Gateway signs the daemon out while a changed team only
+re-mints the key. A changed `credential.allowed_callers` list applies from the
+next request and leaves the key in place, so a client taken off the list is
+refused the next time it runs the helper
+
+A helper run with `CLAUDE_HELPER_CONTEXT=background` or `scheduled-task` (what
+Claude Desktop sets when nobody is at the keyboard) never opens a browser and
+answers `signed_out` until a developer signs in interactively, through the
+client or `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
+sign-in and `relay sign-out` deletes the key and forgets the session. The
+`broker` block of `/api/status` shows `signed_in`, `user_id`, `team`,
+`key_expires_at`, `key_extended_at`, the `source` of the last answer
+(`minted_key`, `session_credential`, `identity_token`, or `static_key`), and
+`refused_callers`, never a token
+
+Linux hosts have no code-signature check, so there the tools keep the on-disk
+`claude-token` and `codex-token` helpers and a static key goes into the tool's
+config as before. Those commands and their caches under `~/.litellm-relay`
+still exist on macOS too for now and are removed in a follow-up
+
 ## Notes
 
 macOS has a single Global HTTP Proxy payload per device. Customers already using

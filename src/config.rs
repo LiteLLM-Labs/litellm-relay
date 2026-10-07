@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
-use crate::system::home_dir;
+use crate::{broker::caller::AllowedCaller, system::home_dir};
 
 #[derive(Clone, Debug)]
 pub struct RelayConfig {
@@ -46,6 +46,7 @@ pub struct RelaySettings {
     pub idp: IdpSection,
     pub claude: ClaudeSection,
     pub codex: CodexSection,
+    pub credential: CredentialSection,
 }
 
 impl RelaySettings {
@@ -191,7 +192,7 @@ impl Default for TimeoutSection {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IdpSection {
     pub issuer: String,
@@ -295,6 +296,15 @@ impl Default for CodexSection {
             team: None,
         }
     }
+}
+
+/// The credential broker's managed settings. `allowed_callers` replaces the
+/// built-in list of client signatures the broker serves when present.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CredentialSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_callers: Option<Vec<AllowedCaller>>,
 }
 
 pub fn relay_home() -> PathBuf {

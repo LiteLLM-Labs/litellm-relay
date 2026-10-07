@@ -531,6 +531,7 @@ fn managed_write_error(error: io::Error, layout: &ManagedLayout, path: &Path) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_tools::launch_agent::test_support::HOME_LOCK;
 
     fn settings_with(url: &str, key: Option<&str>, model: &str) -> RelaySettings {
         let mut settings = RelaySettings::default();
@@ -1284,8 +1285,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
         match value {
             Some(value) => env::set_var(name, value),
@@ -1295,7 +1294,9 @@ mod tests {
 
     #[test]
     fn should_reuse_the_saved_sso_on_an_unattended_rerun() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("sso-reuse-home");
         let managed = scratch_dir("sso-reuse").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1343,7 +1344,9 @@ mod tests {
 
     #[test]
     fn should_keep_the_setup_enrollment_timestamps_on_an_unattended_rerun() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("keep-expiry-home");
         let managed = scratch_dir("keep-expiry").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1390,7 +1393,9 @@ mod tests {
 
     #[test]
     fn should_save_the_team_the_exchange_is_issued_for() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("team-home");
         let managed = scratch_dir("team").join("managed.plist");
         let old_home = env::var_os("HOME");
@@ -1428,7 +1433,9 @@ mod tests {
 
     #[test]
     fn should_switch_back_to_a_static_key_and_clear_the_saved_sso() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = scratch_dir("sso-clear-home");
         let managed = scratch_dir("sso-clear").join("managed.plist");
         let old_home = env::var_os("HOME");
