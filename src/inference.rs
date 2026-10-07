@@ -1,3 +1,4 @@
+use percent_encoding::percent_decode_str;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
@@ -41,8 +42,24 @@ pub fn gateway_client() -> reqwest::Client {
 }
 
 pub fn is_inference_target(target: &str) -> bool {
-    is_inference_path(target.split('?').next().unwrap_or(target))
+    let raw_path = target.split('?').next().unwrap_or(target);
+    let decoded_path = fully_decoded(raw_path);
+    is_inference_path(raw_path)
         && is_inference_path(&parse_route(target).path)
+        && is_inference_path(&decoded_path)
+        && !decoded_path.contains('\\')
+        && !decoded_path
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+}
+
+fn fully_decoded(path: &str) -> String {
+    let decoded = percent_decode_str(path).decode_utf8_lossy().into_owned();
+    if decoded == path {
+        decoded
+    } else {
+        fully_decoded(&decoded)
+    }
 }
 
 fn is_inference_path(path: &str) -> bool {

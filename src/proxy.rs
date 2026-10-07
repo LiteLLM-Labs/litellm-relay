@@ -1198,6 +1198,11 @@ mod tests {
         for target in [
             "/v1/../key/info",
             "/v1/%2e%2e/key/info",
+            "/v1/%2e%2e%2fkey/info",
+            "/v1/..%2Fkey/info",
+            "/v1/%252e%252e/key/info",
+            "/v1/..\\key/info",
+            "/v1/./key/info",
             "/key/info",
             "/v11/models",
             "/mcp",
@@ -1214,7 +1219,13 @@ mod tests {
             );
         }
         assert!(upstream.requests().is_empty());
-        for target in ["/v1", "/v1?x=1", "/v1/messages?beta=true", "/v1/responses"] {
+        for target in [
+            "/v1",
+            "/v1?x=1",
+            "/v1/messages?beta=true",
+            "/v1/responses",
+            "/v1/models/claude%2Dsonnet",
+        ] {
             assert!(is_inference_target(target), "{target}");
         }
     }
