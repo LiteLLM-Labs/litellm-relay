@@ -500,8 +500,9 @@ mod tests {
         assert_eq!(
             unreachable_daemon(&Request::SignIn, path, transport::Failure::NoDaemon),
             Outcome::Failed(format!(
-                "relay credential: the Relay daemon is not running (no socket at {}); start it \
-                 with `relay serve` or load the {LAUNCH_AGENT_LABEL} LaunchAgent",
+                "relay credential: the Relay daemon is not running (no socket at {}); run `relay \
+                 autoconfigure` or your onboard command again to start the {LAUNCH_AGENT_LABEL} \
+                 LaunchAgent, or run `relay serve` in a terminal",
                 path.display()
             ))
         );
