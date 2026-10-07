@@ -44,8 +44,8 @@ enum Command {
 /// the executable path.
 #[derive(Subcommand)]
 enum HelperCommand {
-    /// Print the Gateway bearer for the calling client (used by Claude Code
-    /// and Codex as their credential helper).
+    /// Print the Gateway bearer for the calling client (Claude Desktop's
+    /// credential helper; Claude Code and Codex pass `--proxy`).
     Credential {
         /// Print the token the local inference proxy on 127.0.0.1 accepts
         /// instead of the Gateway bearer, which then stays in the daemon.
