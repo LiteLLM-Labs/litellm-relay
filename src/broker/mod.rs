@@ -41,7 +41,7 @@ use crate::{
     config::{config_path, load_settings, relay_home, IdpSection, RelaySettings},
     system::hostname,
 };
-use caller::{effective_callers, Peer, Verdict};
+use caller::{effective_callers, unanchored_callers, Peer, Verdict};
 use key::{
     ExtendOutcome, HttpKeyServer, KeyServer, MintOutcome, MintRefusal, MintRequest,
     KEY_HALF_LIFE_SECONDS, KEY_LIFETIME_SECONDS,
@@ -124,7 +124,7 @@ impl CallerCheck for UnsupportedCallerCheck {
     }
 }
 
-fn announce_callers(callers: &[caller::AllowedCaller]) {
+fn announce_callers(callers: &[caller::AllowedCaller], unanchored: &[caller::AllowedCaller]) {
     eprintln!(
         "broker: serving credentials to [{}]",
         callers
@@ -133,6 +133,12 @@ fn announce_callers(callers: &[caller::AllowedCaller]) {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    for ignored in unanchored {
+        eprintln!(
+            "broker: allowed caller {} is ignored: a managed entry needs team_id, since an identifier alone is satisfied by any ad hoc signature",
+            ignored.describe()
+        );
+    }
     for unusable in callers
         .iter()
         .filter(|caller| caller.requirement().is_none())
@@ -332,16 +338,19 @@ struct Target {
     gateway_url: String,
     team: Option<String>,
     callers: Vec<caller::AllowedCaller>,
+    unanchored: Vec<caller::AllowedCaller>,
 }
 
 impl Target {
     fn from_settings(settings: &RelaySettings, version: Option<SettingsVersion>) -> Self {
+        let managed = settings.credential.allowed_callers.as_deref();
         Self {
             version,
             mode: Mode::from_settings(settings),
             gateway_url: settings.gateway.url.trim_end_matches('/').to_string(),
             team: managed_team(settings),
-            callers: effective_callers(settings.credential.allowed_callers.as_deref()),
+            callers: effective_callers(managed),
+            unanchored: unanchored_callers(managed),
         }
     }
 }
@@ -413,7 +422,7 @@ impl Broker {
     pub fn new(settings: &RelaySettings, deps: Dependencies) -> Self {
         let version = deps.settings.version();
         let target = Target::from_settings(settings, version);
-        announce_callers(&target.callers);
+        announce_callers(&target.callers, &target.unanchored);
         Self {
             target: Mutex::new(target),
             deps,
@@ -564,8 +573,8 @@ impl Broker {
             );
             self.forget(&current.gateway_url, false);
         }
-        if current.callers != next.callers {
-            announce_callers(&next.callers);
+        if current.callers != next.callers || current.unanchored != next.unanchored {
+            announce_callers(&next.callers, &next.unanchored);
         }
         *self.lock_target() = next;
     }

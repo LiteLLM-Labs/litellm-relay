@@ -150,12 +150,16 @@ different `HOME`. The label exists once per login session, so a second Relay
 home cannot get its own agent while another one holds `ai.litellm.relay`.
 `relay credential` never starts the agent: launchd keeps it alive and starts it
 at login, and a daemon someone stopped on purpose stays stopped until an
-onboard command or `relay serve` runs. While the agent is loaded or a daemon
+onboard command (a scheduled auto-configure pass included) or `relay serve` runs. While the agent is loaded or a daemon
 answers, a second `relay serve` exits with an error (so a terminal never races
 the agent for the socket), and while a daemon answers `relay` prints where the
 dashboard is instead of opening the trace view. To stop the agent run `launchctl bootout
 gui/$(id -u)/ai.litellm.relay`, and delete the plist to keep it from loading at
-the next login
+the next login. On an `install.sh --background` install the
+`ai.litellm.relay.autoconfigure` agent runs those onboard commands every
+`RELAY_AUTOCONFIGURE_INTERVAL` seconds (3600 by default), so it brings the
+daemon back on its next pass unless you boot it out as well (`launchctl bootout
+gui/$(id -u)/ai.litellm.relay.autoconfigure`) and delete its plist
 
 Before answering, the daemon checks who is asking. It reads the connecting
 process's uid (it has to match the daemon's), its pid, and its audit token, and
@@ -168,12 +172,21 @@ Code (`com.anthropic.claude-code`, team `Q6L2SF6YDW`), and Codex (`codex`, team
 `relay credential` gets `caller_refused` and the chain it was refused on, and
 the refusal is counted in `/api/status`. `credential.allowed_callers` in
 `config.yaml` replaces the defaults (see `mdm/config.yaml.example`), so list
-every client you keep
+every client you keep, each with its `team_id`: an identifier alone is
+satisfied by any ad hoc signature (`codesign -s - -i <identifier>` on any
+binary), so the daemon ignores an entry without a team and says so on stderr.
+Claude Code's npm package runs as a script under `node`, which carries the
+Node.js Foundation's signature and not Anthropic's, so the daemon refuses it;
+`relay onboard` refuses to wire that install before writing anything and names
+the native installer (`curl -fsSL https://claude.ai/install.sh | bash`), the
+only Claude Code build that works with the broker
 
 With an IdP configured, the first interactive request runs the browser sign-in
 from the daemon, exchanges the ID token for a Gateway session credential the
 way the older helpers did, and mints a Gateway key scoped to the device's team
-through `POST /key/generate` with a 60 minute duration and the alias
+(`claude.team`, or `codex.team` when no Claude Code team is set; one key serves
+both clients, so give them the same team or expect spend under the Claude Code
+one) through `POST /key/generate` with a 60 minute duration and the alias
 `relay-<hostname>-<timestamp>`. The daemon extends that key at its half-life
 with `POST /key/update`, replaces an expired one on the next request, and
 deletes it on `relay sign-out` and when the daemon stops. Minting needs the

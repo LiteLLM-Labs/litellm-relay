@@ -68,12 +68,26 @@ pub fn default_callers() -> Vec<AllowedCaller> {
 }
 
 /// The managed list replaces the built-in one when present, so an admin can
-/// both add a client and drop a default.
+/// both add a client and drop a default. A managed entry without a team is
+/// left out, since an identifier alone is satisfied by any ad hoc signature.
 pub fn effective_callers(managed: Option<&[AllowedCaller]>) -> Vec<AllowedCaller> {
     match managed {
-        Some(callers) => callers.to_vec(),
+        Some(callers) => callers
+            .iter()
+            .filter(|caller| caller.team_id.is_some())
+            .cloned()
+            .collect(),
         None => default_callers(),
     }
+}
+
+pub fn unanchored_callers(managed: Option<&[AllowedCaller]>) -> Vec<AllowedCaller> {
+    managed
+        .unwrap_or_default()
+        .iter()
+        .filter(|caller| caller.team_id.is_none())
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,14 +419,29 @@ mod tests {
     }
 
     #[test]
-    fn should_match_an_entry_without_a_team_against_any_signer() {
-        let managed = vec![AllowedCaller::new("com.example.gateway-client", None)];
+    fn should_ignore_a_managed_entry_without_a_team() {
+        let managed = vec![
+            AllowedCaller::new("com.example.gateway-client", None),
+            AllowedCaller::new("com.anthropic.claude-code", Some(CLAUDE_TEAM)),
+        ];
+        let callers = effective_callers(Some(&managed));
+        assert_eq!(callers, vec![managed[1].clone()]);
+        assert_eq!(unanchored_callers(Some(&managed)), vec![managed[0].clone()]);
+        assert!(unanchored_callers(None).is_empty());
         let table = FakeProcessTable::default()
             .with(100, 1, "com.example.gateway-client", Some("WHOEVER0001"))
             .with(300, 100, "ai.litellm.relay", None);
         assert!(matches!(
+            walk(&table, &callers, peer(300)),
+            Verdict::Refused { .. }
+        ));
+        assert!(matches!(
             walk(&table, &managed, peer(300)),
             Verdict::Allowed { level: 1, .. }
+        ));
+        assert!(matches!(
+            walk(&relay_under_shell_under_claude(), &callers, peer(300)),
+            Verdict::Allowed { .. }
         ));
     }
 

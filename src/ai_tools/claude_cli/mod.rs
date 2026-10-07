@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    env, fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -64,10 +68,14 @@ pub struct OnboardParams {
 /// supplied (or configured with no IdP), it is written to `ANTHROPIC_AUTH_TOKEN`
 /// instead.
 pub fn onboard(params: OnboardParams) -> Result<()> {
-    onboard_with(params, &Launchd)
+    onboard_with(params, &Launchd, claude_on_path())
 }
 
-fn onboard_with(params: OnboardParams, daemon: &dyn DaemonHost) -> Result<()> {
+fn onboard_with(
+    params: OnboardParams,
+    daemon: &dyn DaemonHost,
+    claude_binary: Option<PathBuf>,
+) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
         settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
@@ -105,6 +113,9 @@ fn onboard_with(params: OnboardParams, daemon: &dyn DaemonHost) -> Result<()> {
         ),
     };
 
+    if let Credential::Broker { .. } = credential {
+        refuse_npm_claude_code(claude_binary.as_deref())?;
+    }
     let settings_path = write_claude_settings(&settings, &credential)?;
     save_settings(&settings)?;
     if let Credential::Broker { .. } = credential {
@@ -131,6 +142,46 @@ fn onboard_with(params: OnboardParams, daemon: &dyn DaemonHost) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn claude_on_path() -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join("claude"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The npm package runs Claude Code as a script under `node`, so no process in
+/// its chain carries Anthropic's signature and the daemon would refuse every
+/// credential call; only the native build gets wired to the broker.
+fn refuse_npm_claude_code(claude_binary: Option<&Path>) -> Result<()> {
+    let Some(script) = claude_binary.filter(|path| runs_under_node(path)) else {
+        return Ok(());
+    };
+    bail!(
+        "Claude Code at {} is the npm install, which runs as a script under node and carries no Anthropic code signature, so the Relay daemon would refuse its credential calls; install the native build (curl -fsSL https://claude.ai/install.sh | bash) and run this command again",
+        script.display()
+    )
+}
+
+fn runs_under_node(path: &Path) -> bool {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if resolved
+        .components()
+        .any(|part| part.as_os_str() == "node_modules")
+    {
+        return true;
+    }
+    let mut head = [0u8; 128];
+    let Ok(length) = fs::File::open(&resolved).and_then(|mut file| file.read(&mut head)) else {
+        return false;
+    };
+    let first_line = String::from_utf8_lossy(&head[..length]);
+    first_line.starts_with("#!")
+        && first_line
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("node"))
 }
 
 /// Prints the Gateway credential on stdout for Claude Code's `apiKeyHelper`.
@@ -431,7 +482,6 @@ mod tests {
     #[test]
     fn should_start_the_daemon_whenever_the_credential_helper_is_written() {
         use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
-        use std::env;
 
         let _guard = HOME_LOCK
             .lock()
@@ -449,11 +499,11 @@ mod tests {
         };
 
         let fresh = FakeHost::down();
-        let first = onboard_with(params(), &fresh);
+        let first = onboard_with(params(), &fresh, None);
         let running = FakeHost::answering();
-        let second = onboard_with(params(), &running);
+        let second = onboard_with(params(), &running, None);
         let broken = FakeHost::down().launchd_failing("denied");
-        let third = onboard_with(params(), &broken);
+        let third = onboard_with(params(), &broken, None);
 
         match old_home {
             Some(value) => env::set_var("HOME", value),
@@ -475,6 +525,81 @@ mod tests {
                 assert!(fresh.calls.borrow().is_empty());
                 assert!(running.calls.borrow().is_empty());
                 third.unwrap();
+            }
+        }
+    }
+    #[test]
+    fn should_tell_the_npm_claude_code_from_the_native_build() {
+        let root = env::temp_dir().join(format!("relay-cc-channel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cli = root.join("lib/node_modules/@anthropic-ai/claude-code/cli.js");
+        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        fs::write(&cli, "#!/usr/bin/env node\nconsole.log('claude')\n").unwrap();
+        let script = root.join("claude-script");
+        fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        let native = root.join("claude-native");
+        fs::write(&native, [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]).unwrap();
+        let wrapper = root.join("claude-wrapper");
+        fs::write(&wrapper, "#!/bin/sh\nexec /opt/claude/claude \"$@\"\n").unwrap();
+
+        assert!(runs_under_node(&cli));
+        assert!(runs_under_node(&script));
+        assert!(!runs_under_node(&native));
+        assert!(!runs_under_node(&wrapper));
+        assert!(!runs_under_node(&root.join("missing")));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn should_refuse_to_wire_an_npm_claude_code_to_the_broker() {
+        use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
+
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = env::temp_dir().join(format!("relay-cc-npm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let script = home.join("claude");
+        fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        let old_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let host = FakeHost::down();
+        let outcome = onboard_with(
+            OnboardParams {
+                gateway_url: Some("https://gw.corp".into()),
+                api_key: Some("sk-saved".into()),
+                quiet: true,
+                ..OnboardParams::default()
+            },
+            &host,
+            Some(script.clone()),
+        );
+        let settings_written = claude_settings_path().exists();
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).unwrap();
+        match Host::current() {
+            Host::MacOs => {
+                let error = outcome.unwrap_err().to_string();
+                assert!(error.contains("npm install"), "{error}");
+                assert!(error.contains(&script.display().to_string()), "{error}");
+                assert!(error.contains("claude.ai/install.sh"), "{error}");
+                assert!(
+                    !settings_written,
+                    "nothing is written for a client the daemon would refuse"
+                );
+                assert!(
+                    host.calls.borrow().is_empty(),
+                    "the daemon is not started either"
+                );
+            }
+            Host::Other => {
+                outcome.unwrap();
+                assert!(settings_written);
             }
         }
     }

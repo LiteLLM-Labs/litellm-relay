@@ -50,7 +50,9 @@ warning for Claude Desktop.
 On macOS Claude Code and Codex get their credential from the Relay daemon, so
 `relay onboard`, `relay onboard-codex`, the setup wizard, and each auto-configure
 pass also install and start the `ai.litellm.relay` LaunchAgent when no daemon is
-answering. A default install needs no `--background` for that; see
+answering. A default install needs no `--background` for that, and on a
+`--background` install the scheduled pass brings the daemon back after you stop
+it unless `ai.litellm.relay.autoconfigure` is stopped too; see
 [Credential broker](docs/mdm.md#credential-broker).
 
 You can still run detection on demand, and scope it with `--only`:
