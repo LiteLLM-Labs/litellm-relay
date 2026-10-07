@@ -314,6 +314,7 @@ impl McpService {
     }
 
     pub fn status(&self) -> Value {
+        self.adopt(self.broker.session_identity().as_ref());
         let state = self.lock_state();
         let Some(session) = state.session.as_ref() else {
             return json!({ "catalog_tools": Value::Null, "servers": {} });

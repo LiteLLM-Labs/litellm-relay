@@ -96,6 +96,7 @@ async fn should_fetch_the_catalog_on_sign_in_and_drop_it_with_the_activations_on
     tokio::task::spawn_blocking(move || broker.sign_out())
         .await
         .expect("sign out");
+    assert_eq!(service.status()["catalog_tools"], Value::Null);
     service.check_session().await;
     assert_eq!(service.status()["catalog_tools"], Value::Null);
     assert_eq!(upstream.lists().len(), 1);
