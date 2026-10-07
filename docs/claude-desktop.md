@@ -17,6 +17,8 @@ sudo relay onboard-claude-desktop \
 
 ## Relay-issued credential
 
+On macOS, where the Relay daemon runs, the command writes no key at all: the managed file names `relay credential` as Claude Desktop's credential helper (`inferenceCredentialKind` `helper-script`), the app runs it when it needs a bearer, and the daemon answers over its Unix socket with the developer's IdP sign-in exchanged for a Gateway credential, or with the enrolled key, after checking that the asking process is the signed Claude Desktop app. The command also installs and starts the `ai.litellm.relay` LaunchAgent when no daemon is answering. The bearer lives in the daemon's memory and in the app's, never in the managed file, and the key is gone when the daemon stops. Everything below about an exchanged key written into the file applies to Linux, where there is no daemon.
+
 When Relay is onboarded against an IdP (`relay onboard --oidc-issuer ... --oidc-client-id ...`), no credential flag is needed. Relay exchanges the developer's IdP sign-in for a Gateway credential at the Gateway's `/token` endpoint and writes it as the key Claude Desktop sends, so the Gateway attributes the app's traffic to the developer and their team without an admin-issued key.
 
 ```bash

@@ -181,6 +181,7 @@ impl Context {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Credential { context: Context },
+    ProxyCredential { context: Context },
     SignIn,
     SignOut,
     Status,
@@ -192,6 +193,7 @@ pub enum Source {
     SessionCredential,
     IdentityToken,
     StaticKey,
+    ProxyToken,
 }
 
 impl Source {
@@ -201,6 +203,7 @@ impl Source {
             Source::SessionCredential => "session_credential",
             Source::IdentityToken => "identity_token",
             Source::StaticKey => "static_key",
+            Source::ProxyToken => "proxy_token",
         }
     }
 }
@@ -242,6 +245,31 @@ impl Refusal {
             | Refusal::BadRequest(message) => message,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyBearer {
+    pub token: String,
+    pub gateway_url: String,
+}
+
+pub const PROXY_TOKEN_PREFIX: &str = "relay-proxy-";
+
+fn new_proxy_token() -> String {
+    format!(
+        "{PROXY_TOKEN_PREFIX}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn same_bytes(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -378,6 +406,7 @@ struct State {
     mint_refusal: Option<StickyRefusal>,
     last_source: Option<Source>,
     refused_callers: u64,
+    proxy_token: Option<String>,
 }
 
 enum Bearer {
@@ -434,6 +463,7 @@ impl Broker {
     pub fn handle(&self, request: Request, peer: Peer) -> Reply {
         match request {
             Request::Credential { context } => self.credential(context, peer),
+            Request::ProxyCredential { context } => self.proxy_credential(context, peer),
             Request::SignIn => self.sign_in(),
             Request::SignOut => self.sign_out(),
             Request::Status => Reply::Status(self.status()),
@@ -441,22 +471,75 @@ impl Broker {
     }
 
     pub fn credential(&self, context: Context, peer: Peer) -> Reply {
+        match self.admit(peer, "credential") {
+            Ok(target) => self.issue(&target, context),
+            Err(refusal) => Reply::Refused(refusal),
+        }
+    }
+
+    pub fn proxy_credential(&self, context: Context, peer: Peer) -> Reply {
+        let target = match self.admit(peer, "proxy token") {
+            Ok(target) => target,
+            Err(refusal) => return Reply::Refused(refusal),
+        };
+        match self.issue(&target, context) {
+            Reply::Credential(issued) => Reply::Credential(Issued {
+                token: self
+                    .lock_state()
+                    .proxy_token
+                    .get_or_insert_with(new_proxy_token)
+                    .clone(),
+                expires_at: None,
+                source: Source::ProxyToken,
+                notice: issued.notice,
+            }),
+            other => other,
+        }
+    }
+
+    pub fn bearer_for_proxy(&self, presented: &str) -> Result<ProxyBearer, Refusal> {
+        self.refresh();
+        let known = self
+            .lock_state()
+            .proxy_token
+            .as_deref()
+            .is_some_and(|token| same_bytes(token, presented));
+        if !known {
+            return Err(Refusal::CallerRefused(
+                "this is not the proxy token of the running Relay daemon; get one with `relay credential --proxy`"
+                    .to_string(),
+            ));
+        }
+        let target = self.lock_target().clone();
+        match self.issue(&target, Context::NonInteractive) {
+            Reply::Credential(issued) => Ok(ProxyBearer {
+                token: issued.token,
+                gateway_url: target.gateway_url,
+            }),
+            Reply::Refused(refusal) => Err(refusal),
+            _ => Err(Refusal::GatewayError(
+                "the broker answered without a credential".to_string(),
+            )),
+        }
+    }
+
+    fn admit(&self, peer: Peer, what: &str) -> Result<Target, Refusal> {
         self.refresh();
         let target = self.lock_target().clone();
         let verdict = self.deps.callers.check(&target.callers, peer);
         if let Some(message) = verdict.refusal_message() {
             self.lock_state().refused_callers += 1;
             eprintln!("broker: {message} (peer pid {})", peer.pid);
-            return Reply::Refused(Refusal::CallerRefused(message));
+            return Err(Refusal::CallerRefused(message));
         }
         if let Verdict::Allowed { caller, level } = &verdict {
             eprintln!(
-                "broker: credential for {} ({level} above peer pid {})",
+                "broker: {what} for {} ({level} above peer pid {})",
                 caller.describe(),
                 peer.pid
             );
         }
-        self.issue(&target, context)
+        Ok(target)
     }
 
     pub fn sign_in(&self) -> Reply {
@@ -575,6 +658,7 @@ impl Broker {
         }
         if current.callers != next.callers || current.unanchored != next.unanchored {
             announce_callers(&next.callers, &next.unanchored);
+            self.lock_state().proxy_token = None;
         }
         *self.lock_target() = next;
     }
@@ -933,6 +1017,7 @@ impl Broker {
             state.last_source = None;
             if clear_session {
                 state.session = None;
+                state.proxy_token = None;
             }
             (key, credential)
         };
@@ -1664,5 +1749,114 @@ mod tests {
             serde_json::from_str::<Request>("{\"op\":\"sign_out\"}").expect("parse"),
             Request::SignOut
         );
+    }
+
+    fn proxy_token(rig: &Rig, context: Context) -> Reply {
+        rig.broker
+            .handle(Request::ProxyCredential { context }, rig.peer())
+    }
+
+    #[test]
+    fn should_hand_out_one_proxy_token_that_is_never_the_gateway_credential() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+
+        let first = issued(proxy_token(&rig, Context::Interactive));
+        let second = issued(proxy_token(&rig, Context::Interactive));
+
+        assert_eq!(first.source, Source::ProxyToken);
+        assert!(first.token.starts_with(PROXY_TOKEN_PREFIX));
+        assert_eq!(first.token.len(), PROXY_TOKEN_PREFIX.len() + 64);
+        assert_eq!(first.token, second.token);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.keys.mints().len(), 1);
+        assert_eq!(
+            rig.broker.bearer_for_proxy(&first.token),
+            Ok(ProxyBearer {
+                token: "sk-1".to_string(),
+                gateway_url: GATEWAY.trim_end_matches('/').to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn should_drop_the_proxy_token_when_the_caller_allowlist_changes() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let token = issued(proxy_token(&rig, Context::Interactive)).token;
+        assert!(rig.broker.bearer_for_proxy(&token).is_ok());
+
+        let mut changed = idp_settings(Some("team-a"));
+        changed.credential.allowed_callers = Some(vec![super::caller::AllowedCaller::new(
+            "com.example.tool",
+            Some("TEAM123456"),
+        )]);
+        rig.settings.set(changed);
+
+        assert_eq!(
+            rig.broker.bearer_for_proxy(&token).unwrap_err().reason(),
+            "caller_refused"
+        );
+        let reissued = issued(proxy_token(&rig, Context::NonInteractive)).token;
+        assert_ne!(reissued, token);
+        assert!(rig.broker.bearer_for_proxy(&reissued).is_ok());
+        assert_eq!(rig.identity.sign_ins(), 1);
+    }
+
+    #[test]
+    fn should_run_the_caller_check_before_handing_out_a_proxy_token() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.callers.refuse(&["zsh (unsigned)"]);
+
+        let refusal = refused(proxy_token(&rig, Context::Interactive));
+
+        assert_eq!(refusal.reason(), "caller_refused");
+        assert_eq!(rig.callers.checks(), 1);
+        assert_eq!(rig.identity.sign_ins(), 0);
+        assert_eq!(rig.broker.status().refused_callers, 1);
+    }
+
+    #[test]
+    fn should_accept_only_the_issued_proxy_token_until_sign_out() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(
+            rig.broker
+                .bearer_for_proxy("relay-proxy-guess")
+                .unwrap_err()
+                .reason(),
+            "caller_refused"
+        );
+        let token = issued(proxy_token(&rig, Context::Interactive)).token;
+
+        for wrong in ["", "sk-1", "relay-proxy-guess", &token[..token.len() - 1]] {
+            assert_eq!(
+                rig.broker.bearer_for_proxy(wrong).unwrap_err().reason(),
+                "caller_refused",
+                "{wrong:?} must not unlock the proxy"
+            );
+        }
+        assert!(rig.broker.bearer_for_proxy(&token).is_ok());
+
+        rig.broker.sign_out();
+
+        assert_eq!(
+            rig.broker.bearer_for_proxy(&token).unwrap_err().reason(),
+            "caller_refused"
+        );
+        assert_eq!(rig.identity.sign_ins(), 1);
+        let next = issued(proxy_token(&rig, Context::Interactive)).token;
+        assert_ne!(next, token);
+    }
+
+    #[test]
+    fn should_follow_a_replaced_key_for_proxied_requests_without_a_browser() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let token = issued(proxy_token(&rig, Context::Interactive)).token;
+        let opens = rig.browser_opens();
+
+        rig.clock.advance(61 * MINUTE);
+        let bearer = rig.broker.bearer_for_proxy(&token).unwrap();
+
+        assert_eq!(bearer.token, "sk-2");
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), opens);
     }
 }

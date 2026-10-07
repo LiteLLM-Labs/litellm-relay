@@ -852,6 +852,7 @@ dependencies = [
  "core-foundation",
  "flate2",
  "libc",
+ "percent-encoding",
  "plist",
  "reqwest",
  "rustls",

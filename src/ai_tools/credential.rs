@@ -96,9 +96,28 @@ pub(crate) enum Outcome {
     Failed(String),
 }
 
-pub fn run_credential() -> ExitCode {
+pub fn run_credential(audience: Audience) -> ExitCode {
     let context = helper_context(env::var(HELPER_CONTEXT_ENV).ok().as_deref());
-    finish(ask(Request::Credential { context }))
+    finish(ask(credential_request(audience, context)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    Gateway,
+    LocalProxy,
+}
+
+pub(crate) fn credential_request(audience: Audience, context: HelperContext) -> Request {
+    match audience {
+        Audience::Gateway => Request::Credential { context },
+        Audience::LocalProxy => Request::ProxyCredential { context },
+    }
+}
+
+pub const PROXY_FLAG: &str = "--proxy";
+
+pub fn local_proxy_url(settings: &RelaySettings) -> String {
+    format!("http://127.0.0.1:{}", settings.relay.port)
 }
 
 pub fn run_sign_in() -> ExitCode {
@@ -165,12 +184,14 @@ pub(crate) fn interpret(request: Request, reply: &Value) -> Outcome {
         return Outcome::Failed(format!("relay credential: {reason}: {message}"));
     }
     match request {
-        Request::Credential { .. } => match reply["token"].as_str() {
-            Some(token) if !token.is_empty() => Outcome::Token(token.to_string()),
-            _ => {
-                Outcome::Failed("relay credential: the daemon answered without a token".to_string())
+        Request::Credential { .. } | Request::ProxyCredential { .. } => {
+            match reply["token"].as_str() {
+                Some(token) if !token.is_empty() => Outcome::Token(token.to_string()),
+                _ => Outcome::Failed(
+                    "relay credential: the daemon answered without a token".to_string(),
+                ),
             }
-        },
+        }
         Request::SignIn => Outcome::Done(match reply["user_id"].as_str() {
             Some(user) => format!("Signed in as {user}."),
             None => "Signed in.".to_string(),
@@ -397,5 +418,35 @@ mod tests {
             Some(BearerPlan::StaticKey("sk-1"))
         );
         assert_eq!(bearer_plan(Host::Other, false, None), None);
+    }
+
+    #[test]
+    fn should_ask_for_the_proxy_token_only_when_the_local_proxy_is_the_audience() {
+        assert_eq!(
+            credential_request(Audience::Gateway, HelperContext::Interactive),
+            Request::Credential {
+                context: HelperContext::Interactive
+            }
+        );
+        let request = credential_request(Audience::LocalProxy, HelperContext::NonInteractive);
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({"op": "proxy_credential", "context": "non_interactive"})
+        );
+        assert_eq!(
+            interpret(
+                request,
+                &json!({"ok": true, "token": "relay-proxy-abc", "source": "proxy_token"})
+            ),
+            Outcome::Token("relay-proxy-abc".to_string())
+        );
+    }
+
+    #[test]
+    fn should_name_loopback_and_the_relay_port_as_the_local_proxy_url() {
+        let mut settings = RelaySettings::default();
+        settings.relay.host = "0.0.0.0".into();
+        settings.relay.port = 4199;
+        assert_eq!(local_proxy_url(&settings), "http://127.0.0.1:4199");
     }
 }

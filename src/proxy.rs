@@ -25,6 +25,7 @@ use crate::{
         redact_headers, request_protocol_decision, response_protocol_decision,
         scrub_request_target, should_close, write_response, ProtocolCompatibilityDecision,
     },
+    inference::{forward, gateway_client, is_inference_target, Head},
     pac::build_pac,
     terminal::{print_runtime_panel, print_trace_event},
     traffic::{classify_captured_traffic, CapturedTraffic, TrafficClassification},
@@ -40,6 +41,7 @@ pub struct RelayProxy {
     config: Arc<RelayConfig>,
     gateway: GatewayClient,
     broker: Option<Arc<Broker>>,
+    inference: reqwest::Client,
 }
 
 impl RelayProxy {
@@ -50,6 +52,7 @@ impl RelayProxy {
             config,
             gateway,
             broker: None,
+            inference: gateway_client(),
         }
     }
 
@@ -208,6 +211,19 @@ impl RelayProxy {
                 "listen": format!("{}:{}", self.config.host, self.config.port),
             }))?;
             return self.write_json(&mut stream, json!({"ok": true})).await;
+        }
+
+        if is_inference_target(&target) {
+            let _ = stream.set_nodelay(true);
+            let head = Head::parse(&method, &target, &header_text);
+            return forward(
+                &mut stream,
+                peer,
+                head,
+                self.broker.as_ref(),
+                &self.inference,
+            )
+            .await;
         }
 
         if method == "CONNECT" {
@@ -771,7 +787,7 @@ mod tests {
     use crate::{
         broker::{
             test_support::{static_key_settings, Rig},
-            Context, Request,
+            Context, Reply, Request,
         },
         config::RelaySettings,
     };
@@ -845,5 +861,381 @@ mod tests {
         assert_eq!(after["broker"]["source"], json!("static_key"));
         assert_eq!(after["broker"]["refused_callers"], json!(0));
         assert!(!after.to_string().contains("sk-status-secret"));
+    }
+
+    use std::{sync::Mutex, time::Duration};
+
+    use tokio::{io::AsyncReadExt, sync::Notify, time::timeout};
+
+    const GATEWAY_KEY: &str = "sk-gateway-secret";
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    struct Upstream {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        release: Arc<Notify>,
+    }
+
+    impl Upstream {
+        async fn answering(parts: &[&str]) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let release = Arc::new(Notify::new());
+            let parts = parts
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>();
+            let (seen, gate) = (Arc::clone(&requests), Arc::clone(&release));
+            tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let message = read_http_message(&mut stream).await.unwrap().unwrap();
+                    seen.lock().unwrap().push(format!(
+                        "{}{}",
+                        message.header_text,
+                        String::from_utf8_lossy(&message.body)
+                    ));
+                    for (index, part) in parts.iter().enumerate() {
+                        if index > 0 {
+                            gate.notified().await;
+                        }
+                        stream.write_all(part.as_bytes()).await.unwrap();
+                    }
+                    stream.shutdown().await.unwrap();
+                }
+            });
+            Self {
+                url,
+                requests,
+                release,
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    struct Daemon {
+        proxy: Arc<RelayProxy>,
+        rig: Rig,
+        token: String,
+    }
+
+    fn daemon(gateway_url: &str) -> Daemon {
+        let mut settings = static_key_settings(GATEWAY_KEY);
+        settings.gateway.url = gateway_url.to_string();
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-inference-test-missing.log.jsonl");
+        let rig = Rig::new(settings);
+        let token = match rig.broker.handle(
+            Request::ProxyCredential {
+                context: Context::Interactive,
+            },
+            rig.peer(),
+        ) {
+            Reply::Credential(issued) => issued.token,
+            other => panic!("expected a proxy token, got {other:?}"),
+        };
+        Daemon {
+            proxy: Arc::new(RelayProxy::new(config).with_broker(Arc::clone(&rig.broker))),
+            rig,
+            token,
+        }
+    }
+
+    async fn connect(proxy: &Arc<RelayProxy>, claimed_peer: Option<&str>) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, peer) = listener.accept().await.unwrap();
+        let peer = claimed_peer.map_or(peer, |address| address.parse().unwrap());
+        let proxy = Arc::clone(proxy);
+        tokio::spawn(async move { proxy.handle_client(stream, peer).await });
+        client
+    }
+
+    async fn exchange(
+        proxy: &Arc<RelayProxy>,
+        claimed_peer: Option<&str>,
+        request: &str,
+    ) -> String {
+        let mut client = connect(proxy, claimed_peer).await;
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = Vec::new();
+        timeout(PATIENCE, client.read_to_end(&mut answer))
+            .await
+            .expect("the daemon must answer and close")
+            .unwrap();
+        String::from_utf8_lossy(&answer).to_string()
+    }
+
+    fn header_lines<'a>(message: &'a str, name: &str) -> Vec<&'a str> {
+        message
+            .split("\r\n\r\n")
+            .next()
+            .unwrap()
+            .split("\r\n")
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+            .collect()
+    }
+
+    const JSON_OK: &str =
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nx-litellm-call-id: call-1\r\n\r\n{\"ok\":true}";
+
+    #[tokio::test]
+    async fn should_forward_v1_with_the_gateway_credential_in_every_header_the_client_used() {
+        let upstream = Upstream::answering(&[JSON_OK]).await;
+        let daemon = daemon(&upstream.url);
+        let token = &daemon.token;
+        let request = format!(
+            "POST /v1/messages?beta=true&next=%2Fa%20b HTTP/1.1\r\nHost: 127.0.0.1:4142\r\nAuthorization: Bearer {token}\r\nX-Api-Key: {token}\r\nanthropic-beta: one\r\nanthropic-beta: two\r\nx-litellm-team: team-a\r\nUser-Agent: claude-cli/2.1.291\r\nConnection: keep-alive, x-per-hop\r\nx-per-hop: 1\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{{\"model\":\"haiku\"}}"
+        );
+
+        let answer = exchange(&daemon.proxy, None, &request).await;
+
+        let seen = upstream.requests();
+        assert_eq!(seen.len(), 1);
+        let forwarded = &seen[0];
+        assert!(
+            forwarded.starts_with("POST /v1/messages?beta=true&next=%2Fa%20b HTTP/1.1\r\n"),
+            "{forwarded}"
+        );
+        assert_eq!(
+            header_lines(forwarded, "authorization"),
+            [format!("Bearer {GATEWAY_KEY}")]
+        );
+        assert_eq!(header_lines(forwarded, "x-api-key"), [GATEWAY_KEY]);
+        assert!(!forwarded.contains(token.as_str()));
+        assert_eq!(header_lines(forwarded, "anthropic-beta"), ["one", "two"]);
+        assert_eq!(header_lines(forwarded, "x-litellm-team"), ["team-a"]);
+        assert_eq!(
+            header_lines(forwarded, "user-agent"),
+            ["claude-cli/2.1.291"]
+        );
+        assert_eq!(
+            header_lines(forwarded, "host"),
+            [upstream.url.trim_start_matches("http://")]
+        );
+        assert!(header_lines(forwarded, "x-per-hop").is_empty());
+        assert!(forwarded.ends_with("\r\n\r\n{\"model\":\"haiku\"}"));
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        assert_eq!(header_lines(&answer, "content-length"), ["11"]);
+        assert_eq!(header_lines(&answer, "x-litellm-call-id"), ["call-1"]);
+        assert!(answer.ends_with("\r\n\r\n{\"ok\":true}"));
+        assert!(!answer.contains(GATEWAY_KEY));
+    }
+
+    #[tokio::test]
+    async fn should_inject_only_the_authorization_header_for_a_bearer_only_client() {
+        let upstream = Upstream::answering(&[JSON_OK]).await;
+        let daemon = daemon(&upstream.url);
+        let request = format!(
+            "GET /v1/models?client_version=0.156.1 HTTP/1.1\r\nHost: 127.0.0.1:4142\r\nauthorization: bearer {}\r\n\r\n",
+            daemon.token
+        );
+
+        let answer = exchange(&daemon.proxy, None, &request).await;
+
+        let seen = upstream.requests();
+        assert!(seen[0].starts_with("GET /v1/models?client_version=0.156.1 HTTP/1.1\r\n"));
+        assert_eq!(
+            header_lines(&seen[0], "authorization"),
+            [format!("Bearer {GATEWAY_KEY}")]
+        );
+        assert!(header_lines(&seen[0], "x-api-key").is_empty());
+        assert!(answer.ends_with("{\"ok\":true}"));
+    }
+
+    #[tokio::test]
+    async fn should_refuse_a_request_that_does_not_carry_the_proxy_token_and_send_nothing_upstream()
+    {
+        let upstream = Upstream::answering(&[JSON_OK]).await;
+        let daemon = daemon(&upstream.url);
+        let token = &daemon.token;
+        let body = "Content-Length: 2\r\n\r\n{}";
+        for (credentials, peer, status) in [
+            (String::new(), None, "401 Unauthorized"),
+            (
+                "Authorization: Bearer relay-proxy-guess\r\n".to_string(),
+                None,
+                "401 Unauthorized",
+            ),
+            (
+                format!("Authorization: Bearer {GATEWAY_KEY}\r\n"),
+                None,
+                "401 Unauthorized",
+            ),
+            (
+                format!("Authorization: Basic {token}\r\n"),
+                None,
+                "401 Unauthorized",
+            ),
+            (
+                format!("Authorization: Bearer {token}\r\nx-api-key: {GATEWAY_KEY}\r\n"),
+                None,
+                "401 Unauthorized",
+            ),
+            (
+                format!("Authorization: Bearer {token}\r\n"),
+                Some("203.0.113.9:50000"),
+                "403 Forbidden",
+            ),
+        ] {
+            let request = format!("POST /v1/responses HTTP/1.1\r\nHost: x\r\n{credentials}{body}");
+            let answer = exchange(&daemon.proxy, peer, &request).await;
+            assert!(
+                answer.starts_with(&format!("HTTP/1.1 {status}\r\n")),
+                "{credentials:?} from {peer:?} answered {answer}"
+            );
+            let error: Value =
+                serde_json::from_str(answer.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert!(error["error"]["message"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()));
+            assert!(!answer.contains(GATEWAY_KEY));
+        }
+        assert!(upstream.requests().is_empty());
+
+        daemon.rig.broker.sign_out();
+        let request =
+            format!("POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {token}\r\n{body}");
+        let answer = exchange(&daemon.proxy, None, &request).await;
+        assert!(
+            answer.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{answer}"
+        );
+        assert!(answer.contains("authentication_error"));
+        assert!(upstream.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_stream_each_gateway_chunk_to_the_client_before_the_next_one_exists() {
+        let upstream = Upstream::answering(&[
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n10\r\nevent: one\n\ndata\r\n",
+            "c\r\nevent: two\n\n\r\n0\r\n\r\n",
+        ])
+        .await;
+        let daemon = daemon(&upstream.url);
+        let mut client = connect(&daemon.proxy, None).await;
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nx-api-key: {}\r\nContent-Length: 2\r\n\r\n{{}}",
+            daemon.token
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        let mut received = Vec::new();
+        while !String::from_utf8_lossy(&received).contains("event: one\n\ndata") {
+            let mut buffer = [0u8; 1024];
+            let read = timeout(PATIENCE, client.read(&mut buffer))
+                .await
+                .expect("the first event must arrive while the Gateway is still holding the second")
+                .unwrap();
+            assert!(read > 0, "the stream closed before the first event");
+            received.extend_from_slice(&buffer[..read]);
+        }
+        let early = String::from_utf8_lossy(&received).to_string();
+        assert!(!early.contains("event: two"));
+        assert_eq!(header_lines(&early, "transfer-encoding"), ["chunked"]);
+        assert_eq!(header_lines(&early, "content-type"), ["text/event-stream"]);
+
+        upstream.release.notify_one();
+        timeout(PATIENCE, client.read_to_end(&mut received))
+            .await
+            .expect("the stream must end once the Gateway ends it")
+            .unwrap();
+        let whole = String::from_utf8_lossy(&received).to_string();
+        assert!(whole.contains("event: two\n\n"));
+        assert!(whole.ends_with("0\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn should_pass_a_gateway_error_through_and_answer_502_when_the_gateway_is_unreachable() {
+        let upstream = Upstream::answering(&[
+            "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 7\r\ncontent-length: 28\r\n\r\n{\"error\":{\"message\":\"slow\"}}",
+        ])
+        .await;
+        let daemon = daemon(&upstream.url);
+        let request = format!(
+            "POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\n\r\n{{}}",
+            daemon.token
+        );
+        let answer = exchange(&daemon.proxy, None, &request).await;
+        assert!(
+            answer.starts_with("HTTP/1.1 429 Too Many Requests\r\n"),
+            "{answer}"
+        );
+        assert_eq!(header_lines(&answer, "retry-after"), ["7"]);
+        assert!(answer.ends_with("{\"error\":{\"message\":\"slow\"}}"));
+
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unreachable = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let daemon = self::daemon(&unreachable);
+        let request = format!(
+            "POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\n\r\n{{}}",
+            daemon.token
+        );
+        let answer = exchange(&daemon.proxy, None, &request).await;
+        assert!(
+            answer.starts_with("HTTP/1.1 502 Bad Gateway\r\n"),
+            "{answer}"
+        );
+        assert!(answer.contains("api_error"));
+        assert!(!answer.contains(GATEWAY_KEY));
+    }
+
+    #[tokio::test]
+    async fn should_forward_nothing_outside_v1_even_with_a_valid_token() {
+        let upstream = Upstream::answering(&[JSON_OK]).await;
+        let daemon = daemon(&upstream.url);
+        let nested_hundred_thousand_layers = format!("/v1/%{}2e/key/info", "25".repeat(100_000));
+        for target in [
+            nested_hundred_thousand_layers.as_str(),
+            "/v1/../key/info",
+            "/v1/%2e%2e/key/info",
+            "/v1/%2e%2e%2fkey/info",
+            "/v1/..%2Fkey/info",
+            "/v1/%252e%252e/key/info",
+            "/v1/..\\key/info",
+            "/v1/./key/info",
+            "/key/info",
+            "/v11/models",
+            "/mcp",
+        ] {
+            assert!(!is_inference_target(target), "{target}");
+            let request = format!(
+                "GET {target} HTTP/1.1\r\nAuthorization: Bearer {}\r\n\r\n",
+                daemon.token
+            );
+            let answer = exchange(&daemon.proxy, None, &request).await;
+            assert!(
+                answer.starts_with("HTTP/1.1 501 "),
+                "{target} answered {answer}"
+            );
+        }
+        assert!(upstream.requests().is_empty());
+        let request = format!(
+            "GET /v1/models HTTP/1.1\r\nAuthorization: Bearer {}\r\n\r\n",
+            daemon.token
+        );
+        let answer = exchange(&daemon.proxy, None, &request).await;
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        assert_eq!(upstream.requests().len(), 1);
+        for target in [
+            "/v1",
+            "/v1?x=1",
+            "/v1/messages?beta=true",
+            "/v1/responses",
+            "/v1/models/claude%2Dsonnet",
+        ] {
+            assert!(is_inference_target(target), "{target}");
+        }
     }
 }

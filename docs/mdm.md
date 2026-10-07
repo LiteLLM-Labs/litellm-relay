@@ -117,20 +117,22 @@ PAC profile so macOS stops using Auto Proxy:
 ## Credential broker
 
 On macOS the Relay daemon (`relay serve`, the `ai.litellm.relay` LaunchAgent)
-holds the Gateway credential for Claude Code and Codex. Both are wired with
-`relay credential` as their credential helper, which asks the daemon over the
-Unix socket `~/.litellm-relay/broker.sock` (directory 0700, socket 0600) and
-prints the bearer it gets back. The proxy port never serves credentials, and no
-key, token, or session is written into Claude Code's settings file or Codex's
-`config.toml`: the developer's IdP session and the Gateway key live in the
-daemon's memory and are gone when it stops. Claude Desktop is not on the broker
-yet: `relay onboard-claude-desktop` keeps writing the static key or the in-app
-OIDC settings into the managed file described in
-[claude-desktop.md](claude-desktop.md)
+is the only thing on the device that holds a Gateway credential. Claude Code
+and Codex are wired with `relay credential --proxy` as their credential helper,
+which asks the daemon over the Unix socket `~/.litellm-relay/broker.sock`
+(directory 0700, socket 0600) and prints the proxy token it gets back, and both
+send their requests to the local inference proxy described below, which swaps
+that token for the Gateway credential. Claude Desktop is wired with
+`relay credential` over the same socket and gets the Gateway bearer itself,
+because the app sends its requests to the Gateway directly; it keeps that
+bearer in memory only. The proxy port never serves credentials, and no key,
+token, or session is written into Claude Code's settings file, Codex's
+`config.toml`, or the Claude Desktop managed file: the developer's IdP session
+and the Gateway key live in the daemon's memory and are gone when it stops
 
 Every command that writes the `relay credential` helper into a tool (`relay
-onboard`, `relay onboard-codex`, `relay autoconfigure`, and the setup wizard)
-makes sure that daemon is running before
+onboard`, `relay onboard-codex`, `relay onboard-claude-desktop`, `relay
+autoconfigure`, and the setup wizard) makes sure that daemon is running before
 it returns. When something already answers on the socket, a foreground `relay
 serve` or an agent your MDM loaded, the command changes nothing. Otherwise it
 writes `~/Library/LaunchAgents/ai.litellm.relay.plist` (the plist `relay
@@ -210,15 +212,45 @@ re-mints the key. A changed `credential.allowed_callers` list applies from the
 next request and leaves the key in place, so a client taken off the list is
 refused the next time it runs the helper
 
-A helper run with `CLAUDE_HELPER_CONTEXT=background` or `scheduled-task` (what
-Claude Desktop sets when nobody is at the keyboard) never opens a browser and
-answers `signed_out` until a developer signs in interactively, through the
-client or `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
+Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
+`scheduled-task` when nobody is at the keyboard; those requests never open a
+browser and answer `signed_out` until a developer runs the app interactively or
+`relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
 sign-in and `relay sign-out` deletes the key and forgets the session. The
 `broker` block of `/api/status` shows `signed_in`, `user_id`, `team`,
 `key_expires_at`, `key_extended_at`, the `source` of the last answer
 (`minted_key`, `session_credential`, `identity_token`, or `static_key`), and
 `refused_callers`, never a token
+
+## Local inference proxy
+
+Claude Code and Codex never receive the Gateway credential at all. On macOS
+`relay autoconfigure` points them at the daemon itself, `http://127.0.0.1:4142`
+(`ANTHROPIC_BASE_URL` for Claude Code, `base_url` with `/v1` for Codex; the port
+follows `relay.port`), and wires their helper as `relay credential --proxy`.
+That helper goes through the same socket and the same caller check as
+`relay credential`, signs in the same way, and prints a proxy token: a random
+value that only the running daemon accepts and the Gateway has never seen. The
+daemon forwards every request under `/v1/` to `gateway.url` with the same path
+and query, replaces the proxy token with the in-memory Gateway credential in
+whichever of `Authorization` and `x-api-key` the client sent, and streams the
+answer back as it arrives, so requests show on the Gateway under the signed-in
+user exactly as they do with `relay credential`
+
+A request with no proxy token, a wrong one, or two headers that disagree gets a
+401 before anything is sent to the Gateway, and so does every request after
+`relay sign-out`, a daemon restart, or a change to `credential.allowed_callers`,
+since each of those ends the token. Claude Code and Codex answer a 401 by
+running their helper again, which goes back through the caller check and signs
+in if needed. The
+proxy never opens a browser on its own. Connections that do not come from the
+device itself get a 403 even when `relay.host` is not a loopback address, and
+paths outside `/v1/` are not forwarded. A Gateway that cannot be reached answers
+502 from the daemon; every Gateway answer, errors included, passes through
+unchanged
+
+Claude Desktop keeps talking to the Gateway directly with `relay credential`,
+because its Cowork VM cannot reach the Mac's loopback address
 
 Linux hosts have no code-signature check, so there the tools keep the on-disk
 `claude-token` and `codex-token` helpers and a static key goes into the tool's

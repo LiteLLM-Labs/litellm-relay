@@ -9,6 +9,7 @@ mod credential;
 mod events;
 mod gateway;
 mod http;
+mod inference;
 mod pac;
 mod proxy;
 mod setup;

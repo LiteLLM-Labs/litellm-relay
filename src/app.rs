@@ -7,7 +7,8 @@ use crate::{
     ai_tools::{
         autoconfigure,
         credential::{
-            daemon_answers, run_credential, run_sign_in, run_sign_out, Host, LAUNCH_AGENT_LABEL,
+            daemon_answers, run_credential, run_sign_in, run_sign_out, Audience, Host,
+            LAUNCH_AGENT_LABEL,
         },
         detect::AiTool,
         launch_agent::{host_plist, runs_as_agent, DaemonHost, Launchd},
@@ -43,9 +44,14 @@ enum Command {
 /// the executable path.
 #[derive(Subcommand)]
 enum HelperCommand {
-    /// Print the Gateway bearer for the calling client (used by Claude Code
-    /// and Codex as their credential helper).
-    Credential,
+    /// Print the Gateway bearer for the calling client (Claude Desktop's
+    /// credential helper; Claude Code and Codex pass `--proxy`).
+    Credential {
+        /// Print the token the local inference proxy on 127.0.0.1 accepts
+        /// instead of the Gateway bearer, which then stays in the daemon.
+        #[arg(long)]
+        proxy: bool,
+    },
     /// Sign in to the IdP through the browser and keep the session in the daemon.
     SignIn,
     /// Forget the daemon's IdP session and delete its Gateway key.
@@ -185,7 +191,12 @@ pub async fn run() -> Result<ExitCode> {
     match cli.command {
         None => run_interactive_default().await.map(|()| ExitCode::SUCCESS),
         Some(Command::Daemon(command)) => run_command(*command).await.map(|()| ExitCode::SUCCESS),
-        Some(Command::Helper(HelperCommand::Credential)) => Ok(run_credential()),
+        Some(Command::Helper(HelperCommand::Credential { proxy })) => {
+            Ok(run_credential(match proxy {
+                true => Audience::LocalProxy,
+                false => Audience::Gateway,
+            }))
+        }
         Some(Command::Helper(HelperCommand::SignIn)) => Ok(run_sign_in()),
         Some(Command::Helper(HelperCommand::SignOut)) => Ok(run_sign_out()),
     }
@@ -501,7 +512,8 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(args).expect("the command line must parse");
             let parsed = match cli.command.expect("a subcommand") {
-                Command::Helper(HelperCommand::Credential) => "credential",
+                Command::Helper(HelperCommand::Credential { proxy: false }) => "credential",
+                Command::Helper(HelperCommand::Credential { proxy: true }) => "credential --proxy",
                 Command::Helper(HelperCommand::SignIn) => "sign-in",
                 Command::Helper(HelperCommand::SignOut) => "sign-out",
                 Command::Daemon(other) => describe(&other),
