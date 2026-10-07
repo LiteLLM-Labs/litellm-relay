@@ -179,7 +179,10 @@ npm releases of Claude Code up to 2.1.110 ran `cli.js` as a script under
 `node`, which carries the Node.js Foundation's signature and not Anthropic's,
 so the daemon refuses that chain; `relay onboard` refuses to wire a `claude`
 that is a node script before writing anything and names the native installer
-(`curl -fsSL https://claude.ai/install.sh | bash`). Later npm releases
+(`curl -fsSL https://claude.ai/install.sh | bash`). It looks for `claude` on
+PATH and then in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and
+nvm's `versions/node/*/bin`, so the autoconfigure agent's bare PATH does not
+skip the check. Later npm releases
 hard-link Anthropic's native binary into the package, and the daemon accepts
 that build like the installer's
 

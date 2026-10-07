@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -68,7 +70,8 @@ pub struct OnboardParams {
 /// supplied (or configured with no IdP), it is written to `ANTHROPIC_AUTH_TOKEN`
 /// instead.
 pub fn onboard(params: OnboardParams) -> Result<()> {
-    onboard_with(params, &Launchd, claude_on_path())
+    let claude_binary = claude_binary(env::var_os("PATH").as_deref(), &home_dir());
+    onboard_with(params, &Launchd, claude_binary)
 }
 
 fn onboard_with(
@@ -144,11 +147,32 @@ fn onboard_with(
     Ok(())
 }
 
-fn claude_on_path() -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
+/// PATH first, then the directories the installers use, since the PATH of a
+/// LaunchAgent (the autoconfigure pass) carries neither Homebrew nor nvm.
+fn claude_binary(path: Option<&OsStr>, home: &Path) -> Option<PathBuf> {
+    let on_path = path.map(env::split_paths).into_iter().flatten();
+    on_path
+        .chain(install_dirs(home))
         .map(|dir| dir.join("claude"))
         .find(|candidate| candidate.is_file())
+}
+
+fn install_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut nvm_versions: Vec<PathBuf> = fs::read_dir(home.join(".nvm/versions/node"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|version| version.path().join("bin"))
+        .collect();
+    nvm_versions.sort();
+    [
+        home.join(".local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]
+    .into_iter()
+    .chain(nvm_versions)
+    .collect()
 }
 
 /// npm releases of Claude Code up to 2.1.110 ran `cli.js` as a script under
@@ -553,6 +577,41 @@ mod tests {
         assert!(!runs_under_node(&native));
         assert!(!runs_under_node(&wrapper));
         assert!(!runs_under_node(&root.join("missing")));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn should_find_claude_code_where_its_installers_put_it_when_path_lacks_it() {
+        let root = env::temp_dir().join(format!("relay-cc-lookup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let nvm_bin = home.join(".nvm/versions/node/v22.4.0/bin");
+        let path_bin = root.join("path-bin");
+        fs::create_dir_all(&nvm_bin).unwrap();
+        fs::create_dir_all(&path_bin).unwrap();
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let path = env::join_paths([&path_bin]).unwrap();
+
+        assert_eq!(claude_binary(Some(&path), &home), None);
+
+        fs::write(nvm_bin.join("claude"), "#!/usr/bin/env node\n").unwrap();
+        assert_eq!(
+            claude_binary(Some(&path), &home),
+            Some(nvm_bin.join("claude"))
+        );
+        assert_eq!(claude_binary(None, &home), Some(nvm_bin.join("claude")));
+
+        fs::write(home.join(".local/bin/claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
+        assert_eq!(
+            claude_binary(Some(&path), &home),
+            Some(home.join(".local/bin/claude"))
+        );
+
+        fs::write(path_bin.join("claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
+        assert_eq!(
+            claude_binary(Some(&path), &home),
+            Some(path_bin.join("claude"))
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
