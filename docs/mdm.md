@@ -24,6 +24,7 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 | `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
 | Managed `config.yaml` | Gateway URL, IdP issuer and client id, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
+| `RelayBarGlass.app` (optional) | Menu bar app: sign-in state, key countdown, team and environment pickers, budget, MCP servers | Built into the `.pkg` by `scripts/build-macos-pkg.sh --relaybar`, installed at `/usr/local/litellm-relay/RelayBarGlass.app` |
 
 The managed config can be baked into the `.pkg` at build time
 (`--config-file`) so no separate config delivery is needed:
@@ -47,6 +48,19 @@ Output: `dist/litellm-relay-0.1.0.pkg` plus a printed SHA-256. Signing is
 optional for a Jamf-only fleet but required for Intune (Gatekeeper). Tagging a
 release (`v*`) also builds the `.pkg` per architecture in
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
+
+Add `--relaybar` (or set `RELAY_PKG_RELAYBAR=1`) to ship the RelayBar menu
+bar app in the same package. The build host needs `swift` on PATH, since the
+flag runs `macos/RelayBarGlass/build.sh` and copies the resulting
+`RelayBarGlass.app` into the payload at
+`/usr/local/litellm-relay/RelayBarGlass.app`; without `swift` the script
+prints a one-line skip and builds the package without the app. When the app is
+present, `install.sh` writes a second per-user LaunchAgent,
+`~/Library/LaunchAgents/ai.litellm.relaybar.plist` (label
+`ai.litellm.relaybar`), so the tray starts at login next to the daemon. The
+tray reads `relay.port` from the managed `config.yaml` (default 4142) and
+polls `http://127.0.0.1:<port>/api/status`; it holds no credential and
+persists nothing of its own.
 
 ## Manual pilot (one Mac, no MDM)
 
@@ -113,6 +127,10 @@ PAC profile so macOS stops using Auto Proxy:
 ```bash
 /usr/local/litellm-relay/uninstall.sh --unset-system-proxy "Wi-Fi" --remove-data
 ```
+
+The uninstaller also boots out and removes the RelayBar LaunchAgent
+(`~/Library/LaunchAgents/ai.litellm.relaybar.plist`) when the package shipped
+the menu bar app.
 
 ## Credential broker
 

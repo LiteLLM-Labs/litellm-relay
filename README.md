@@ -94,14 +94,7 @@ and `expires_at`), and the dashboard shows it as the
 
 ## Developers see their own usage, locally
 
-Relay also ships an optional **macOS menu bar app** so each developer can see **their own AI spend right on their machine** — no dashboard login. It reads live, key-scoped usage from the Gateway and breaks it down per coding tool: spend this month, spend/day, model mix, cache-hit rate, and the relay key's budget.
-
-<p>
-  <img width="340" alt="Claude Code usage in the menu bar" src="docs/img/relaybar-claude-code.png" />
-  <img width="340" alt="Codex CLI usage in the menu bar" src="docs/img/relaybar-codex-cli.png" />
-</p>
-
-Each tool (Claude Code, Codex CLI, Cursor, Gemini, …) gets its own tab with its own color. Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`).
+Relay also ships an optional **macOS menu bar app**, RelayBar, that sits on top of the daemon: it shows whether the developer is signed in and as whom, how long the key every coding tool is using stays valid and that the daemon renews it, the selected team's spend against its budget as the Gateway reports it, the MCP servers the daemon serves, and a Team and an Environment picker that move every client at once through `relay switch-team` and `relay switch-environment`. Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`) or ship it in the `.pkg` with `scripts/build-macos-pkg.sh --relaybar`.
 
 ## AI Tool Guides
 
