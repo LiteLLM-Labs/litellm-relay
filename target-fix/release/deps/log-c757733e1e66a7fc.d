@@ -1,0 +1,10 @@
+/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/log-c757733e1e66a7fc.d: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/macros.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/serde.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/__private_api.rs
+
+/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/liblog-c757733e1e66a7fc.rlib: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/macros.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/serde.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/__private_api.rs
+
+/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/liblog-c757733e1e66a7fc.rmeta: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/macros.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/serde.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/__private_api.rs
+
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/lib.rs:
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/macros.rs:
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/serde.rs:
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.33/src/__private_api.rs:

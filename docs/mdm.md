@@ -175,11 +175,13 @@ the refusal is counted in `/api/status`. `credential.allowed_callers` in
 every client you keep, each with its `team_id`: an identifier alone is
 satisfied by any ad hoc signature (`codesign -s - -i <identifier>` on any
 binary), so the daemon ignores an entry without a team and says so on stderr.
-Claude Code's npm package runs as a script under `node`, which carries the
-Node.js Foundation's signature and not Anthropic's, so the daemon refuses it;
-`relay onboard` refuses to wire that install before writing anything and names
-the native installer (`curl -fsSL https://claude.ai/install.sh | bash`), the
-only Claude Code build that works with the broker
+npm releases of Claude Code up to 2.1.110 ran `cli.js` as a script under
+`node`, which carries the Node.js Foundation's signature and not Anthropic's,
+so the daemon refuses that chain; `relay onboard` refuses to wire a `claude`
+that is a node script before writing anything and names the native installer
+(`curl -fsSL https://claude.ai/install.sh | bash`). Later npm releases
+hard-link Anthropic's native binary into the package, and the daemon accepts
+that build like the installer's
 
 With an IdP configured, the first interactive request runs the browser sign-in
 from the daemon, exchanges the ID token for a Gateway session credential the

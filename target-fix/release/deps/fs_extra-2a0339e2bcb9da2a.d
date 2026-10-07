@@ -1,0 +1,10 @@
+/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/fs_extra-2a0339e2bcb9da2a.d: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/error.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/file.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/dir.rs
+
+/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/libfs_extra-2a0339e2bcb9da2a.rlib: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/error.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/file.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/dir.rs
+
+/private/tmp/claude-501/-Users-mateo-Development-litellm/8c0a24d6-2dd0-4d8a-ad40-c1f4d0e8e2ce/scratchpad/lit-8971/pr45/fix2/wt/target-fix/release/deps/libfs_extra-2a0339e2bcb9da2a.rmeta: /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/lib.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/error.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/file.rs /Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/dir.rs
+
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/lib.rs:
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/error.rs:
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/file.rs:
+/Users/mateo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs_extra-1.3.0/src/dir.rs:

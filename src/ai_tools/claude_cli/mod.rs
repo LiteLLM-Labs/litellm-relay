@@ -114,7 +114,7 @@ fn onboard_with(
     };
 
     if let Credential::Broker { .. } = credential {
-        refuse_npm_claude_code(claude_binary.as_deref())?;
+        refuse_node_script_claude_code(claude_binary.as_deref())?;
     }
     let settings_path = write_claude_settings(&settings, &credential)?;
     save_settings(&settings)?;
@@ -151,27 +151,22 @@ fn claude_on_path() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// The npm package runs Claude Code as a script under `node`, so no process in
-/// its chain carries Anthropic's signature and the daemon would refuse every
-/// credential call; only the native build gets wired to the broker.
-fn refuse_npm_claude_code(claude_binary: Option<&Path>) -> Result<()> {
+/// npm releases of Claude Code up to 2.1.110 ran `cli.js` as a script under
+/// `node`, so no process in that chain carries Anthropic's signature and the
+/// daemon would refuse every credential call; later npm releases hard-link the
+/// native binary, which the daemon accepts like the installer's build.
+fn refuse_node_script_claude_code(claude_binary: Option<&Path>) -> Result<()> {
     let Some(script) = claude_binary.filter(|path| runs_under_node(path)) else {
         return Ok(());
     };
     bail!(
-        "Claude Code at {} is the npm install, which runs as a script under node and carries no Anthropic code signature, so the Relay daemon would refuse its credential calls; install the native build (curl -fsSL https://claude.ai/install.sh | bash) and run this command again",
+        "Claude Code at {} is a script that runs under node, which carries no Anthropic code signature, so the Relay daemon would refuse its credential calls; install the native build (curl -fsSL https://claude.ai/install.sh | bash, or a current npm release, which ships it) and run this command again",
         script.display()
     )
 }
 
 fn runs_under_node(path: &Path) -> bool {
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if resolved
-        .components()
-        .any(|part| part.as_os_str() == "node_modules")
-    {
-        return true;
-    }
     let mut head = [0u8; 128];
     let Ok(length) = fs::File::open(&resolved).and_then(|mut file| file.read(&mut head)) else {
         return false;
@@ -529,21 +524,32 @@ mod tests {
         }
     }
     #[test]
-    fn should_tell_the_npm_claude_code_from_the_native_build() {
+    fn should_tell_a_node_script_claude_code_from_a_native_binary() {
         let root = env::temp_dir().join(format!("relay-cc-channel-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let cli = root.join("lib/node_modules/@anthropic-ai/claude-code/cli.js");
-        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        let package = root.join("lib/node_modules/@anthropic-ai/claude-code");
+        fs::create_dir_all(package.join("bin")).unwrap();
+        let cli = package.join("cli.js");
         fs::write(&cli, "#!/usr/bin/env node\nconsole.log('claude')\n").unwrap();
-        let script = root.join("claude-script");
-        fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        let wrapped_native = package.join("bin/claude.exe");
+        fs::write(
+            &wrapped_native,
+            [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01],
+        )
+        .unwrap();
+        let old_link = root.join("claude-old");
+        std::os::unix::fs::symlink(&cli, &old_link).unwrap();
+        let new_link = root.join("claude-new");
+        std::os::unix::fs::symlink(&wrapped_native, &new_link).unwrap();
         let native = root.join("claude-native");
         fs::write(&native, [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]).unwrap();
         let wrapper = root.join("claude-wrapper");
         fs::write(&wrapper, "#!/bin/sh\nexec /opt/claude/claude \"$@\"\n").unwrap();
 
         assert!(runs_under_node(&cli));
-        assert!(runs_under_node(&script));
+        assert!(runs_under_node(&old_link));
+        assert!(!runs_under_node(&wrapped_native));
+        assert!(!runs_under_node(&new_link));
         assert!(!runs_under_node(&native));
         assert!(!runs_under_node(&wrapper));
         assert!(!runs_under_node(&root.join("missing")));
@@ -551,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_to_wire_an_npm_claude_code_to_the_broker() {
+    fn should_refuse_to_wire_a_node_script_claude_code_to_the_broker() {
         use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
 
         let _guard = HOME_LOCK
@@ -585,7 +591,7 @@ mod tests {
         match Host::current() {
             Host::MacOs => {
                 let error = outcome.unwrap_err().to_string();
-                assert!(error.contains("npm install"), "{error}");
+                assert!(error.contains("runs under node"), "{error}");
                 assert!(error.contains(&script.display().to_string()), "{error}");
                 assert!(error.contains("claude.ai/install.sh"), "{error}");
                 assert!(
