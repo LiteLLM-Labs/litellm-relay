@@ -83,7 +83,7 @@ fi
 if [[ -z "$BINARY" ]]; then
   echo "Building release binary with cargo..."
   cargo build --release --locked --manifest-path "$REPO_ROOT/Cargo.toml"
-  BINARY="$REPO_ROOT/target/release/litellm-relay"
+  BINARY="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/litellm-relay"
 fi
 
 if [[ ! -f "$BINARY" ]]; then
