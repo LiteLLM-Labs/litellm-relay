@@ -42,12 +42,28 @@ run_uninstall() {
 
 mkdir -p "$home/Library/Keychains" "$relay_home/mitm" "$tmp_dir/shims"
 printf '#!/bin/bash\nexec "$@"\n' > "$tmp_dir/shims/sudo"
-chmod 755 "$tmp_dir/shims/sudo"
+cat > "$tmp_dir/shims/launchctl" <<'SHIM'
+#!/bin/bash
+if [[ "$1" == "managername" ]]; then
+  echo "${RELAY_SMOKE_MANAGERNAME:-Aqua}"
+  exit 0
+fi
+exec /bin/launchctl "$@"
+SHIM
+chmod 755 "$tmp_dir/shims/sudo" "$tmp_dir/shims/launchctl"
 security create-keychain -p relay-ci "$keychain"
 
 mint_ca "$tmp_dir/stale-ca.pem"
 mint_ca "$relay_home/mitm/litellm-relay-ca.pem"
 [[ "$(relay_ca_count)" == "2" ]] || fail "expected two Relay CA certificates before the uninstall, found $(relay_ca_count)"
+
+RELAY_SMOKE_MANAGERNAME=System run_uninstall
+[[ "$(relay_ca_count)" == "2" ]] || fail "an uninstall outside the GUI session should leave both Relay CA certificates, found $(relay_ca_count)"
+grep -q "warning: the Relay CA was left in $keychain" "$tmp_dir/uninstall.out" || fail "the uninstall outside the GUI session did not warn"
+grep -q "launchctl managername: System" "$tmp_dir/uninstall.out" || fail "the warning did not name the session"
+grep -q "^  $(fingerprint_of "$tmp_dir/stale-ca.pem")\$" "$tmp_dir/uninstall.out" || fail "the warning did not list the stale CA"
+grep -q "^  $(fingerprint_of "$relay_home/mitm/litellm-relay-ca.pem")\$" "$tmp_dir/uninstall.out" || fail "the warning did not list the current CA"
+grep -q "security delete-certificate -c \"$label\" -t \"$keychain\"" "$tmp_dir/uninstall.out" || fail "the warning did not give the GUI-session command"
 
 run_uninstall
 [[ "$(relay_ca_count)" == "0" ]] || fail "the uninstall left $(relay_ca_count) Relay CA certificate(s) in the keychain"

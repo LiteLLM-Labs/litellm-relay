@@ -186,10 +186,22 @@ relay_ca_trust_settings() {
 }
 
 remove_ca_trust() {
-  local entries fingerprint state left trust_left
+  local entries fingerprint state left trust_left session
   entries="$(relay_ca_entries)"
   if [[ -z "$entries" && "$(relay_ca_trust_settings)" == "0" ]]; then
     echo "No \"$CA_LABEL\" certificate is in $LOGIN_KEYCHAIN."
+    return 0
+  fi
+
+  session="$(launchctl managername 2>/dev/null || echo unknown)"
+  if [[ "$session" != "Aqua" ]]; then
+    {
+      echo "warning: the Relay CA was left in $LOGIN_KEYCHAIN."
+      echo "This shell is not in the user's GUI session (launchctl managername: $session), the only place macOS reads and changes Certificate Trust Settings, so whether these certificates are trusted cannot be read here, and deleting them here would leave their trust settings behind (SHA-256):"
+      sed 's/ [a-z]*$//; s/^/  /' <<< "$entries"
+      echo "From a Terminal in that user's session run this uninstaller again, or:"
+      echo "  security delete-certificate -c \"$CA_LABEL\" -t \"$LOGIN_KEYCHAIN\""
+    } >&2
     return 0
   fi
 
