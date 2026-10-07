@@ -21,6 +21,7 @@ BINARY=""
 CONFIG_FILE=""
 OUTPUT=""
 SIGN_IDENTITY=""
+RELAYBAR="${RELAY_PKG_RELAYBAR:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -39,6 +40,11 @@ Options:
                           (default: dist/litellm-relay-<version>.pkg)
   --identifier ID         Package identifier (default: ai.litellm.relay)
   --sign "IDENTITY"       Developer ID Installer identity for productsign
+  --relaybar              Build macos/RelayBarGlass with swift and ship
+                          RelayBarGlass.app in the package, so install.sh
+                          registers the menu bar app at login
+                          (RELAY_PKG_RELAYBAR=1 does the same; skipped with a
+                          message when swift is not on PATH)
   -h, --help              Show this help
 
 Notarization (staple) is a follow-up step handled outside this script.
@@ -53,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --identifier) IDENTIFIER="${2:-}"; shift 2 ;;
     --sign) SIGN_IDENTITY="${2:-}"; shift 2 ;;
+    --relaybar) RELAYBAR=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -99,6 +106,15 @@ install -m 0755 "$REPO_ROOT/src/install.sh" "$STAGE_DIR/install.sh"
 install -m 0755 "$REPO_ROOT/src/uninstall.sh" "$STAGE_DIR/uninstall.sh"
 if [[ -n "$CONFIG_FILE" ]]; then
   install -m 0644 "$CONFIG_FILE" "$STAGE_DIR/config.yaml"
+fi
+if [[ "$RELAYBAR" == "1" ]]; then
+  if command -v swift >/dev/null 2>&1; then
+    echo "Building the RelayBar menu bar app..."
+    "$REPO_ROOT/macos/RelayBarGlass/build.sh"
+    ditto "$REPO_ROOT/macos/RelayBarGlass/RelayBarGlass.app" "$STAGE_DIR/RelayBarGlass.app"
+  else
+    echo "Skipping the RelayBar menu bar app: swift is not on PATH, so the package ships without it." >&2
+  fi
 fi
 
 # Postinstall runs the installer as the console user.

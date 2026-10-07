@@ -12,6 +12,9 @@ RELAY_SKIP_SETUP="${RELAY_SKIP_SETUP:-0}"
 RELAY_AUTOCONFIGURE="${RELAY_AUTOCONFIGURE:-1}"
 RELAY_AUTOCONFIGURE_INTERVAL="${RELAY_AUTOCONFIGURE_INTERVAL:-3600}"
 RELAY_TRUST_CA="${RELAY_TRUST_CA:-1}"
+RELAY_RELAYBAR_APP="${RELAY_RELAYBAR_APP:-/usr/local/litellm-relay/RelayBarGlass.app}"
+RELAYBAR_LABEL="ai.litellm.relaybar"
+RELAYBAR_PLIST="$HOME/Library/LaunchAgents/$RELAYBAR_LABEL.plist"
 RELAY_PORT="4142"
 NETWORK_SERVICE=""
 BACKGROUND_SERVICE=0
@@ -83,6 +86,9 @@ Environment:
   RELAY_AUTOCONFIGURE=0         Same as --skip-autoconfigure
   RELAY_AUTOCONFIGURE_INTERVAL  Seconds between periodic re-detection (default 3600)
   RELAY_TRUST_CA=0              Same as --skip-trust-ca
+  RELAY_RELAYBAR_APP            RelayBar menu bar app bundle to register at login
+                                (default /usr/local/litellm-relay/RelayBarGlass.app;
+                                skipped when absent)
 USAGE
 }
 
@@ -97,6 +103,51 @@ autoconfigure_ai_tools() {
   "$RELAY_HOME/bin/litellm-relay" autoconfigure || {
     echo "warning: AI tool auto-configuration did not complete." >&2
   }
+}
+
+write_relaybar_plist() {
+  local plist_path="$1" app_path="$2" relay_home="$3"
+  cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.litellm.relaybar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$app_path/Contents/MacOS/RelayBarGlass</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>$relay_home/relaybar.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$relay_home/relaybar.err.log</string>
+</dict>
+</plist>
+PLIST
+}
+
+install_relaybar_agent() {
+  if [[ ! -x "$RELAY_RELAYBAR_APP/Contents/MacOS/RelayBarGlass" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$RELAYBAR_PLIST")"
+  write_relaybar_plist "$RELAYBAR_PLIST" "$RELAY_RELAYBAR_APP" "$RELAY_HOME"
+  launchctl bootout "gui/$(id -u)" "$RELAYBAR_PLIST" >/dev/null 2>&1 || true
+  if launchctl bootstrap "gui/$(id -u)" "$RELAYBAR_PLIST" && launchctl enable "gui/$(id -u)/$RELAYBAR_LABEL"; then
+    echo "Registered the RelayBar menu bar app ($RELAYBAR_LABEL); it starts at login."
+  else
+    echo "warning: could not start the RelayBar menu bar app; open $RELAY_RELAYBAR_APP to run it." >&2
+  fi
 }
 
 require_value() {
@@ -497,6 +548,7 @@ mkdir -p "$(dirname "$PLIST")"
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl enable "gui/$(id -u)/ai.litellm.relay"
+install_relaybar_agent
 
 # Periodic auto-configuration: re-detect installed AI tools on an interval so a
 # tool installed after Relay gets wired to the Gateway automatically, with no

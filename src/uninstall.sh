@@ -88,6 +88,7 @@ fi
 
 PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.plist"
 AUTOCONFIGURE_PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.autoconfigure.plist"
+RELAYBAR_PLIST="$HOME/Library/LaunchAgents/ai.litellm.relaybar.plist"
 DESKTOP_DAEMON_LABEL="ai.litellm.relay.autoconfigure-desktop"
 DESKTOP_DAEMON_PLIST="/Library/LaunchDaemons/$DESKTOP_DAEMON_LABEL.plist"
 CLAUDE_DESKTOP_MANAGED_PLIST="/Library/Managed Preferences/com.anthropic.claudefordesktop.plist"
@@ -192,6 +193,8 @@ launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 rm -f "$PLIST"
 launchctl bootout "gui/$(id -u)" "$AUTOCONFIGURE_PLIST" >/dev/null 2>&1 || true
 rm -f "$AUTOCONFIGURE_PLIST"
+launchctl bootout "gui/$(id -u)" "$RELAYBAR_PLIST" >/dev/null 2>&1 || true
+rm -f "$RELAYBAR_PLIST"
 $SUDO launchctl bootout system "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
 $SUDO rm -f "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
 remove_claude_desktop_managed_settings
@@ -223,6 +226,7 @@ LiteLLM Relay uninstall complete.
 Removed:
   LaunchAgent: $PLIST
   LaunchAgent: $AUTOCONFIGURE_PLIST
+  LaunchAgent: $RELAYBAR_PLIST
   LaunchDaemon: $DESKTOP_DAEMON_PLIST
 DONE
 
