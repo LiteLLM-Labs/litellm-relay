@@ -47,6 +47,15 @@ struct CommandError: Equatable {
     let message: String
 }
 
+enum RelayHome {
+    static func locate(environment: [String: String]) -> URL {
+        if let home = environment["HOME"], !home.isEmpty {
+            return URL(fileURLWithPath: home, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+}
+
 enum RelayBinary {
     static func locate(environment: [String: String], home: URL) -> URL {
         if let override = environment["RELAY_BIN"], !override.isEmpty {

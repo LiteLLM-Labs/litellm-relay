@@ -17,7 +17,7 @@ final class AppModel: ObservableObject {
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        home: URL = FileManager.default.homeDirectoryForCurrentUser
+        home: URL = RelayHome.locate(environment: ProcessInfo.processInfo.environment)
     ) {
         let configPath = home.appendingPathComponent(".litellm-relay/config.yaml")
         let configYAML = (try? String(contentsOf: configPath, encoding: .utf8)) ?? ""

@@ -125,6 +125,12 @@ import Testing
         #expect(RelayBinary.locate(environment: ["RELAY_BIN": ""], home: home).path == "/Users/dev/.litellm-relay/bin/litellm-relay")
     }
 
+    @Test func relayHomeFollowsTheHomeVariableTheDaemonReads() {
+        #expect(RelayHome.locate(environment: ["HOME": "/tmp/l85/after/home"]).path == "/tmp/l85/after/home")
+        #expect(RelayHome.locate(environment: ["HOME": ""]) == FileManager.default.homeDirectoryForCurrentUser)
+        #expect(RelayHome.locate(environment: [:]) == FileManager.default.homeDirectoryForCurrentUser)
+    }
+
     private func broker(displayName: String?, userId: String?) -> BrokerStatus {
         BrokerStatus(signedIn: true, userId: userId, displayName: displayName, team: nil, environment: nil, gatewayUrl: nil, keyExpiresAt: nil, source: nil)
     }
