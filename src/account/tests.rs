@@ -88,6 +88,10 @@ fn should_read_teams_email_and_the_team_budget_with_the_daemon_bearer() {
         assert_eq!(calls[0].timeout, Duration::from_secs(15), "{route}");
     }
     assert!(!status.to_string().contains(&bearer));
+    assert_eq!(
+        account.known_teams(),
+        Some(vec!["team-a".to_string(), "team-b".to_string()])
+    );
 }
 
 #[test]
@@ -137,6 +141,7 @@ fn should_degrade_to_the_current_team_when_user_info_fails_or_lists_nothing() {
     assert_eq!(status["teams"], json!([{"id": "team-a", "alias": null}]));
     assert_eq!(status["teams_error"], "connection refused");
     assert_eq!(status["team"]["spend"], 1.5);
+    assert_eq!(account.known_teams(), None);
 
     http.answer("/user/info", 500, "upstream exploded");
     rig.clock.advance(300);
@@ -159,6 +164,29 @@ fn should_degrade_to_the_current_team_when_user_info_fails_or_lists_nothing() {
         status["teams_error"],
         "the Gateway lists no teams for this user"
     );
+    assert_eq!(account.known_teams(), None);
+}
+
+#[test]
+fn should_recheck_everything_at_once_and_refetch_at_once_after_refresh_now() {
+    let (_rig, http, account) = signed_in();
+    account.poll();
+    let rechecked = account.recheck();
+    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/team/info?team_id=team-a"), 2);
+    assert_eq!(count(&http, "/health/liveliness"), 2);
+    assert_eq!(rechecked, account.status());
+    assert_eq!(rechecked["gateway"]["reachable"], true);
+    assert_eq!(rechecked["team"]["spend"], 1.5);
+
+    account.poll();
+    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/health/liveliness"), 2);
+
+    account.refresh_now();
+    account.poll();
+    assert_eq!(count(&http, "/user/info"), 3);
+    assert_eq!(count(&http, "/health/liveliness"), 3);
 }
 
 #[test]
@@ -241,6 +269,7 @@ fn should_clear_the_account_when_signed_out_and_still_probe_the_gateway() {
     );
     assert_eq!(status["budget_error"], Value::Null);
     assert_eq!(status["polled_at"], Value::Null);
+    assert_eq!(account.known_teams(), None);
     assert_eq!(status["gateway"]["reachable"], true);
     assert_eq!(status["gateway"]["checked_at"], rfc3339(NOW + 60));
     assert_eq!(count(&http, "/user/info"), 1);
@@ -275,6 +304,7 @@ fn should_fetch_at_once_after_a_team_switch_and_after_an_environment_switch() {
         rig.broker.switch_environment("uat"),
         Reply::Switched(_)
     ));
+    assert_eq!(account.known_teams(), None);
     account.poll();
     let users = http.calls_to("/user/info");
     assert_eq!(users.len(), 3);

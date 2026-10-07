@@ -188,6 +188,35 @@ impl AccountService {
         }
     }
 
+    pub fn recheck(&self) -> Value {
+        {
+            let _pass = self.lock_pass();
+            let now = self.deps.clock.now();
+            let broker = self.broker.status();
+            self.poll_account(&broker, now);
+            self.probe_gateway(&broker.gateway_url, now);
+        }
+        self.status()
+    }
+
+    pub fn refresh_now(&self) {
+        let mut state = self.lock_state();
+        state.account_checked_at = None;
+        state.reachability_checked_at = None;
+    }
+
+    pub fn known_teams(&self) -> Option<Vec<String>> {
+        let identity = self.broker.session_identity()?;
+        let state = self.lock_state();
+        if state.identity.as_ref() != Some(&identity) || state.teams_error.is_some() {
+            return None;
+        }
+        state
+            .teams
+            .as_ref()
+            .map(|teams| teams.iter().map(|team| team.id.clone()).collect())
+    }
+
     pub fn status(&self) -> Value {
         let broker = self.broker.status();
         let state = self.lock_state();

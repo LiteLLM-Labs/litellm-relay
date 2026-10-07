@@ -7,6 +7,7 @@ mod broker;
 mod cert;
 mod config;
 mod credential;
+mod daemon;
 mod events;
 mod gateway;
 mod http;

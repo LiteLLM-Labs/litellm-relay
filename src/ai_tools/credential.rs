@@ -142,6 +142,10 @@ pub fn run_switch_environment(environment: &str) -> ExitCode {
     }))
 }
 
+pub fn run_recheck() -> ExitCode {
+    finish(ask(Request::Recheck))
+}
+
 fn finish(outcome: Outcome) -> ExitCode {
     match outcome {
         Outcome::Token(token) => {
@@ -199,16 +203,16 @@ fn unreachable_daemon(request: &Request, path: &Path, failure: transport::Failur
         ),
         transport::Failure::Broken(message) => message,
     };
-    match is_switch(request) {
+    match answers_json(request) {
         true => Outcome::Refused(json!({ "refused": "daemon_unavailable", "message": message })),
         false => Outcome::Failed(format!("relay credential: {message}")),
     }
 }
 
-fn is_switch(request: &Request) -> bool {
+fn answers_json(request: &Request) -> bool {
     matches!(
         request,
-        Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. }
+        Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. } | Request::Recheck
     )
 }
 
@@ -231,7 +235,7 @@ pub(crate) fn interpret(request: &Request, reply: &Value) -> Outcome {
         let message = reply["message"]
             .as_str()
             .unwrap_or("the daemon answered with an error");
-        return match is_switch(request) {
+        return match answers_json(request) {
             true => Outcome::Refused(json!({ "refused": reason, "message": message })),
             false => Outcome::Failed(format!("relay credential: {reason}: {message}")),
         };
@@ -253,7 +257,7 @@ pub(crate) fn interpret(request: &Request, reply: &Value) -> Outcome {
             Outcome::Done("Signed out; the session and its key are gone.".to_string())
         }
         Request::Status => Outcome::Done(reply.to_string()),
-        Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. } => {
+        Request::SwitchTeam { .. } | Request::SwitchEnvironment { .. } | Request::Recheck => {
             Outcome::Json(without_ok(reply))
         }
     }
@@ -423,6 +427,40 @@ mod tests {
                 "refused": "unknown_environment",
                 "message": "no environment named \"qa\"; configured: prod, uat"
             }))
+        );
+    }
+
+    #[test]
+    fn should_print_the_account_block_for_a_recheck_reply() {
+        assert_eq!(
+            serde_json::to_value(Request::Recheck).unwrap(),
+            json!({"op": "recheck"})
+        );
+        assert_eq!(
+            interpret(
+                &Request::Recheck,
+                &json!({"ok": true, "teams": [{"id": "team-a", "alias": null}], "gateway": {"reachable": true}})
+            ),
+            Outcome::Json(
+                json!({"teams": [{"id": "team-a", "alias": null}], "gateway": {"reachable": true}})
+            )
+        );
+        assert_eq!(
+            interpret(
+                &Request::Recheck,
+                &json!({"ok": false, "reason": "bad_request", "message": "nope"})
+            ),
+            Outcome::Refused(json!({"refused": "bad_request", "message": "nope"}))
+        );
+        assert_eq!(
+            unreachable_daemon(
+                &Request::Recheck,
+                Path::new("/nonexistent/broker.sock"),
+                transport::Failure::Broken("no answer from the daemon".to_string()),
+            ),
+            Outcome::Refused(
+                json!({"refused": "daemon_unavailable", "message": "no answer from the daemon"})
+            )
         );
     }
 

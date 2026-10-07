@@ -201,6 +201,7 @@ pub enum Request {
     Status,
     SwitchTeam { team: String },
     SwitchEnvironment { environment: String },
+    Recheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +241,7 @@ pub enum Refusal {
     GatewayError(String),
     BadRequest(String),
     UnknownEnvironment(String),
+    UnknownTeam(String),
     SwitchFailed(String),
 }
 
@@ -252,6 +254,7 @@ impl Refusal {
             Refusal::GatewayError(_) => "gateway_error",
             Refusal::BadRequest(_) => "bad_request",
             Refusal::UnknownEnvironment(_) => "unknown_environment",
+            Refusal::UnknownTeam(_) => "unknown_team",
             Refusal::SwitchFailed(_) => "switch_failed",
         }
     }
@@ -264,6 +267,7 @@ impl Refusal {
             | Refusal::GatewayError(message)
             | Refusal::BadRequest(message)
             | Refusal::UnknownEnvironment(message)
+            | Refusal::UnknownTeam(message)
             | Refusal::SwitchFailed(message) => message,
         }
     }
@@ -317,13 +321,14 @@ pub struct Switched {
     pub source: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     Credential(Issued),
     SignedIn { user_id: Option<String> },
     SignedOut,
     Status(BrokerStatus),
     Switched(Switched),
+    Account(Value),
     Refused(Refusal),
 }
 
@@ -343,6 +348,7 @@ impl Reply {
             Reply::SignedOut => json!({ "ok": true, "signed_in": false }),
             Reply::Status(status) => with_ok(serde_json::to_value(status)),
             Reply::Switched(switched) => with_ok(serde_json::to_value(switched)),
+            Reply::Account(status) => with_ok(Ok(status.clone())),
             Reply::Refused(refusal) => json!({
                 "ok": false,
                 "reason": refusal.reason(),
@@ -555,6 +561,9 @@ impl Broker {
             Request::Status => Reply::Status(self.status()),
             Request::SwitchTeam { team } => self.switch_team(&team),
             Request::SwitchEnvironment { environment } => self.switch_environment(&environment),
+            Request::Recheck => Reply::Refused(Refusal::BadRequest(
+                "recheck is answered by the daemon's account service, not the broker".to_string(),
+            )),
         }
     }
 
@@ -2022,6 +2031,25 @@ mod tests {
         assert_eq!(
             Reply::Refused(Refusal::SwitchFailed("refused".to_string())).to_json()["reason"],
             "switch_failed"
+        );
+        assert_eq!(
+            Reply::Refused(Refusal::UnknownTeam("no such".to_string())).to_json()["reason"],
+            "unknown_team"
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>("{\"op\":\"recheck\"}").expect("parse"),
+            Request::Recheck
+        );
+        let account =
+            Reply::Account(json!({"teams": [{"id": "team-a"}], "polled_at": null})).to_json();
+        assert_eq!(account["ok"], true);
+        assert_eq!(account["teams"], json!([{"id": "team-a"}]));
+        assert_eq!(account["polled_at"], Value::Null);
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let bare = rig.broker.handle(Request::Recheck, rig.peer());
+        assert!(
+            matches!(bare, Reply::Refused(Refusal::BadRequest(_))),
+            "{bare:?}"
         );
     }
 

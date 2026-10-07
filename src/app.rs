@@ -7,8 +7,8 @@ use crate::{
     ai_tools::{
         autoconfigure,
         credential::{
-            daemon_answers, run_credential, run_sign_in, run_sign_out, run_switch_environment,
-            run_switch_team, Audience, Host, LAUNCH_AGENT_LABEL,
+            daemon_answers, run_credential, run_recheck, run_sign_in, run_sign_out,
+            run_switch_environment, run_switch_team, Audience, Host, LAUNCH_AGENT_LABEL,
         },
         detect::AiTool,
         launch_agent::{host_plist, runs_as_agent, DaemonHost, Launchd},
@@ -62,6 +62,9 @@ enum HelperCommand {
     /// Point the daemon at a configured environment's Gateway, keeping the IdP
     /// session; prints one JSON line.
     SwitchEnvironment { environment: String },
+    /// Probe the Gateway and fetch the teams and the budget now; prints the
+    /// account block of /api/status as one JSON line.
+    Recheck,
     /// Serve the Gateway's MCP tools to the calling client over stdio; every
     /// call goes to the daemon, which holds the credential and the catalog.
     Mcp,
@@ -212,6 +215,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Helper(HelperCommand::SwitchEnvironment { environment })) => {
             Ok(run_switch_environment(&environment))
         }
+        Some(Command::Helper(HelperCommand::Recheck)) => Ok(run_recheck()),
         Some(Command::Helper(HelperCommand::Mcp)) => Ok(run_mcp().await),
     }
 }
@@ -406,6 +410,7 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         poll_forever, AccountDependencies, AccountService, HttpAccount, POLL_TICK,
     };
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
+    use crate::daemon::Daemon;
     use crate::mcp::{
         service::{watch_session, McpDependencies, McpService, SESSION_CHECK_INTERVAL},
         socket as mcp_socket,
@@ -433,14 +438,6 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         None => {}
     }
     let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
-    let listener = socket::bind(&path)?;
-    eprintln!("broker: listening on {}", path.display());
-    let socket_task = tokio::spawn(socket::serve(
-        Arc::clone(&broker),
-        listener,
-        socket::daemon_uid(),
-    ));
-    let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
     let account = Arc::new(AccountService::new(
         Arc::clone(&broker),
         AccountDependencies {
@@ -449,6 +446,15 @@ async fn serve(settings: RelaySettings) -> Result<()> {
             settings: Box::new(crate::broker::FileSettings),
         },
     ));
+    let daemon = Arc::new(Daemon::new(Arc::clone(&broker), Arc::clone(&account)));
+    let listener = socket::bind(&path)?;
+    eprintln!("broker: listening on {}", path.display());
+    let socket_task = tokio::spawn(socket::serve(
+        Arc::clone(&daemon),
+        listener,
+        socket::daemon_uid(),
+    ));
+    let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
     let poller = tokio::spawn(poll_forever(Arc::clone(&account), POLL_TICK));
     let mcp = Arc::new(McpService::new(
         Arc::clone(&broker),
@@ -586,6 +592,7 @@ mod tests {
                 vec!["relay", "switch-environment", "uat"],
                 "switch-environment uat".to_string(),
             ),
+            (vec!["relay", "recheck"], "recheck".to_string()),
             (vec!["relay", "mcp"], "mcp".to_string()),
         ] {
             let cli = Cli::try_parse_from(args).expect("the command line must parse");
@@ -604,6 +611,7 @@ mod tests {
                 Command::Helper(HelperCommand::SwitchEnvironment { environment }) => {
                     format!("switch-environment {environment}")
                 }
+                Command::Helper(HelperCommand::Recheck) => "recheck".to_string(),
                 Command::Helper(HelperCommand::Mcp) => "mcp".to_string(),
                 Command::Daemon(other) => describe(&other).to_string(),
             };

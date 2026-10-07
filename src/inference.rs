@@ -180,6 +180,7 @@ fn refusal_status(refusal: &Refusal) -> StatusCode {
         Refusal::GatewayError(_)
         | Refusal::BadRequest(_)
         | Refusal::UnknownEnvironment(_)
+        | Refusal::UnknownTeam(_)
         | Refusal::SwitchFailed(_) => StatusCode::BAD_GATEWAY,
     }
 }
