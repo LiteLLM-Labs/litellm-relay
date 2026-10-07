@@ -99,6 +99,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 STAGE_DIR="$(mktemp -d)"
 SCRIPTS_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR" "$SCRIPTS_DIR"' EXIT
+chmod 755 "$STAGE_DIR"
 
 # Payload laid down at $INSTALL_LOCATION on the device.
 install -m 0755 "$BINARY" "$STAGE_DIR/litellm-relay"
@@ -133,6 +134,7 @@ pkgbuild \
   --install-location "$INSTALL_LOCATION" \
   --scripts "$SCRIPTS_DIR" \
   "$UNSIGNED_PKG"
+"$SCRIPT_DIR/macos-pkg/check-payload.sh" "$UNSIGNED_PKG"
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "Signing package with: $SIGN_IDENTITY"
