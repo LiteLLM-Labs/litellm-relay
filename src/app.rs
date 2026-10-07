@@ -461,6 +461,7 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         &settings.mcp,
         McpDependencies {
             upstream: Arc::new(RmcpUpstream::default()),
+            switcher: daemon.clone(),
             settings: Box::new(crate::broker::FileSettings),
             clock: Box::new(crate::broker::SystemClock),
         },

@@ -4,11 +4,16 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::{
-    broker::test_support::{idp_settings, static_key_settings, Rig, GATEWAY},
+    broker::{
+        test_support::{idp_settings, static_key_settings, Rig, GATEWAY},
+        Refusal,
+    },
     config::RelaySettings,
     mcp::{
         catalog::tests::tool,
-        test_support::{service_on, FakeAsker, FakeUpstream},
+        test_support::{
+            service_on, service_with, FakeAsker, FakeSwitcher, FakeUpstream, UAT_GATEWAY,
+        },
         upstream::UpstreamTool,
     },
 };
@@ -523,12 +528,155 @@ async fn should_give_a_refused_caller_no_catalog_and_no_call() {
         json!({"op": "describe_tool", "name": "github-get_issue"}),
         json!({"op": "call_tool", "name": "github-get_issue"}),
         json!({"op": "activate_server", "server": "github"}),
+        json!({"op": "switch_team"}),
+        json!({"op": "switch_environment", "environment": "uat"}),
     ] {
         assert_eq!(reason(run(&rig, &service, request).await), "caller_refused");
     }
-    assert_eq!(rig.callers.checks(), 4);
+    assert_eq!(rig.callers.checks(), 6);
     assert!(upstream.lists().is_empty());
     assert!(upstream.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_list_the_selection_without_asking_when_a_switch_tool_has_no_argument() {
+    let upstream = FakeUpstream::serving(tools());
+    let switcher = FakeSwitcher::default();
+    let (rig, service) = service_with(static_key_settings("sk-static"), &upstream, &switcher);
+    let mut silent = FakeAsker::default();
+    for request in [
+        json!({"op": "switch_team"}),
+        json!({"op": "switch_environment"}),
+    ] {
+        let listed = ask(&rig, &service, request, &mut silent)
+            .await
+            .expect("listed");
+        assert_eq!(listed, switcher.selection());
+        assert_eq!(listed["team"], "team-a");
+        assert_eq!(listed["environment"], "dev");
+        assert_eq!(listed["gateway_url"], GATEWAY);
+        assert_eq!(listed["teams"][1], json!({"id": "team-b", "alias": null}));
+        assert_eq!(listed["teams_error"], Value::Null);
+        assert_eq!(
+            listed["environments"][1],
+            json!({"name": "uat", "url": UAT_GATEWAY})
+        );
+    }
+    assert!(silent.questions.is_empty());
+    assert!(switcher.switches().is_empty());
+    assert!(upstream.lists().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_switch_the_team_only_after_a_confirmation_and_refetch_the_catalog_at_once() {
+    let upstream = FakeUpstream::serving(tools());
+    let switcher = FakeSwitcher::default();
+    let (rig, service) = service_with(static_key_settings("sk-static"), &upstream, &switcher);
+    run(
+        &rig,
+        &service,
+        json!({"op": "search_tools", "query": "issue"}),
+    )
+    .await
+    .expect("searched");
+    service.check_session().await;
+    assert_eq!(upstream.lists().len(), 1);
+
+    let switch = json!({"op": "switch_team", "team": "team-b"});
+    for (answer, expected) in [
+        (Answer::Unsupported, "confirmation_required"),
+        (Answer::Decline, "declined"),
+        (Answer::Cancel, "cancelled"),
+    ] {
+        let mut asker = FakeAsker::answering(&[answer]);
+        assert_eq!(
+            reason(ask(&rig, &service, switch.clone(), &mut asker).await),
+            expected
+        );
+        assert_eq!(
+            asker.questions,
+            vec![Question {
+                kind: QuestionKind::SwitchTeam,
+                message: "Switch the team to \"team-b\"?".to_string(),
+            }]
+        );
+    }
+    assert!(switcher.switches().is_empty());
+    service.check_session().await;
+    assert_eq!(upstream.lists().len(), 1);
+
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    let result = ask(&rig, &service, switch, &mut accepting)
+        .await
+        .expect("switched");
+    assert_eq!(
+        switcher.switches(),
+        vec![("team".to_string(), "team-b".to_string())]
+    );
+    assert_eq!(result["team"], "team-b");
+    assert_eq!(result["environment"], "dev");
+    assert_eq!(result["gateway_url"], GATEWAY);
+    assert_eq!(result["key_expires_at"], "2027-01-15T08:00:00Z");
+    assert_eq!(result["source"], "minted_key");
+    assert_eq!(result["teams"], switcher.selection()["teams"]);
+    assert_eq!(result["environments"], switcher.selection()["environments"]);
+    service.check_session().await;
+    assert_eq!(upstream.lists().len(), 2);
+    assert_eq!(rig.browser_opens(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_switch_the_environment_after_a_confirmation_and_pass_the_daemon_refusal_through() {
+    let upstream = FakeUpstream::serving(tools());
+    let switcher = FakeSwitcher::default();
+    let (rig, service) = service_with(static_key_settings("sk-static"), &upstream, &switcher);
+    let switch = json!({"op": "switch_environment", "environment": "uat"});
+    let mut declining = FakeAsker::answering(&[Answer::Decline]);
+    assert_eq!(
+        reason(ask(&rig, &service, switch.clone(), &mut declining).await),
+        "declined"
+    );
+    assert_eq!(
+        declining.questions,
+        vec![Question {
+            kind: QuestionKind::SwitchEnvironment,
+            message: format!("Switch the environment to \"uat\" ({UAT_GATEWAY})?"),
+        }]
+    );
+    assert!(switcher.switches().is_empty());
+
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    let result = ask(&rig, &service, switch, &mut accepting)
+        .await
+        .expect("switched");
+    assert_eq!(
+        switcher.switches(),
+        vec![("environment".to_string(), "uat".to_string())]
+    );
+    assert_eq!(result["environment"], "uat");
+    assert_eq!(result["gateway_url"], UAT_GATEWAY);
+    assert_eq!(result["team"], "team-a");
+    assert_eq!(result["source"], "minted_key");
+
+    switcher.refusing(Refusal::UnknownEnvironment(
+        "no environment is named prod; the configured names are dev, uat".to_string(),
+    ));
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    let refused = ask(
+        &rig,
+        &service,
+        json!({"op": "switch_environment", "environment": "prod"}),
+        &mut accepting,
+    )
+    .await
+    .expect_err("refused");
+    assert_eq!(
+        accepting.questions[0].message,
+        "Switch the environment to \"prod\"?"
+    );
+    assert_eq!(refused.reason(), "unknown_environment");
+    assert!(refused.message().contains("dev, uat"));
+    assert_eq!(switcher.switches().len(), 1);
 }
 
 async fn overlap_at_most(settings: RelaySettings, cap: usize) {

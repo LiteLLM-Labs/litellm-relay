@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
+use serde_json::{json, Value};
+
 use crate::{
     account::AccountService,
     broker::{caller::Peer, Broker, Handler, Refusal, Reply, Request},
+    mcp::service::Switcher,
 };
 
 pub struct Daemon {
@@ -15,7 +18,16 @@ impl Daemon {
         Self { broker, account }
     }
 
-    pub fn switch_team(&self, team: &str) -> Reply {
+    fn refreshed(&self, reply: Reply) -> Reply {
+        if matches!(reply, Reply::Switched(_) | Reply::SignedIn { .. }) {
+            self.account.refresh_now();
+        }
+        reply
+    }
+}
+
+impl Switcher for Daemon {
+    fn switch_team(&self, team: &str) -> Reply {
         if let Some(known) = self.account.known_teams() {
             if !known.iter().any(|id| id == team) {
                 return Reply::Refused(Refusal::UnknownTeam(format!(
@@ -27,15 +39,21 @@ impl Daemon {
         self.refreshed(self.broker.switch_team(team))
     }
 
-    pub fn switch_environment(&self, name: &str) -> Reply {
+    fn switch_environment(&self, name: &str) -> Reply {
         self.refreshed(self.broker.switch_environment(name))
     }
 
-    fn refreshed(&self, reply: Reply) -> Reply {
-        if matches!(reply, Reply::Switched(_) | Reply::SignedIn { .. }) {
-            self.account.refresh_now();
-        }
-        reply
+    fn selection(&self) -> Value {
+        let account = self.account.status();
+        let environments = self.account.environments();
+        json!({
+            "team": account["team"]["id"],
+            "environment": environments["current"],
+            "gateway_url": account["gateway"]["url"],
+            "teams": account["teams"],
+            "teams_error": account["teams_error"],
+            "environments": environments["available"],
+        })
     }
 }
 
@@ -220,5 +238,51 @@ mod tests {
 
     fn reply_ok(reply: &Reply) -> bool {
         reply.to_json()["ok"] == true
+    }
+
+    #[test]
+    fn should_describe_the_selection_from_the_account_and_the_configured_environments() {
+        let mut settings = idp_settings(Some("team-a"));
+        settings.environments = vec![
+            EnvironmentEntry {
+                name: "dev".to_string(),
+                url: GATEWAY.to_string(),
+                team: None,
+            },
+            EnvironmentEntry {
+                name: "uat".to_string(),
+                url: "https://uat.example.com".to_string(),
+                team: None,
+            },
+        ];
+        let (rig, _http, account, daemon) = daemon_on(settings);
+        assert_eq!(
+            daemon.selection(),
+            json!({
+                "team": "team-a",
+                "environment": "dev",
+                "gateway_url": GATEWAY,
+                "teams": null,
+                "teams_error": null,
+                "environments": [
+                    {"name": "dev", "url": GATEWAY},
+                    {"name": "uat", "url": "https://uat.example.com"},
+                ],
+            })
+        );
+
+        daemon.handle(Request::SignIn, rig.peer());
+        account.poll();
+        let selection = daemon.selection();
+        assert_eq!(
+            selection["teams"],
+            json!([{"id": "team-a", "alias": "Team A"}, {"id": "team-b", "alias": null}])
+        );
+        assert!(matches!(
+            Switcher::switch_team(&daemon, "team-b"),
+            Reply::Switched(_)
+        ));
+        assert_eq!(daemon.selection()["team"], "team-b");
+        assert!(!selection.to_string().contains("sk-"));
     }
 }
