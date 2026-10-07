@@ -342,6 +342,15 @@ DONE
   fi
 }
 
+install_relay_binary() {
+  local source="$1" target="$RELAY_HOME/bin/litellm-relay" staged
+  mkdir -p "$RELAY_HOME/bin"
+  staged="$(mktemp "$RELAY_HOME/bin/.litellm-relay.XXXXXX")"
+  cp "$source" "$staged"
+  chmod 700 "$staged"
+  mv -f "$staged" "$target"
+}
+
 stop_legacy_python_relay() {
   if ! command -v lsof >/dev/null 2>&1; then
     return 0
@@ -454,8 +463,7 @@ if [[ -n "$RELAY_PREBUILT_BINARY" ]]; then
   fi
   stop_legacy_python_relay
   echo "Installing prebuilt LiteLLM Relay binary..."
-  mkdir -p "$RELAY_HOME/bin"
-  cp "$RELAY_PREBUILT_BINARY" "$RELAY_HOME/bin/litellm-relay"
+  install_relay_binary "$RELAY_PREBUILT_BINARY"
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   BUILD_DIR=""
@@ -479,10 +487,8 @@ else
 
   echo "Building LiteLLM Relay..."
   cargo build --quiet --release --manifest-path "$BUILD_DIR/Cargo.toml"
-  mkdir -p "$RELAY_HOME/bin"
-  cp "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
+  install_relay_binary "$BUILD_DIR/target/release/litellm-relay"
 fi
-chmod 700 "$RELAY_HOME/bin/litellm-relay"
 
 if [[ -n "$RELAY_MANAGED_CONFIG" ]]; then
   if [[ ! -f "$RELAY_MANAGED_CONFIG" ]]; then
