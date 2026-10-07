@@ -11,7 +11,7 @@ RELAY_MANAGED_CONFIG="${RELAY_MANAGED_CONFIG:-}"
 RELAY_SKIP_SETUP="${RELAY_SKIP_SETUP:-0}"
 RELAY_AUTOCONFIGURE="${RELAY_AUTOCONFIGURE:-1}"
 RELAY_AUTOCONFIGURE_INTERVAL="${RELAY_AUTOCONFIGURE_INTERVAL:-3600}"
-RELAY_TRUST_CA="${RELAY_TRUST_CA:-1}"
+RELAY_TRUST_CA="${RELAY_TRUST_CA:-auto}"
 RELAY_RELAYBAR_APP="${RELAY_RELAYBAR_APP:-/usr/local/litellm-relay/RelayBarGlass.app}"
 RELAYBAR_LABEL="ai.litellm.relaybar"
 RELAYBAR_PLIST="$HOME/Library/LaunchAgents/$RELAYBAR_LABEL.plist"
@@ -41,7 +41,7 @@ Options:
   --skip-setup                    Skip the interactive gateway setup wizard (managed deploys)
   --skip-autoconfigure            Do not auto-detect and wire installed AI tools to the Gateway
                                   (also disables periodic re-detection of later installs)
-  --skip-trust-ca                 Install without adding the Relay CA to login keychain
+  --skip-trust-ca                 Install without adding the Relay CA to the login keychain
   --background                    Configure Gateway auth now, restart the Relay LaunchAgent,
                                   and re-detect AI tools on an interval
   --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
@@ -55,7 +55,11 @@ RELAY_SOURCE_URL/--source-url. Mutable main.tar.gz installs require the explicit
 RELAY_ALLOW_UNPINNED_MAIN=1 or --allow-unpinned-main opt-in.
 
 By default this installs the relay command and trusts the Relay local CA in your
-login keychain so AI app payloads can be captured. Then run:
+login keychain so AI app payloads can be captured; macOS asks for your account
+password in a Certificate Trust Settings sheet for that step. A managed install
+(--config-file or --skip-setup, which is what the .pkg postinstall runs) trusts
+the CA only when the seeded config sets capture.payloads: true, since nothing
+else needs it, and says so in the install log either way. Then run:
 
   relay
 
@@ -86,6 +90,8 @@ Environment:
   RELAY_AUTOCONFIGURE=0         Same as --skip-autoconfigure
   RELAY_AUTOCONFIGURE_INTERVAL  Seconds between periodic re-detection (default 3600)
   RELAY_TRUST_CA=0              Same as --skip-trust-ca
+  RELAY_TRUST_CA=1              Trust the Relay CA on a managed install whose
+                                config keeps payload capture off
   RELAY_RELAYBAR_APP            RelayBar menu bar app bundle to register at login
                                 (default /usr/local/litellm-relay/RelayBarGlass.app;
                                 skipped when absent)
@@ -246,9 +252,13 @@ if [[ -n "$RELAY_SHA256" && ! "$RELAY_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
   exit 2
 fi
 
-if [[ "$RELAY_TRUST_CA" != "0" && "$RELAY_TRUST_CA" != "1" ]]; then
-  echo "RELAY_TRUST_CA must be 0 or 1." >&2
+if [[ "$RELAY_TRUST_CA" != "0" && "$RELAY_TRUST_CA" != "1" && "$RELAY_TRUST_CA" != "auto" ]]; then
+  echo "RELAY_TRUST_CA must be 0, 1, or auto." >&2
   exit 2
+fi
+
+if [[ "$RELAY_SKIP_SETUP" == "1" ]]; then
+  SKIP_SETUP=1
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -464,20 +474,51 @@ ln -sf "$RELAY_HOME/bin/litellm-relay" "$INSTALL_BIN_DIR/litellm-relay"
 install_path_entry "$INSTALL_BIN_DIR"
 
 CA_PATH="$("$RELAY_HOME/bin/litellm-relay" ca-path)"
-if [[ "$RELAY_TRUST_CA" == "1" ]]; then
-  security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_PATH" >/dev/null 2>&1 || {
+CAPTURE_MODE="$("$RELAY_HOME/bin/litellm-relay" capture-mode)"
+LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+MANAGED_INSTALL=0
+if [[ -n "$RELAY_MANAGED_CONFIG" || "$SKIP_SETUP" == "1" ]]; then
+  MANAGED_INSTALL=1
+fi
+TRUST_CA="$RELAY_TRUST_CA"
+if [[ "$TRUST_CA" == "auto" ]]; then
+  if [[ "$MANAGED_INSTALL" == "1" && "$CAPTURE_MODE" != "payloads" ]]; then
+    TRUST_CA=0
+  else
+    TRUST_CA=1
+  fi
+fi
+CA_TRUST_STATE="not trusted"
+if [[ "$TRUST_CA" == "1" ]]; then
+  echo "Trusting the Relay CA in the login keychain so payload capture can read AI app traffic; macOS asks for your account password in the Certificate Trust Settings sheet."
+  if security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH" >/dev/null 2>&1; then
+    CA_TRUST_STATE="trusted in the login keychain"
+  else
     cat >&2 <<WARN
-warning: could not add the Relay CA to the login keychain.
-Payload capture requires trusting this certificate:
-  $CA_PATH
+warning: could not add the Relay CA to the login keychain: the Certificate Trust
+Settings sheet was cancelled, or no GUI session could show it (over ssh or from
+an MDM script the change is denied).
+Payload capture requires trusting this certificate; from a Terminal in your
+session run:
+  security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
 WARN
-  }
-else
+  fi
+elif [[ "$RELAY_TRUST_CA" == "0" ]]; then
   cat >&2 <<WARN
 Skipping Relay CA trust because RELAY_TRUST_CA=0 or --skip-trust-ca was set.
 Payload capture requires trusting this certificate later:
-  $CA_PATH
+  security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
 WARN
+else
+  cat <<SKIP
+Skipping Relay CA trust: this managed install keeps payload capture off
+(capture.payloads is not true in the seeded config), so nothing on this device
+needs the CA and no keychain password sheet is shown.
+To capture payloads later, set capture.payloads: true and trust the CA from a
+Terminal in the user's session:
+  security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
+or install with RELAY_TRUST_CA=1.
+SKIP
 fi
 
 if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
@@ -486,7 +527,7 @@ if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
 LiteLLM Relay installed.
 
 Command:     $INSTALL_BIN_DIR/relay
-Relay CA:    $CA_PATH
+Relay CA:    $CA_PATH ($CA_TRUST_STATE)
 
 Start the interactive setup:
   relay
@@ -506,10 +547,6 @@ Open a new terminal before running relay, or run:
 DONE
   fi
   exit 0
-fi
-
-if [[ "$RELAY_SKIP_SETUP" == "1" ]]; then
-  SKIP_SETUP=1
 fi
 
 if [[ "$SKIP_SETUP" == "1" ]]; then
@@ -677,7 +714,7 @@ Command:     $INSTALL_BIN_DIR/relay
 Relay proxy: 127.0.0.1:$RELAY_PORT
 Dashboard:   http://127.0.0.1:$RELAY_PORT/
 PAC URL:     http://127.0.0.1:$RELAY_PORT/proxy.pac
-Relay CA:    $CA_PATH
+Relay CA:    $CA_PATH ($CA_TRUST_STATE)
 Logs:        $RELAY_HOME/relay.log.jsonl
 
 To open the interactive terminal view:

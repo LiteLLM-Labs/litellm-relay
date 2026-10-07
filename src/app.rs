@@ -108,6 +108,9 @@ enum CommandKind {
     LaunchAgent,
     /// Create the local CA and print its path.
     CaPath,
+    /// Print `payloads` when the config turns payload capture on, which is
+    /// the one thing that needs the Relay CA trusted, and `metadata` otherwise.
+    CaptureMode,
     /// Configure Gateway URL and API key for Relay ingest.
     Setup {
         #[arg(long)]
@@ -259,6 +262,14 @@ enum ServeRefusal {
     AgentLoaded,
 }
 
+fn capture_mode_label(mitm_enabled: bool) -> &'static str {
+    if mitm_enabled {
+        "payloads"
+    } else {
+        "metadata"
+    }
+}
+
 fn another_daemon_answers(host: Host, answers: impl FnOnce() -> bool) -> bool {
     host == Host::MacOs && answers()
 }
@@ -296,6 +307,10 @@ async fn run_command(command: CommandKind) -> Result<()> {
         CommandKind::CaPath => {
             let ca = ensure_ca(&config.mitm_ca_dir)?;
             println!("{}", ca.cert_path.display());
+            Ok(())
+        }
+        CommandKind::CaptureMode => {
+            println!("{}", capture_mode_label(config.mitm_enabled));
             Ok(())
         }
         CommandKind::Setup {
@@ -569,6 +584,7 @@ mod tests {
             CommandKind::Pac => "pac",
             CommandKind::LaunchAgent => "launch-agent",
             CommandKind::CaPath => "ca-path",
+            CommandKind::CaptureMode => "capture-mode",
             CommandKind::Setup { .. } => "setup",
             CommandKind::Autoconfigure { .. } => "autoconfigure",
             CommandKind::Onboard { .. } => "onboard",
@@ -625,6 +641,16 @@ mod tests {
             describe(&daemon_command(&["relay", "claude-token"])),
             "claude-token"
         );
+        assert_eq!(
+            describe(&daemon_command(&["relay", "capture-mode"])),
+            "capture-mode"
+        );
+    }
+
+    #[test]
+    fn should_name_the_capture_mode_the_installer_keys_ca_trust_on() {
+        assert_eq!(capture_mode_label(true), "payloads");
+        assert_eq!(capture_mode_label(false), "metadata");
     }
 
     #[test]

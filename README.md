@@ -154,8 +154,13 @@ curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src
 ```
 
 The installer builds the `relay` command, adds it to your `PATH`, and trusts
-the local Relay CA so AI app payloads can be captured. Pass `--skip-trust-ca`
-to install without trusting the CA.
+the local Relay CA so AI app payloads can be captured; macOS asks for your
+account password in a Certificate Trust Settings sheet for that step. Pass
+`--skip-trust-ca` to install without trusting the CA. A managed install
+(`--config-file` or `--skip-setup`, which is what the `.pkg` runs) trusts the
+CA only when its config sets `capture.payloads: true`, so a fleet on the
+default metadata-only capture never sees that sheet; see
+[CA trust on managed devices](docs/mdm.md#ca-trust-on-managed-devices).
 
 Then open a new terminal and run:
 

@@ -50,6 +50,8 @@ shadow:
 
 # Metadata-only by default. Enable payloads only if your policy allows it;
 # Relay still redacts headers and never logs cookies or authorization.
+# payloads: true is also what makes the managed install trust the Relay CA in
+# the user's login keychain, which asks the user for their account password.
 capture:
   payloads: false
   payload_preview_bytes: 0

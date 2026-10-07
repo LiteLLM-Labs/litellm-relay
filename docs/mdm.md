@@ -5,8 +5,10 @@ MDM, plus one configuration profile that points macOS Auto Proxy at Relay's
 local PAC URL. Relay is macOS-only today.
 
 Endpoints do **not** need Rust/cargo: the `.pkg` carries a prebuilt binary and
-its postinstall installs Relay for the console user (CA trust in the login
-keychain + a per-user LaunchAgent). See [`scripts/build-macos-pkg.sh`](../scripts/build-macos-pkg.sh).
+its postinstall installs Relay for the console user (a per-user LaunchAgent,
+plus CA trust in the login keychain only when the managed config captures
+payloads; see [CA trust on managed devices](#ca-trust-on-managed-devices)).
+See [`scripts/build-macos-pkg.sh`](../scripts/build-macos-pkg.sh).
 
 Recommended shape, same as other endpoint software: manual pilot on one Mac,
 then a small MDM pilot group, then broaden.
@@ -48,6 +50,14 @@ Output: `dist/litellm-relay-0.1.0.pkg` plus a printed SHA-256. Signing is
 optional for a Jamf-only fleet but required for Intune (Gatekeeper). Tagging a
 release (`v*`) also builds the `.pkg` per architecture in
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
+
+The payload lands at `/usr/local/litellm-relay` owned by root, and the
+postinstall runs `install.sh` from there as the console user, so every payload
+entry has to be readable by other users. The builder stages the payload in a
+world-readable root and then runs
+[`scripts/macos-pkg/check-payload.sh`](../scripts/macos-pkg/check-payload.sh)
+on the built package, which fails the build and lists any entry other users
+could not read; run it by hand on any `.pkg` before uploading it to your MDM.
 
 Add `--relaybar` (or set `RELAY_PKG_RELAYBAR=1`) to ship the RelayBar menu
 bar app in the same package. The build host needs `swift` on PATH, since the
@@ -109,14 +119,33 @@ curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
    `http://127.0.0.1:4142/` and the Gateway on a pilot Mac.
 5. **Broaden.** Change the assignment to the full device group.
 
-Use Intune trusted-certificate profiles only when testing a future managed-CA
-MITM mode; the default install trusts Relay's CA in the user login keychain.
+An Intune trusted-certificate profile cannot pre-trust Relay's CA, because the
+daemon generates that CA per device; see
+[CA trust on managed devices](#ca-trust-on-managed-devices).
 
 ## Kandji
 
 1. Upload the `.pkg` as a **Custom App**, audit-and-enforce or install-once.
 2. Add a **Custom Profile** with the PAC payload above.
-3. Use a Certificate Library Item only for a future managed-CA MITM test.
+3. Skip Certificate Library Items: the Relay CA is per device (see
+   [CA trust on managed devices](#ca-trust-on-managed-devices)).
+
+## CA trust on managed devices
+
+Relay's CA ("LiteLLM Relay Local Root CA") is generated on each device by the
+daemon, so no fleet-wide trust profile can carry it, and only payload capture
+(`capture.payloads: true`) ever needs it: the Claude Code, Codex, and Claude
+Desktop flows go to the Gateway through the credential broker, and with
+payload capture off the proxy tunnels TLS without decrypting it. The `.pkg`
+install therefore trusts the CA in the user's login keychain only when the
+managed config sets `capture.payloads: true`. That step raises the macOS
+"Certificate Trust Settings" password sheet on the device, and the install log
+(`/var/log/install.log`) says so before it appears; a cancelled sheet logs a
+warning with the command to run later, and the install carries on. With the
+default `capture.payloads: false` the install logs that it skipped CA trust and
+why, no sheet appears, and nothing is left for `--remove-ca-trust` to remove.
+`install.sh` run by hand (no `--config-file` or `--skip-setup`) keeps trusting
+the CA by default, since a person is there to answer the sheet.
 
 ## Offboarding / uninstall
 
@@ -131,6 +160,14 @@ PAC profile so macOS stops using Auto Proxy:
 The uninstaller also boots out and removes the RelayBar LaunchAgent
 (`~/Library/LaunchAgents/ai.litellm.relaybar.plist`) when the package shipped
 the menu bar app.
+
+`--remove-ca-trust` removes every "LiteLLM Relay Local Root CA" certificate
+from the login keychain, including one a reinstall left behind, and its trust
+setting. A trusted one needs the account password in the Certificate Trust
+Settings sheet, which macOS shows only in the user's GUI session, so run that
+flag from a Terminal in that session; over ssh or from an MDM script the trust
+change is denied and the uninstaller prints which certificate stayed, its
+trust state, why, and the command to finish from the session.
 
 ## Credential broker
 
