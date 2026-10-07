@@ -159,31 +159,34 @@ fn claude_binary(path: Option<&OsStr>, home: &Path) -> Option<PathBuf> {
 }
 
 fn install_dirs(home: &Path) -> Vec<PathBuf> {
-    let mut nvm_versions: Vec<((u64, u64, u64), PathBuf)> =
-        fs::read_dir(home.join(".nvm/versions/node"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|version| {
-                (
-                    node_version(&version.file_name()),
-                    version.path().join("bin"),
-                )
-            })
-            .collect();
-    nvm_versions.sort_by_key(|(version, _)| Reverse(*version));
+    let nvm_versions = fs::read_dir(home.join(".nvm/versions/node"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|version| version.path());
     [
         home.join(".local/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]
     .into_iter()
-    .chain(nvm_versions.into_iter().map(|(_, bin)| bin))
+    .chain(nvm_bins_newest_first(nvm_versions))
     .collect()
 }
 
 /// nvm names a version directory `v<major>.<minor>.<patch>`; the newest one is
 /// the likeliest default, so it is tried first and a name that is no version last.
+fn nvm_bins_newest_first(versions: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut bins: Vec<((u64, u64, u64), PathBuf)> = versions
+        .map(|dir| {
+            let name = dir.file_name().unwrap_or(OsStr::new(""));
+            (node_version(name), dir.join("bin"))
+        })
+        .collect();
+    bins.sort_by_key(|(version, _)| Reverse(*version));
+    bins.into_iter().map(|(_, bin)| bin).collect()
+}
+
 fn node_version(name: &OsStr) -> (u64, u64, u64) {
     let mut parts = name
         .to_str()
@@ -649,6 +652,39 @@ mod tests {
             claude_binary(Some(&path), &home),
             Some(path_bin.join("claude"))
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn should_try_nvm_versions_newest_first_after_the_fixed_install_dirs() {
+        let root = env::temp_dir().join(format!("relay-nvm-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let versions = home.join(".nvm/versions/node");
+        let names = ["v9.0.0", "v22.4.0", "v24.3.0", "v24.19.0", "v10.24.1"];
+        for name in names {
+            fs::create_dir_all(versions.join(name).join("bin")).unwrap();
+        }
+        let newest_first = ["v24.19.0", "v24.3.0", "v22.4.0", "v10.24.1", "v9.0.0"]
+            .map(|name| versions.join(name).join("bin"));
+
+        let dirs = install_dirs(&home);
+        assert_eq!(
+            dirs[..3],
+            [
+                home.join(".local/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+            ]
+        );
+        assert_eq!(dirs[3..], newest_first);
+        assert_eq!(
+            nvm_bins_newest_first(names.into_iter().map(|name| versions.join(name))),
+            newest_first
+        );
+        assert_eq!(node_version(OsStr::new("v24.19.0")), (24, 19, 0));
+        assert_eq!(node_version(OsStr::new("v10.24.1")), (10, 24, 1));
+        assert_eq!(node_version(OsStr::new("system")), (0, 0, 0));
         fs::remove_dir_all(&root).unwrap();
     }
 
