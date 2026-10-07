@@ -248,9 +248,8 @@ impl RelayServer {
 
 fn client_can_ask(context: &RequestContext<RoleServer>) -> bool {
     context
-        .peer
-        .peer_info()
-        .is_some_and(|info| info.capabilities.elicitation.is_some())
+        .client_capabilities()
+        .is_some_and(|capabilities| capabilities.elicitation.is_some())
 }
 
 async fn answer(message: String, context: &RequestContext<RoleServer>) -> &'static str {
@@ -359,10 +358,10 @@ mod tests {
     use rmcp::{
         model::{
             ClientCapabilities, ClientConfig, ElicitRequestParams, ElicitResult, ElicitationAction,
-            Implementation, PaginatedRequestParams,
+            Implementation, PaginatedRequestParams, ProtocolVersion,
         },
         service::{RoleClient, RunningService},
-        ClientHandler,
+        ClientHandler, ClientLifecycleMode, ClientServiceExt,
     };
     use tokio::{net::UnixListener, sync::Barrier};
     use uuid::Uuid;
@@ -522,6 +521,14 @@ mod tests {
         socket: PathBuf,
         client: FakeClient,
     ) -> RunningService<RoleClient, FakeClient> {
+        connect_with(socket, client, ClientLifecycleMode::Initialize).await
+    }
+
+    async fn connect_with(
+        socket: PathBuf,
+        client: FakeClient,
+        lifecycle: ClientLifecycleMode,
+    ) -> RunningService<RoleClient, FakeClient> {
         let (server_side, client_side) = tokio::io::duplex(64 * 1024);
         tokio::spawn(async move {
             let server = RelayServer::new(socket)
@@ -530,7 +537,16 @@ mod tests {
                 .expect("server");
             let _ = server.waiting().await;
         });
-        client.serve(client_side).await.expect("client")
+        client
+            .serve_with_lifecycle(client_side, lifecycle)
+            .await
+            .expect("client")
+    }
+
+    fn discover_lifecycle() -> ClientLifecycleMode {
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        }
     }
 
     async fn call(
@@ -722,6 +738,48 @@ mod tests {
         assert_eq!(*stand_in.answers.lock().unwrap(), vec!["unsupported"]);
         assert!(asked.lock().unwrap().is_empty());
         assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            text_of(&result),
+            "confirmation_required: the client cannot ask"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_read_the_elicitation_capability_from_each_request_under_the_discover_handshake()
+    {
+        let socket = socket_in_temp_dir();
+        let stand_in = StandIn::serve(&socket, 1);
+        let client = FakeClient::answering(ElicitationAction::Accept, Some(true));
+        let asked = Arc::clone(&client.asked);
+        let running = connect_with(socket, client, discover_lifecycle()).await;
+        assert_eq!(
+            running.peer_info().expect("server info").protocol_version,
+            ProtocolVersion::V_2026_07_28
+        );
+        let result = call(
+            &running,
+            "call_tool",
+            json!({"name": "github-create_issue", "arguments": {"title": "x"}}),
+        )
+        .await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(*stand_in.answers.lock().unwrap(), vec!["accept"]);
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(text_of(&result), "ran");
+
+        let socket = socket_in_temp_dir();
+        let stand_in = StandIn::serve(&socket, 1);
+        let client = FakeClient::without_elicitation();
+        let asked = Arc::clone(&client.asked);
+        let running = connect_with(socket, client, discover_lifecycle()).await;
+        let result = call(
+            &running,
+            "call_tool",
+            json!({"name": "github-create_issue", "arguments": {"title": "x"}}),
+        )
+        .await;
+        assert!(asked.lock().unwrap().is_empty());
+        assert_eq!(*stand_in.answers.lock().unwrap(), vec!["unsupported"]);
         assert_eq!(
             text_of(&result),
             "confirmation_required: the client cannot ask"
