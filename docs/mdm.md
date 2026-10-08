@@ -285,7 +285,9 @@ write word such as create, delete, or send, and its upstream annotations do not
 claim otherwise); everything else is ask. An allow tool runs with no prompt.
 An ask tool, and every `activate_server`, runs only after the user confirms it
 in the client: the daemon sends one question over the connection, `relay mcp`
-turns it into an MCP elicitation, and the client shows its own dialog. Claude
+turns it into an MCP elicitation (a request of its own on a 2025 connection, an
+`input_required` tool result the client answers by retrying the call on a
+2026-07-28 one), and the client shows its own dialog. Claude
 Code shows a yes/no prompt naming the server, the tool, and the arguments, in
 its default and bypass modes alike, and answers cancel when it runs headless
 (`claude -p`). Codex shows a True/False dialog, where False and Esc both

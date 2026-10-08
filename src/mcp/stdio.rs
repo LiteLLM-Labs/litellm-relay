@@ -1,11 +1,19 @@
-use std::{future::Future, io::ErrorKind, path::PathBuf, process::ExitCode};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    io::ErrorKind,
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
+};
 
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ElicitRequestParams,
-        ElicitResult, ElicitationAction, ElicitationSchema, Implementation, JsonObject,
-        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-        ToolAnnotations,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ElicitRequest,
+        ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationSchema, Implementation,
+        InputRequest, InputRequiredResult, JsonObject, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
     },
     service::RequestContext,
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
@@ -13,17 +21,33 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    net::{
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+        UnixStream,
+    },
+    sync::Mutex,
 };
+use uuid::Uuid;
 
 use crate::{ai_tools::credential::LAUNCH_AGENT_LABEL, mcp::TOOL_NAMES};
 
 pub const SERVER_INFO_NAME: &str = "litellm-relay";
+pub const CONFIRMATION_TTL: Duration = Duration::from_secs(600);
+const CONFIRMATION_KEY: &str = "confirm";
 
 #[derive(Clone)]
 pub struct RelayServer {
     socket: PathBuf,
+    confirmation_ttl: Duration,
+    awaiting_confirmation: Arc<Mutex<HashMap<String, Conversation>>>,
+}
+
+struct Conversation {
+    op: String,
+    arguments: Option<JsonObject>,
+    writer: OwnedWriteHalf,
+    lines: Lines<BufReader<OwnedReadHalf>>,
 }
 
 #[derive(Deserialize)]
@@ -148,101 +172,225 @@ pub fn meta_tools() -> Vec<Tool> {
     ]
 }
 
-impl RelayServer {
-    pub fn new(socket: PathBuf) -> Self {
-        Self { socket }
-    }
-
-    async fn relay(
-        &self,
+impl Conversation {
+    async fn open(
+        socket: &PathBuf,
         op: &str,
         arguments: Option<JsonObject>,
-        context: &RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let mut request: Map<String, Value> = arguments.unwrap_or_default();
+    ) -> Result<Self, CallToolResult> {
+        let mut request: Map<String, Value> = arguments.clone().unwrap_or_default();
         request.insert("op".into(), json!(op));
-        let stream = match UnixStream::connect(&self.socket).await {
+        let stream = match UnixStream::connect(socket).await {
             Ok(stream) => stream,
             Err(error) if matches!(
                 error.kind(),
                 ErrorKind::NotFound | ErrorKind::ConnectionRefused
             ) =>
             {
-                return refused(
+                return Err(refused(
                     "daemon_unavailable",
                     &format!(
                         "the Relay daemon is not running (no socket at {}); start it with `relay serve` or load the {LAUNCH_AGENT_LABEL} LaunchAgent",
-                        self.socket.display()
+                        socket.display()
                     ),
-                )
+                ))
             }
             Err(error) => {
-                return refused(
+                return Err(refused(
                     "daemon_unavailable",
                     &format!("could not reach the daemon socket: {error}"),
-                )
+                ))
             }
         };
         let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        if let Err(error) = writer
+        writer
             .write_all(format!("{}\n", Value::Object(request)).as_bytes())
             .await
-        {
-            return refused(
+            .map_err(|error| {
+                refused(
+                    "daemon_unavailable",
+                    &format!("could not send the request: {error}"),
+                )
+            })?;
+        Ok(Self {
+            op: op.to_string(),
+            arguments,
+            writer,
+            lines: BufReader::new(reader).lines(),
+        })
+    }
+
+    async fn next(&mut self) -> Result<Step, CallToolResult> {
+        let line = match self.lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => {
+                return Err(refused(
+                    "daemon_unavailable",
+                    "the daemon closed the connection without a reply",
+                ))
+            }
+            Err(error) => {
+                return Err(refused(
+                    "daemon_unavailable",
+                    &format!("no answer from the daemon: {error}"),
+                ))
+            }
+        };
+        match serde_json::from_str::<DaemonLine>(line.trim()).map(Step::from) {
+            Ok(Step::Unknown) | Err(_) => Err(refused(
                 "daemon_unavailable",
-                &format!("could not send the request: {error}"),
-            );
+                "the daemon answered with something other than a known JSON line",
+            )),
+            Ok(step) => Ok(step),
         }
+    }
+
+    async fn answer(&mut self, answer: &str) -> Result<(), CallToolResult> {
+        self.writer
+            .write_all(format!("{}\n", json!({ "answer": answer })).as_bytes())
+            .await
+            .map_err(|error| {
+                refused(
+                    "daemon_unavailable",
+                    &format!("could not send the user's answer: {error}"),
+                )
+            })
+    }
+
+    fn finish(&self, result: Value) -> CallToolResult {
+        if self.op != "call_tool" {
+            return CallToolResult::structured(result);
+        }
+        serde_json::from_value::<CallToolResult>(result).unwrap_or_else(|error| {
+            refused(
+                "upstream_error",
+                &format!("the daemon's tool result could not be read: {error}"),
+            )
+        })
+    }
+
+    fn continues(&self, request: &CallToolRequestParams) -> bool {
+        self.op == request.name && self.arguments == request.arguments
+    }
+}
+
+impl RelayServer {
+    pub fn new(socket: PathBuf) -> Self {
+        Self {
+            socket,
+            confirmation_ttl: CONFIRMATION_TTL,
+            awaiting_confirmation: Arc::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_confirmation_ttl(self, confirmation_ttl: Duration) -> Self {
+        Self {
+            confirmation_ttl,
+            ..self
+        }
+    }
+
+    async fn relay(
+        &self,
+        request: CallToolRequestParams,
+        context: &RequestContext<RoleServer>,
+    ) -> CallToolResponse {
+        if let Some(state) = request.request_state.clone() {
+            return self.resume(request, &state, context).await;
+        }
+        match Conversation::open(&self.socket, &request.name, request.arguments).await {
+            Ok(conversation) => self.converse(conversation, context).await,
+            Err(result) => CallToolResponse::from(result),
+        }
+    }
+
+    async fn resume(
+        &self,
+        request: CallToolRequestParams,
+        state: &str,
+        context: &RequestContext<RoleServer>,
+    ) -> CallToolResponse {
+        let Some(mut conversation) = self.awaiting_confirmation.lock().await.remove(state) else {
+            return CallToolResponse::from(refused(
+                "confirmation_expired",
+                "no confirmation is waiting under this request state (it was answered, expired, or never issued); call the tool again",
+            ));
+        };
+        if !conversation.continues(&request) {
+            return CallToolResponse::from(refused(
+                "confirmation_mismatch",
+                "the continued call names another tool or other arguments than the ones the user was asked to confirm; nothing was run",
+            ));
+        }
+        let answer = request
+            .input_responses
+            .and_then(|mut responses| responses.remove(CONFIRMATION_KEY))
+            .and_then(|response| serde_json::from_value::<ElicitResult>(response).ok())
+            .map(answer_from)
+            .unwrap_or("cancel");
+        if let Err(result) = conversation.answer(answer).await {
+            return CallToolResponse::from(result);
+        }
+        self.converse(conversation, context).await
+    }
+
+    async fn converse(
+        &self,
+        mut conversation: Conversation,
+        context: &RequestContext<RoleServer>,
+    ) -> CallToolResponse {
         loop {
-            let line = match lines.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => {
-                    return refused(
-                        "daemon_unavailable",
-                        "the daemon closed the connection without a reply",
-                    )
-                }
-                Err(error) => {
-                    return refused(
-                        "daemon_unavailable",
-                        &format!("no answer from the daemon: {error}"),
-                    )
-                }
+            let step = match conversation.next().await {
+                Ok(step) => step,
+                Err(result) => return CallToolResponse::from(result),
             };
-            match serde_json::from_str::<DaemonLine>(line.trim()).map(Step::from) {
-                Ok(Step::Ask(message)) => {
-                    let answer = answer(message, context).await;
-                    if let Err(error) = writer
-                        .write_all(format!("{}\n", json!({ "answer": answer })).as_bytes())
-                        .await
-                    {
-                        return refused(
-                            "daemon_unavailable",
-                            &format!("could not send the user's answer: {error}"),
-                        );
+            match step {
+                Step::Ask(_) if !client_can_ask(context) => {
+                    if let Err(result) = conversation.answer("unsupported").await {
+                        return CallToolResponse::from(result);
                     }
                 }
-                Ok(Step::Done(result)) if op == "call_tool" => {
-                    return serde_json::from_value::<CallToolResult>(result).unwrap_or_else(
-                        |error| {
-                            refused(
-                                "upstream_error",
-                                &format!("the daemon's tool result could not be read: {error}"),
-                            )
-                        },
-                    )
+                Step::Ask(message) if inline_lifecycle(context) => {
+                    return self.park(conversation, message).await;
                 }
-                Ok(Step::Done(result)) => return CallToolResult::structured(result),
-                Ok(Step::Refused(reason, message)) => return refused(&reason, &message),
-                Ok(Step::Unknown) | Err(_) => {
-                    return refused(
+                Step::Ask(message) => {
+                    let answer = ask_through_the_peer(message, context).await;
+                    if let Err(result) = conversation.answer(answer).await {
+                        return CallToolResponse::from(result);
+                    }
+                }
+                Step::Done(result) => return CallToolResponse::from(conversation.finish(result)),
+                Step::Refused(reason, message) => {
+                    return CallToolResponse::from(refused(&reason, &message))
+                }
+                Step::Unknown => {
+                    return CallToolResponse::from(refused(
                         "daemon_unavailable",
                         "the daemon answered with something other than a known JSON line",
-                    )
+                    ))
                 }
             }
         }
+    }
+
+    async fn park(&self, conversation: Conversation, message: String) -> CallToolResponse {
+        let state = Uuid::new_v4().simple().to_string();
+        self.awaiting_confirmation
+            .lock()
+            .await
+            .insert(state.clone(), conversation);
+        let awaiting = Arc::clone(&self.awaiting_confirmation);
+        let (expiring, ttl) = (state.clone(), self.confirmation_ttl);
+        tokio::spawn(async move {
+            tokio::time::sleep(ttl).await;
+            awaiting.lock().await.remove(&expiring);
+        });
+        let input_requests = BTreeMap::from([(
+            CONFIRMATION_KEY.to_string(),
+            InputRequest::Elicitation(ElicitRequest::new(confirmation(message))),
+        )]);
+        CallToolResponse::InputRequired(InputRequiredResult::new(Some(input_requests), Some(state)))
     }
 }
 
@@ -252,21 +400,30 @@ fn client_can_ask(context: &RequestContext<RoleServer>) -> bool {
         .is_some_and(|capabilities| capabilities.elicitation.is_some())
 }
 
-async fn answer(message: String, context: &RequestContext<RoleServer>) -> &'static str {
-    if !client_can_ask(context) {
-        return "unsupported";
-    }
+fn inline_lifecycle(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_some_and(|version| !version.has_initialize())
+}
+
+fn confirmation(message: String) -> ElicitRequestParams {
     let requested_schema = ElicitationSchema::builder()
-        .required_bool_property("confirm", |confirm| {
+        .required_bool_property(CONFIRMATION_KEY, |confirm| {
             confirm.title("Confirm").description(message.clone())
         })
         .build_unchecked();
-    let params = ElicitRequestParams::FormElicitationParams {
+    ElicitRequestParams::FormElicitationParams {
         meta: None,
         message,
         requested_schema,
-    };
-    match context.peer.create_elicitation(params).await {
+    }
+}
+
+async fn ask_through_the_peer(
+    message: String,
+    context: &RequestContext<RoleServer>,
+) -> &'static str {
+    match context.peer.create_elicitation(confirmation(message)).await {
         Ok(result) => answer_from(result),
         Err(_) => "unsupported",
     }
@@ -276,7 +433,7 @@ fn answer_from(result: ElicitResult) -> &'static str {
     let confirmed = result
         .content
         .as_ref()
-        .and_then(|content| content.get("confirm"))
+        .and_then(|content| content.get(CONFIRMATION_KEY))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     match result.action {
@@ -311,19 +468,17 @@ impl ServerHandler for RelayServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let name = request.name.to_string();
-        if !TOOL_NAMES.contains(&name.as_str()) {
+        if !TOOL_NAMES.contains(&request.name.as_ref()) {
             return Err(McpError::invalid_params(
                 format!(
-                    "no tool is named {name}; the tools are {}",
+                    "no tool is named {}; the tools are {}",
+                    request.name,
                     TOOL_NAMES.join(", ")
                 ),
                 None,
             ));
         }
-        Ok(CallToolResponse::from(
-            self.relay(&name, request.arguments, &context).await,
-        ))
+        Ok(self.relay(request, &context).await)
     }
 }
 
@@ -363,7 +518,11 @@ mod tests {
         service::{RoleClient, RunningService},
         ClientHandler, ClientLifecycleMode, ClientServiceExt,
     };
-    use tokio::{net::UnixListener, sync::Barrier};
+    use tokio::{
+        io::{DuplexStream, ReadHalf, WriteHalf},
+        net::UnixListener,
+        sync::Barrier,
+    };
     use uuid::Uuid;
 
     use super::*;
@@ -419,12 +578,18 @@ mod tests {
                                     )
                                     .await
                                     .unwrap();
-                                let answer: Value = serde_json::from_str(
-                                    &lines.next_line().await.unwrap().unwrap(),
-                                )
-                                .unwrap();
-                                let answer = answer["answer"].as_str().unwrap().to_string();
+                                let answer = match lines.next_line().await.unwrap() {
+                                    Some(line) => serde_json::from_str::<Value>(&line).unwrap()
+                                        ["answer"]
+                                        .as_str()
+                                        .unwrap()
+                                        .to_string(),
+                                    None => "closed".to_string(),
+                                };
                                 heard.lock().unwrap().push(answer.clone());
+                                if answer == "closed" {
+                                    return;
+                                }
                                 match answer.as_str() {
                                     "accept" => {
                                         json!({"ok": true, "result": {"content": [{"type": "text", "text": "ran"}], "isError": false}})
@@ -546,6 +711,106 @@ mod tests {
     fn discover_lifecycle() -> ClientLifecycleMode {
         ClientLifecycleMode::Discover {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        }
+    }
+
+    struct Wire {
+        writer: WriteHalf<DuplexStream>,
+        lines: Lines<BufReader<ReadHalf<DuplexStream>>>,
+        next_id: u64,
+        server_sent: Vec<Value>,
+    }
+
+    impl Wire {
+        fn open(server: RelayServer) -> Self {
+            let (server_side, client_side) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let running = server.serve(server_side).await.expect("server");
+                let _ = running.waiting().await;
+            });
+            let (reader, writer) = tokio::io::split(client_side);
+            Self {
+                writer,
+                lines: BufReader::new(reader).lines(),
+                next_id: 0,
+                server_sent: Vec::new(),
+            }
+        }
+
+        async fn request(&mut self, method: &str, params: Value) -> Value {
+            let id = self.next_id;
+            self.next_id += 1;
+            let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            self.writer
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .expect("write");
+            loop {
+                let line = tokio::time::timeout(Duration::from_secs(10), self.lines.next_line())
+                    .await
+                    .expect("a reply within 10 s")
+                    .expect("readable")
+                    .expect("an open connection");
+                let message: Value = serde_json::from_str(&line).expect("json");
+                if message["id"] == json!(id) && message.get("method").is_none() {
+                    return message["result"].clone();
+                }
+                self.server_sent.push(message);
+            }
+        }
+
+        async fn call(&mut self, arguments: Value, continuation: Option<(&str, Value)>) -> Value {
+            let mut params = json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}
+                },
+                "name": "call_tool",
+                "arguments": arguments,
+            });
+            if let Some((state, response)) = continuation {
+                params["requestState"] = json!(state);
+                params["inputResponses"] = json!({ "confirm": response });
+            }
+            self.request("tools/call", params).await
+        }
+    }
+
+    async fn discovered_wire(server: RelayServer) -> Wire {
+        let mut wire = Wire::open(server);
+        let discovered = wire
+            .request(
+                "server/discover",
+                json!({"_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}
+                }}),
+            )
+            .await;
+        assert!(discovered["supportedVersions"]
+            .as_array()
+            .expect("supported versions")
+            .contains(&json!("2026-07-28")));
+        assert_eq!(
+            discovered["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            SERVER_INFO_NAME
+        );
+        wire
+    }
+
+    fn create_issue() -> Value {
+        json!({"name": "github-create_issue", "arguments": {"title": "x"}})
+    }
+
+    async fn eventually<T: PartialEq + std::fmt::Debug>(expected: T, read: impl Fn() -> T) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while read() != expected {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {expected:?}, last saw {:?}",
+                read()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -817,5 +1082,151 @@ mod tests {
         assert!(text.starts_with("daemon_unavailable: "));
         assert!(text.contains(&missing.display().to_string()));
         assert!(text.contains(LAUNCH_AGENT_LABEL));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_ask_through_an_input_required_result_and_never_a_request_of_its_own_under_the_inline_lifecycle(
+    ) {
+        for (response, expected_answer, expected_text, is_error) in [
+            (
+                json!({"action": "accept", "content": {"confirm": true}}),
+                "accept",
+                "ran",
+                false,
+            ),
+            (
+                json!({"action": "accept", "content": {"confirm": false}}),
+                "decline",
+                "declined: the user declined; nothing was run",
+                true,
+            ),
+            (
+                json!({"action": "decline"}),
+                "decline",
+                "declined: the user declined; nothing was run",
+                true,
+            ),
+            (
+                json!({"action": "cancel"}),
+                "cancel",
+                "cancelled: the confirmation was cancelled; nothing was run",
+                true,
+            ),
+        ] {
+            let socket = socket_in_temp_dir();
+            let stand_in = StandIn::serve(&socket, 1);
+            let mut wire = discovered_wire(RelayServer::new(socket)).await;
+
+            let asked = wire.call(create_issue(), None).await;
+            assert_eq!(asked["resultType"], "input_required");
+            let request = &asked["inputRequests"]["confirm"];
+            assert_eq!(request["method"], "elicitation/create");
+            assert_eq!(
+                request["params"]["message"],
+                "Run github-create_issue on the MCP server github?"
+            );
+            assert_eq!(request["params"]["mode"], "form");
+            let schema = &request["params"]["requestedSchema"];
+            assert_eq!(schema["required"], json!(["confirm"]));
+            assert_eq!(schema["properties"]["confirm"]["type"], "boolean");
+            let state = asked["requestState"].as_str().expect("a request state");
+            assert!(!state.is_empty());
+            assert!(stand_in.answers.lock().unwrap().is_empty());
+
+            let result = wire.call(create_issue(), Some((state, response))).await;
+            assert_eq!(*stand_in.answers.lock().unwrap(), vec![expected_answer]);
+            assert_eq!(result["isError"], json!(is_error));
+            assert_eq!(result["content"][0]["text"], expected_text);
+            assert!(
+                wire.server_sent
+                    .iter()
+                    .all(|message| message.get("method").is_none()),
+                "the relay sent a request of its own: {:?}",
+                wire.server_sent
+            );
+            assert_eq!(stand_in.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_refuse_a_continuation_whose_state_is_unknown_expired_or_for_another_call() {
+        let socket = socket_in_temp_dir();
+        let stand_in = StandIn::serve(&socket, 1);
+        let mut wire = discovered_wire(RelayServer::new(socket)).await;
+        let forged = wire
+            .call(
+                create_issue(),
+                Some((
+                    "not-a-state",
+                    json!({"action": "accept", "content": {"confirm": true}}),
+                )),
+            )
+            .await;
+        assert_eq!(forged["isError"], json!(true));
+        assert!(forged["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("confirmation_expired: "));
+        assert!(stand_in.requests.lock().unwrap().is_empty());
+
+        let asked = wire.call(create_issue(), None).await;
+        let state = asked["requestState"].as_str().unwrap().to_string();
+        let other = json!({"name": "github-create_issue", "arguments": {"title": "y"}});
+        let mismatch = wire
+            .call(
+                other,
+                Some((
+                    &state,
+                    json!({"action": "accept", "content": {"confirm": true}}),
+                )),
+            )
+            .await;
+        assert_eq!(mismatch["isError"], json!(true));
+        assert!(mismatch["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("confirmation_mismatch: "));
+        eventually(vec!["closed".to_string()], || {
+            stand_in.answers.lock().unwrap().clone()
+        })
+        .await;
+        let reused = wire
+            .call(
+                create_issue(),
+                Some((
+                    &state,
+                    json!({"action": "accept", "content": {"confirm": true}}),
+                )),
+            )
+            .await;
+        assert!(reused["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("confirmation_expired: "));
+
+        let socket = socket_in_temp_dir();
+        let stand_in = StandIn::serve(&socket, 1);
+        let server = RelayServer::new(socket).with_confirmation_ttl(Duration::from_millis(200));
+        let mut wire = discovered_wire(server).await;
+        let asked = wire.call(create_issue(), None).await;
+        let state = asked["requestState"].as_str().unwrap().to_string();
+        eventually(vec!["closed".to_string()], || {
+            stand_in.answers.lock().unwrap().clone()
+        })
+        .await;
+        let late = wire
+            .call(
+                create_issue(),
+                Some((
+                    &state,
+                    json!({"action": "accept", "content": {"confirm": true}}),
+                )),
+            )
+            .await;
+        assert!(late["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("confirmation_expired: "));
+        assert_eq!(stand_in.requests.lock().unwrap().len(), 1);
     }
 }
