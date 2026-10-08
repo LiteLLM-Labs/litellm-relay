@@ -21,6 +21,7 @@ impl Daemon {
     fn refreshed(&self, reply: Reply) -> Reply {
         if matches!(reply, Reply::Switched(_) | Reply::SignedIn { .. }) {
             self.account.refresh_now();
+            self.account.poll();
         }
         reply
     }
@@ -98,12 +99,11 @@ mod tests {
 
     #[test]
     fn should_refuse_a_team_missing_from_the_known_list_without_touching_the_broker() {
-        let (rig, http, account, daemon) = daemon_on(idp_settings(Some("team-a")));
+        let (rig, http, _account, daemon) = daemon_on(idp_settings(Some("team-a")));
         assert!(matches!(
             daemon.handle(Request::SignIn, rig.peer()),
             Reply::SignedIn { .. }
         ));
-        account.poll();
         assert_eq!(rig.keys.mints().len(), 1);
 
         let refused = daemon.handle(
@@ -133,7 +133,6 @@ mod tests {
             daemon.handle(Request::SignIn, rig.peer()),
             Reply::SignedIn { .. }
         ));
-        account.poll();
         assert_eq!(count(&http, "/health/liveliness"), 1);
 
         let switched = daemon.handle(
@@ -147,9 +146,9 @@ mod tests {
         };
         assert_eq!(switched.team.as_deref(), Some("team-b"));
         assert_eq!(rig.keys.mints().len(), 2);
-        account.poll();
         assert_eq!(count(&http, "/user/info"), 2);
         assert_eq!(count(&http, "/health/liveliness"), 2);
+        assert_eq!(account.status()["team"]["id"], "team-b");
     }
 
     #[test]
@@ -183,7 +182,7 @@ mod tests {
         ];
         let (rig, http, account, daemon) = daemon_on(settings);
         daemon.handle(Request::SignIn, rig.peer());
-        account.poll();
+        assert_eq!(count(&http, "/health/liveliness"), 1);
 
         let unknown = daemon.handle(
             Request::SwitchEnvironment {
@@ -195,6 +194,7 @@ mod tests {
             matches!(unknown, Reply::Refused(Refusal::UnknownEnvironment(_))),
             "{unknown:?}"
         );
+        assert_eq!(count(&http, "/health/liveliness"), 1);
 
         let switched = daemon.handle(
             Request::SwitchEnvironment {
@@ -203,11 +203,15 @@ mod tests {
             rig.peer(),
         );
         assert!(matches!(switched, Reply::Switched(_)), "{switched:?}");
-        account.poll();
         let probes = http.calls_to("/health/liveliness");
         assert_eq!(probes.len(), 2);
         assert_eq!(probes[1].url, "https://uat.example.com/health/liveliness");
         assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(
+            account.status()["gateway"]["url"],
+            "https://uat.example.com"
+        );
+        assert_eq!(daemon.selection()["gateway_url"], "https://uat.example.com");
     }
 
     #[test]
@@ -218,8 +222,8 @@ mod tests {
         let Reply::Account(status) = reply else {
             panic!("expected the account status, got {reply:?}");
         };
-        assert_eq!(count(&http, "/user/info"), 1);
-        assert_eq!(count(&http, "/health/liveliness"), 1);
+        assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(count(&http, "/health/liveliness"), 2);
         assert_eq!(status["user"]["email"], "dev@example.com");
         assert_eq!(status["gateway"]["reachable"], true);
         assert_eq!(status, account.status());
@@ -255,7 +259,7 @@ mod tests {
                 team: None,
             },
         ];
-        let (rig, _http, account, daemon) = daemon_on(settings);
+        let (rig, _http, _account, daemon) = daemon_on(settings);
         assert_eq!(
             daemon.selection(),
             json!({
@@ -272,7 +276,6 @@ mod tests {
         );
 
         daemon.handle(Request::SignIn, rig.peer());
-        account.poll();
         let selection = daemon.selection();
         assert_eq!(
             selection["teams"],
