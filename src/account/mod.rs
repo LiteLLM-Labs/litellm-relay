@@ -199,12 +199,6 @@ impl AccountService {
         self.status()
     }
 
-    pub fn refresh_now(&self) {
-        let mut state = self.lock_state();
-        state.account_checked_at = None;
-        state.reachability_checked_at = None;
-    }
-
     pub fn known_teams(&self) -> Option<Vec<String>> {
         let identity = self.broker.session_identity()?;
         let state = self.lock_state();

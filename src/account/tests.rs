@@ -168,7 +168,7 @@ fn should_degrade_to_the_current_team_when_user_info_fails_or_lists_nothing() {
 }
 
 #[test]
-fn should_recheck_everything_at_once_and_refetch_at_once_after_refresh_now() {
+fn should_recheck_everything_at_once_even_when_nothing_is_due() {
     let (_rig, http, account) = signed_in();
     account.poll();
     let rechecked = account.recheck();
@@ -182,11 +182,6 @@ fn should_recheck_everything_at_once_and_refetch_at_once_after_refresh_now() {
     account.poll();
     assert_eq!(count(&http, "/user/info"), 2);
     assert_eq!(count(&http, "/health/liveliness"), 2);
-
-    account.refresh_now();
-    account.poll();
-    assert_eq!(count(&http, "/user/info"), 3);
-    assert_eq!(count(&http, "/health/liveliness"), 3);
 }
 
 #[test]
