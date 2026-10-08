@@ -7,7 +7,6 @@ use super::{
     verdict::{decide, name_words, text_words, Listing, Verdict},
 };
 
-pub const SERVER_SEPARATOR: char = '-';
 pub const UNGROUPED_SERVER: &str = "ungrouped";
 pub const SEARCH_RESULT_LIMIT: usize = 5;
 const NAME_WORD_SCORE: usize = 3;
@@ -18,9 +17,12 @@ const fn servers_start_active() -> bool {
     false
 }
 
-pub fn split_gateway_name(gateway_name: &str) -> (&str, &str) {
+pub fn split_gateway_name<'a>(gateway_name: &'a str, separator: &str) -> (&'a str, &'a str) {
+    if separator.is_empty() {
+        return (UNGROUPED_SERVER, gateway_name);
+    }
     gateway_name
-        .split_once(SERVER_SEPARATOR)
+        .split_once(separator)
         .unwrap_or((UNGROUPED_SERVER, gateway_name))
 }
 
@@ -28,6 +30,7 @@ pub fn split_gateway_name(gateway_name: &str) -> (&str, &str) {
 pub struct CatalogEntry {
     pub name: String,
     pub server: String,
+    own_name: String,
     pub description: Option<String>,
     pub input_schema: Value,
     pub annotations: Option<Value>,
@@ -47,24 +50,32 @@ impl CatalogEntry {
         })
     }
 
-    fn decided(mut self, allow: &[String]) -> Self {
-        let (_, own_name) = split_gateway_name(&self.name);
-        self.verdict = decide(
+    fn grouped(self, separator: &str) -> Self {
+        let (server, own_name) = split_gateway_name(&self.name, separator);
+        Self {
+            server: server.to_string(),
+            own_name: own_name.to_string(),
+            ..self
+        }
+    }
+
+    fn decided(self, allow: &[String]) -> Self {
+        let verdict = decide(
             Listing {
                 gateway_name: &self.name,
-                own_name,
+                own_name: &self.own_name,
+                grouped: self.server != UNGROUPED_SERVER,
                 annotations: self.annotations.as_ref(),
                 listed_twice: self.listed_twice,
             },
             allow,
         );
-        self
+        Self { verdict, ..self }
     }
 
     fn score(&self, query_words: &BTreeSet<String>) -> usize {
-        let (server, own_name) = split_gateway_name(&self.name);
-        let own_words = name_words(own_name);
-        let server_words = name_words(server);
+        let own_words = name_words(&self.own_name);
+        let server_words = name_words(&self.server);
         let description_words = text_words(self.description.as_deref().unwrap_or_default());
         query_words
             .iter()
@@ -104,16 +115,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub fn build(tools: Vec<UpstreamTool>, allow: &[String]) -> Self {
+    pub fn build(tools: Vec<UpstreamTool>, separator: &str, allow: &[String]) -> Self {
         let mut entries: BTreeMap<String, CatalogEntry> = BTreeMap::new();
         for tool in tools {
             if let Some(listed_before) = entries.get_mut(&tool.name) {
                 listed_before.listed_twice = true;
                 continue;
             }
-            let (server, _) = split_gateway_name(&tool.name);
             let entry = CatalogEntry {
-                server: server.to_string(),
+                server: UNGROUPED_SERVER.to_string(),
+                own_name: tool.name.clone(),
                 name: tool.name.clone(),
                 description: tool.description,
                 input_schema: tool.input_schema,
@@ -123,15 +134,15 @@ impl Catalog {
             };
             entries.insert(tool.name, entry);
         }
-        Self { entries }.with_allow(allow)
+        Self { entries }.with_settings(separator, allow)
     }
 
-    pub fn with_allow(self, allow: &[String]) -> Self {
+    pub fn with_settings(self, separator: &str, allow: &[String]) -> Self {
         Self {
             entries: self
                 .entries
                 .into_iter()
-                .map(|(name, entry)| (name, entry.decided(allow)))
+                .map(|(name, entry)| (name, entry.grouped(separator).decided(allow)))
                 .collect(),
         }
     }
@@ -215,20 +226,21 @@ pub(crate) mod tests {
     #[test]
     fn should_group_a_tool_under_the_text_before_the_first_separator() {
         assert_eq!(
-            split_gateway_name("github-get_issue"),
+            split_gateway_name("github-get_issue", "-"),
             ("github", "get_issue")
         );
         assert_eq!(
-            split_gateway_name("github-get-issue"),
+            split_gateway_name("github-get-issue", "-"),
             ("github", "get-issue")
         );
-        assert_eq!(split_gateway_name("whoami"), ("ungrouped", "whoami"));
+        assert_eq!(split_gateway_name("whoami", "-"), ("ungrouped", "whoami"));
         let catalog = Catalog::build(
             vec![
                 tool("github-get_issue", ""),
                 tool("github-list", ""),
                 tool("whoami", ""),
             ],
+            "-",
             &[],
         );
         assert_eq!(
@@ -238,12 +250,65 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn should_group_by_the_configured_separator_and_regroup_when_it_changes() {
+        let tools = vec![
+            tool("github__get_issue", ""),
+            tool("github__create_issue", ""),
+            tool("search__reindex", ""),
+        ];
+        assert_eq!(
+            split_gateway_name("github__get_issue", "__"),
+            ("github", "get_issue")
+        );
+        assert_eq!(
+            split_gateway_name("github__get_issue", ""),
+            ("ungrouped", "github__get_issue")
+        );
+        let by_dash = Catalog::build(tools.clone(), "-", &[]);
+        assert_eq!(
+            by_dash.tool_counts_by_server(),
+            BTreeMap::from([("ungrouped".to_string(), 3)])
+        );
+        for name in [
+            "github__get_issue",
+            "github__create_issue",
+            "search__reindex",
+        ] {
+            assert_eq!(
+                by_dash.get(name).map(|entry| entry.verdict),
+                Some(Verdict::Ask),
+                "{name}"
+            );
+        }
+        let regrouped = by_dash.with_settings("__", &[]);
+        assert_eq!(
+            regrouped.tool_counts_by_server(),
+            BTreeMap::from([("github".to_string(), 2), ("search".to_string(), 1)])
+        );
+        assert_eq!(
+            regrouped
+                .get("github__get_issue")
+                .map(|entry| entry.verdict),
+            Some(Verdict::Allow)
+        );
+        assert_eq!(
+            regrouped.get("search__reindex").map(|entry| entry.verdict),
+            Some(Verdict::Ask)
+        );
+        assert_eq!(
+            regrouped.search("issue", &active(&["github"])).tools,
+            ["github__create_issue", "github__get_issue"]
+        );
+        assert_eq!(regrouped, Catalog::build(tools, "__", &[]));
+    }
+
+    #[test]
     fn should_compute_verdicts_at_build_and_again_when_the_allow_list_changes() {
         let tools = vec![
             tool("github-get_issue", ""),
             tool("github-create_issue", ""),
         ];
-        let catalog = Catalog::build(tools, &[]);
+        let catalog = Catalog::build(tools, "-", &[]);
         assert_eq!(
             catalog.get("github-get_issue").map(|entry| entry.verdict),
             Some(Verdict::Allow)
@@ -254,14 +319,14 @@ pub(crate) mod tests {
                 .map(|entry| entry.verdict),
             Some(Verdict::Ask)
         );
-        let allowed = catalog.with_allow(&["github-create_issue".to_string()]);
+        let allowed = catalog.with_settings("-", &["github-create_issue".to_string()]);
         assert_eq!(
             allowed
                 .get("github-create_issue")
                 .map(|entry| entry.verdict),
             Some(Verdict::Allow)
         );
-        let tightened = allowed.with_allow(&[]);
+        let tightened = allowed.with_settings("-", &[]);
         assert_eq!(
             tightened
                 .get("github-create_issue")
@@ -293,6 +358,7 @@ pub(crate) mod tests {
         ];
         let catalog = Catalog::build(
             table.iter().map(|(name, _, _)| tool(name, "")).collect(),
+            "-",
             &[],
         );
         for (name, server, verdict) in table {
@@ -313,6 +379,7 @@ pub(crate) mod tests {
                 tool("github-get_issue", "first"),
                 tool("github-get_issue", "second"),
             ],
+            "-",
             &allow,
         );
         assert_eq!(catalog.len(), 1);
@@ -321,7 +388,7 @@ pub(crate) mod tests {
         assert_eq!(entry.description.as_deref(), Some("first"));
         assert_eq!(
             catalog
-                .with_allow(&allow)
+                .with_settings("-", &allow)
                 .get("github-get_issue")
                 .map(|entry| entry.verdict),
             Some(Verdict::Ask)
@@ -339,6 +406,7 @@ pub(crate) mod tests {
                 input_schema: schema.clone(),
                 annotations: Some(annotations.clone()),
             }],
+            "-",
             &[],
         );
         assert_eq!(
@@ -368,6 +436,7 @@ pub(crate) mod tests {
                 tool("github-issues", "issues"),
                 tool("github-unrelated", "Nothing to see"),
             ],
+            "-",
             &[],
         );
         let result = catalog.search("Issues, issues!", &active(&["github"]));
@@ -390,6 +459,7 @@ pub(crate) mod tests {
                 tool("search-list", "List saved searches"),
                 tool("github-search_code", "Find code"),
             ],
+            "-",
             &[],
         );
         assert_eq!(
@@ -414,6 +484,7 @@ pub(crate) mod tests {
                 tool("linear-list_issues", "List issues"),
                 tool("slack-post_message", "Send a message"),
             ],
+            "-",
             &[],
         );
         let result = catalog.search("issues", &active(&["github"]));

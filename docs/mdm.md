@@ -295,12 +295,18 @@ refuse, and refuses without a dialog under `--ask-for-approval never` or its
 bypass flag. Nothing the model passes as an argument counts as a confirmation.
 A call that runs waits at most 300 seconds for the Gateway
 
-Two keys in the managed config tune this. `mcp.allow` lists exact,
+Three keys in the managed config tune this. `mcp.allow` lists exact,
 case-sensitive Gateway tool names (`<server>-<tool>`) that run with no prompt
 even though their names do not show they read; it has no wildcards and never
 hides or denies a tool. `mcp.max_concurrent_calls` caps the tool calls in
 flight across every client on the device, 16 when the key is missing or 0; a
-call beyond the cap waits its turn
+call beyond the cap waits its turn. `mcp.tool_prefix_separator` is the text
+the Gateway puts between a server's name and a tool's own name, `-` when the
+key is missing or empty: the daemon groups tools into servers and reads a
+tool's own name by splitting its Gateway name at the first occurrence, so set
+the key to the Gateway's `MCP_TOOL_PREFIX_SEPARATOR` when that was changed. A
+name the separator does not split lands on the server `ungrouped`, where no
+tool runs without a prompt unless `mcp.allow` names it
 
 On the broker plan (macOS) the writers register the server in each client and
 keep the client's own per-tool prompt out of the way, so the daemon's question

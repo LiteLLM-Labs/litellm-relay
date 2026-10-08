@@ -386,7 +386,10 @@ impl McpService {
         self.slots.resize(settings.mcp.concurrent_call_cap());
         if let Some(session) = state.session.as_mut() {
             session.catalog = session.catalog.take().map(|catalog| {
-                Arc::new(Catalog::clone(&catalog).with_allow(settings.mcp.allowed_tools()))
+                Arc::new(Catalog::clone(&catalog).with_settings(
+                    settings.mcp.tool_prefix_separator(),
+                    settings.mcp.allowed_tools(),
+                ))
             });
         }
         state.section = settings.mcp;
@@ -443,7 +446,11 @@ impl McpService {
             }
         };
         let mut state = self.lock_state();
-        let catalog = Arc::new(Catalog::build(tools, state.section.allowed_tools()));
+        let catalog = Arc::new(Catalog::build(
+            tools,
+            state.section.tool_prefix_separator(),
+            state.section.allowed_tools(),
+        ));
         let session = state
             .session
             .as_mut()

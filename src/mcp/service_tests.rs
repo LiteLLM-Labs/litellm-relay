@@ -256,6 +256,43 @@ async fn should_recompute_verdicts_when_the_allow_list_changes_without_a_new_fet
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_regroup_the_catalog_when_the_separator_changes_without_a_new_fetch() {
+    let upstream = FakeUpstream::serving(vec![
+        tool("github__get_issue", "Read one issue"),
+        tool("github__create_issue", "Open an issue"),
+    ]);
+    let (rig, service) = service_on(static_key_settings("sk-static"), &upstream);
+    activate(&rig, &service, "ungrouped").await;
+    let describe = json!({"op": "describe_tool", "name": "github__get_issue"});
+    let ungrouped = run(&rig, &service, describe.clone())
+        .await
+        .expect("described");
+    assert_eq!(ungrouped["server"], "ungrouped");
+    assert_eq!(ungrouped["verdict"], "ask");
+    assert_eq!(
+        service.status()["servers"],
+        json!({"ungrouped": {"tools": 2, "active": true}})
+    );
+
+    let mut settings = static_key_settings("sk-static");
+    settings.mcp.tool_prefix_separator = Some("__".to_string());
+    rig.settings.set(settings);
+    assert_eq!(
+        reason(run(&rig, &service, describe.clone()).await),
+        "server_inactive"
+    );
+    activate(&rig, &service, "github").await;
+    let grouped = run(&rig, &service, describe).await.expect("described");
+    assert_eq!(grouped["server"], "github");
+    assert_eq!(grouped["verdict"], "allow");
+    assert_eq!(
+        service.status()["servers"],
+        json!({"github": {"tools": 2, "active": true}})
+    );
+    assert_eq!(upstream.lists().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_run_an_ask_tool_only_after_a_confirmation() {
     let upstream = FakeUpstream::serving(tools());
     let (rig, service) = service_on(static_key_settings("sk-static"), &upstream);

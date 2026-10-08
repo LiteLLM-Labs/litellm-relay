@@ -125,6 +125,7 @@ pub enum Verdict {
 pub struct Listing<'a> {
     pub gateway_name: &'a str,
     pub own_name: &'a str,
+    pub grouped: bool,
     pub annotations: Option<&'a Value>,
     pub listed_twice: bool,
 }
@@ -136,7 +137,10 @@ pub fn decide(listing: Listing<'_>, allow: &[String]) -> Verdict {
     if allow.iter().any(|allowed| allowed == listing.gateway_name) {
         return Verdict::Allow;
     }
-    if name_reads_only(listing.own_name) && annotations_permit(listing.annotations) {
+    if listing.grouped
+        && name_reads_only(listing.own_name)
+        && annotations_permit(listing.annotations)
+    {
         return Verdict::Allow;
     }
     Verdict::Ask
@@ -225,6 +229,7 @@ mod tests {
             Listing {
                 gateway_name: &gateway_name,
                 own_name,
+                grouped: true,
                 annotations: annotations.as_ref(),
                 listed_twice: false,
             },
@@ -354,6 +359,7 @@ mod tests {
         let listing = |gateway_name: &'static str, own_name: &'static str, listed_twice| Listing {
             gateway_name,
             own_name,
+            grouped: true,
             annotations: None,
             listed_twice,
         };
@@ -397,10 +403,32 @@ mod tests {
         let twice = Listing {
             gateway_name: "github-get_issue",
             own_name: "get_issue",
+            grouped: true,
             annotations: None,
             listed_twice: true,
         };
         assert_eq!(decide(twice, &allow), Verdict::Ask);
         assert_eq!(decide(twice, &[]), Verdict::Ask);
+    }
+
+    #[test]
+    fn should_never_allow_an_ungrouped_name_by_its_words() {
+        let ungrouped = Listing {
+            gateway_name: "search__reindex",
+            own_name: "search__reindex",
+            grouped: false,
+            annotations: Some(&json!({"readOnlyHint": true})),
+            listed_twice: false,
+        };
+        assert_eq!(decide(ungrouped, &[]), Verdict::Ask);
+        assert_eq!(
+            decide(ungrouped, &["search__reindex".to_string()]),
+            Verdict::Allow
+        );
+        let grouped = Listing {
+            grouped: true,
+            ..ungrouped
+        };
+        assert_eq!(decide(grouped, &[]), Verdict::Allow);
     }
 }

@@ -309,6 +309,7 @@ pub struct CredentialSection {
 }
 
 pub const DEFAULT_MCP_MAX_CONCURRENT_CALLS: usize = 16;
+pub const DEFAULT_MCP_TOOL_PREFIX_SEPARATOR: &str = "-";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
@@ -317,6 +318,8 @@ pub struct McpSection {
     pub allow: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_calls: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_prefix_separator: Option<String>,
 }
 
 impl McpSection {
@@ -328,6 +331,13 @@ impl McpSection {
         match self.max_concurrent_calls {
             None | Some(0) => DEFAULT_MCP_MAX_CONCURRENT_CALLS,
             Some(cap) => cap,
+        }
+    }
+
+    pub fn tool_prefix_separator(&self) -> &str {
+        match self.tool_prefix_separator.as_deref() {
+            None | Some("") => DEFAULT_MCP_TOOL_PREFIX_SEPARATOR,
+            Some(separator) => separator,
         }
     }
 }
@@ -520,9 +530,9 @@ capture:
     }
 
     #[test]
-    fn should_read_the_mcp_allow_list_and_call_cap_from_yaml() {
+    fn should_read_the_mcp_allow_list_call_cap_and_separator_from_yaml() {
         let settings: RelaySettings = serde_yaml::from_str(
-            "mcp:\n  allow:\n    - github-get_issue\n    - Jira-searchIssues\n  max_concurrent_calls: 4\n",
+            "mcp:\n  allow:\n    - github-get_issue\n    - Jira-searchIssues\n  max_concurrent_calls: 4\n  tool_prefix_separator: \"__\"\n",
         )
         .expect("settings");
         assert_eq!(
@@ -533,17 +543,22 @@ capture:
             ]
         );
         assert_eq!(settings.mcp.concurrent_call_cap(), 4);
+        assert_eq!(settings.mcp.tool_prefix_separator(), "__");
     }
 
     #[test]
-    fn should_default_the_mcp_call_cap_to_sixteen_when_missing_or_zero() {
+    fn should_default_the_mcp_call_cap_and_separator_when_missing_zero_or_empty() {
         let missing: RelaySettings =
             serde_yaml::from_str("gateway:\n  url: https://g\n").expect("settings");
-        let zero: RelaySettings =
-            serde_yaml::from_str("mcp:\n  max_concurrent_calls: 0\n").expect("settings");
+        let zero: RelaySettings = serde_yaml::from_str(
+            "mcp:\n  max_concurrent_calls: 0\n  tool_prefix_separator: \"\"\n",
+        )
+        .expect("settings");
         assert!(missing.mcp.allowed_tools().is_empty());
         assert_eq!(missing.mcp.concurrent_call_cap(), 16);
+        assert_eq!(missing.mcp.tool_prefix_separator(), "-");
         assert_eq!(zero.mcp.concurrent_call_cap(), 16);
+        assert_eq!(zero.mcp.tool_prefix_separator(), "-");
     }
 
     #[test]

@@ -67,9 +67,14 @@ credential:
 # Gateway tool names (`<server>-<tool>`) that run with no prompt anyway; it
 # has no wildcards and never hides or denies a tool. `max_concurrent_calls`
 # caps the tool calls in flight across every client on this device; 0 or a
-# missing key means 16.
+# missing key means 16. `tool_prefix_separator` is the text between a server's
+# name and a tool's own name in the Gateway's tool names (the Gateway's
+# MCP_TOOL_PREFIX_SEPARATOR); a missing or empty key means `-`. A name the
+# separator does not split lands on the server `ungrouped`, where every tool
+# asks unless `allow` names it.
 mcp:
   # allow:
   #   - github-create_issue
   #   - jira-add_comment
   # max_concurrent_calls: 16
+  # tool_prefix_separator: "-"
