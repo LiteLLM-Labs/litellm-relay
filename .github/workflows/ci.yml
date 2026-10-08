@@ -40,11 +40,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate installer scripts
-        run: bash -n src/install.sh src/uninstall.sh scripts/build-macos-pkg.sh scripts/macos-pkg/postinstall
+        run: bash -n src/install.sh src/uninstall.sh scripts/build-macos-pkg.sh scripts/macos-pkg/postinstall scripts/macos-pkg/check-payload.sh scripts/ci/pkg_payload_smoke.sh scripts/ci/install_ca_trust_smoke.sh scripts/ci/install_profile_smoke.sh scripts/ci/install_upgrade_smoke.sh scripts/ci/uninstall_ca_smoke.sh
       - name: Check installer help path
         run: bash src/install.sh --help
       - name: Check pkg builder help path
         run: bash scripts/build-macos-pkg.sh --help
+      - name: Build a pkg from a stub binary and check its payload modes
+        run: bash scripts/ci/pkg_payload_smoke.sh
+      - name: Decide CA trust on a managed install from the seeded config
+        run: bash scripts/ci/install_ca_trust_smoke.sh
+      - name: Leave PATH alone when the shell profile is not writable
+        run: bash scripts/ci/install_profile_smoke.sh
+      - name: Upgrade over a running Relay without breaking the new binary
+        run: bash scripts/ci/install_upgrade_smoke.sh
+      - name: Remove every Relay CA from a login keychain on uninstall
+        run: bash scripts/ci/uninstall_ca_smoke.sh
 
   proxy-smoke:
     name: Proxy/TLS smoke

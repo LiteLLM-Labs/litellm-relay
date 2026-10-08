@@ -12,6 +12,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
 use crate::{
+    account::AccountService,
     apps::{classify_app_attribution, known_apps, AppAttribution},
     broker::Broker,
     cert::{client_tls_config, ensure_ca, server_tls_config},
@@ -43,6 +44,7 @@ pub struct RelayProxy {
     gateway: GatewayClient,
     broker: Option<Arc<Broker>>,
     mcp: Option<Arc<McpService>>,
+    account: Option<Arc<AccountService>>,
     inference: reqwest::Client,
 }
 
@@ -55,6 +57,7 @@ impl RelayProxy {
             gateway,
             broker: None,
             mcp: None,
+            account: None,
             inference: gateway_client(),
         }
     }
@@ -71,6 +74,13 @@ impl RelayProxy {
     pub fn with_mcp(self, mcp: Arc<McpService>) -> Self {
         Self {
             mcp: Some(mcp),
+            ..self
+        }
+    }
+
+    pub fn with_account(self, account: Arc<AccountService>) -> Self {
+        Self {
+            account: Some(account),
             ..self
         }
     }
@@ -689,6 +699,8 @@ impl RelayProxy {
             "credential": credential,
             "broker": self.broker.as_ref().map(|broker| broker.status()),
             "mcp": self.mcp.as_ref().map(|mcp| mcp.status()),
+            "account": self.account.as_ref().map(|account| account.status()),
+            "environments": self.account.as_ref().map(|account| account.environments()),
         }))
     }
 
@@ -824,11 +836,13 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "account",
                 "ai_domains",
                 "attribution",
                 "broker",
                 "capture_payloads",
                 "credential",
+                "environments",
                 "events_loaded",
                 "gateway_url",
                 "known_apps",
@@ -844,6 +858,61 @@ mod tests {
         assert_eq!(payload["credential"], json!({"state": "rejected"}));
         assert_eq!(payload["broker"], Value::Null);
         assert_eq!(payload["mcp"], Value::Null);
+        assert_eq!(payload["account"], Value::Null);
+        assert_eq!(payload["environments"], Value::Null);
+    }
+
+    #[test]
+    fn should_report_the_account_and_the_environments_on_status_without_any_token() {
+        use crate::{account::test_support::account_on, config::EnvironmentEntry};
+
+        let mut settings = static_key_settings("sk-status-secret");
+        settings.gateway.team = Some("team-a".to_string());
+        settings.environments = vec![EnvironmentEntry {
+            name: "dev".to_string(),
+            url: settings.gateway.url.clone(),
+            team: None,
+        }];
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let (_rig, http, account) = account_on(settings.clone());
+        http.answer(
+            "/user/info",
+            200,
+            r#"{"user_id":"u","user_info":{"user_email":"dev@example.com"},"teams":[{"team_id":"team-a","team_alias":"Team A"}]}"#,
+        );
+        http.answer(
+            "/team/info?team_id=team-a",
+            200,
+            r#"{"team_id":"team-a","team_info":{"spend":2.5,"max_budget":10.0,"budget_reset_at":null}}"#,
+        );
+        http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+        let proxy = RelayProxy::new(config).with_account(Arc::clone(&account));
+
+        let before = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("status payload should build");
+        assert_eq!(before["account"]["teams"], Value::Null);
+        assert_eq!(before["account"]["gateway"]["reachable"], json!(false));
+        assert_eq!(
+            before["environments"],
+            json!({"current": "dev", "available": [{"name": "dev", "url": settings.gateway.url}]})
+        );
+
+        account.poll();
+        let after = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("status payload should build");
+        assert_eq!(after["account"]["user"]["email"], json!("dev@example.com"));
+        assert_eq!(
+            after["account"]["teams"],
+            json!([{"id": "team-a", "alias": "Team A"}])
+        );
+        assert_eq!(after["account"]["team"]["spend"], json!(2.5));
+        assert_eq!(after["account"]["team"]["max_budget"], json!(10.0));
+        assert_eq!(after["account"]["gateway"]["reachable"], json!(true));
+        assert!(!after.to_string().contains("sk-status-secret"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

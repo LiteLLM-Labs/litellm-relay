@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn should_allow_the_four_relay_mcp_tools_once_on_the_broker_path_and_keep_other_rules() {
+    fn should_allow_the_six_relay_mcp_tools_once_on_the_broker_path_and_keep_other_rules() {
         let settings = settings_with_team(None);
         let existing = serde_json::from_str::<Value>(
             r#"{"permissions":{"allow":["Bash(git status)","mcp__litellm__call_tool"],"deny":["Read(.env)"]}}"#,
@@ -568,6 +568,8 @@ mod tests {
                 "mcp__litellm__search_tools",
                 "mcp__litellm__describe_tool",
                 "mcp__litellm__activate_server",
+                "mcp__litellm__switch_team",
+                "mcp__litellm__switch_environment",
             ]
         );
         assert_eq!(allow_rules(&twice), allow_rules(&once));

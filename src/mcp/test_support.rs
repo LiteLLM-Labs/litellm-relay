@@ -9,10 +9,18 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Semaphore;
 
 use super::{
-    service::{Answer, Asker, McpDependencies, McpService, Question},
+    service::{Answer, Asker, McpDependencies, McpService, Question, Switcher},
     upstream::{GatewayTarget, Upstream, UpstreamError, UpstreamFuture, UpstreamTool},
 };
-use crate::{broker::test_support::Rig, config::RelaySettings};
+use crate::{
+    broker::{
+        test_support::{Rig, GATEWAY},
+        Refusal, Reply, Switched,
+    },
+    config::RelaySettings,
+};
+
+pub(crate) const UAT_GATEWAY: &str = "https://uat.example.com";
 
 pub(crate) type RecordedCall = (GatewayTarget, String, Option<Map<String, Value>>);
 
@@ -170,9 +178,100 @@ impl Asker for FakeAsker {
     }
 }
 
+struct SwitcherState {
+    team: Option<String>,
+    environment: String,
+    switches: Vec<(String, String)>,
+    refusal: Option<Refusal>,
+}
+
+#[derive(Clone)]
+pub(crate) struct FakeSwitcher {
+    state: Arc<Mutex<SwitcherState>>,
+}
+
+impl Default for FakeSwitcher {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SwitcherState {
+                team: Some("team-a".to_string()),
+                environment: "dev".to_string(),
+                switches: Vec::new(),
+                refusal: None,
+            })),
+        }
+    }
+}
+
+impl FakeSwitcher {
+    pub(crate) fn refusing(&self, refusal: Refusal) {
+        self.state.lock().unwrap().refusal = Some(refusal);
+    }
+
+    pub(crate) fn switches(&self) -> Vec<(String, String)> {
+        self.state.lock().unwrap().switches.clone()
+    }
+
+    fn switch(&self, kind: &str, value: &str) -> Reply {
+        let mut state = self.state.lock().unwrap();
+        if let Some(refusal) = state.refusal.clone() {
+            return Reply::Refused(refusal);
+        }
+        state.switches.push((kind.to_string(), value.to_string()));
+        match kind {
+            "team" => state.team = Some(value.to_string()),
+            _ => state.environment = value.to_string(),
+        }
+        Reply::Switched(Switched {
+            team: state.team.clone(),
+            environment: Some(state.environment.clone()),
+            gateway_url: gateway_of(&state.environment).to_string(),
+            key_expires_at: Some("2027-01-15T08:00:00Z".to_string()),
+            source: Some("minted_key"),
+        })
+    }
+}
+
+fn gateway_of(environment: &str) -> &'static str {
+    match environment {
+        "uat" => UAT_GATEWAY,
+        _ => GATEWAY,
+    }
+}
+
+impl Switcher for FakeSwitcher {
+    fn switch_team(&self, team: &str) -> Reply {
+        self.switch("team", team)
+    }
+
+    fn switch_environment(&self, name: &str) -> Reply {
+        self.switch("environment", name)
+    }
+
+    fn selection(&self) -> Value {
+        let state = self.state.lock().unwrap();
+        json!({
+            "team": state.team,
+            "environment": state.environment,
+            "gateway_url": gateway_of(&state.environment),
+            "teams": [{"id": "team-a", "alias": "Team A"}, {"id": "team-b", "alias": null}],
+            "teams_error": null,
+            "environments": [{"name": "dev", "url": GATEWAY}, {"name": "uat", "url": UAT_GATEWAY}],
+        })
+    }
+}
+
 pub(crate) fn service_on(
     settings: RelaySettings,
     upstream: &FakeUpstream,
+) -> (Rig, Arc<McpService>) {
+    service_with(settings, upstream, &FakeSwitcher::default())
+}
+
+pub(crate) fn service_with(
+    settings: RelaySettings,
+    upstream: &FakeUpstream,
+    switcher: &FakeSwitcher,
 ) -> (Rig, Arc<McpService>) {
     let section = settings.mcp.clone();
     let rig = Rig::new(settings);
@@ -180,6 +279,7 @@ pub(crate) fn service_on(
         upstream: Arc::new(upstream.clone()),
         settings: Box::new(rig.settings.clone()),
         clock: Box::new(rig.clock.clone()),
+        switcher: Arc::new(switcher.clone()),
     };
     let service = Arc::new(McpService::new(Arc::clone(&rig.broker), &section, deps));
     (rig, service)

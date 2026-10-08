@@ -11,7 +11,10 @@ RELAY_MANAGED_CONFIG="${RELAY_MANAGED_CONFIG:-}"
 RELAY_SKIP_SETUP="${RELAY_SKIP_SETUP:-0}"
 RELAY_AUTOCONFIGURE="${RELAY_AUTOCONFIGURE:-1}"
 RELAY_AUTOCONFIGURE_INTERVAL="${RELAY_AUTOCONFIGURE_INTERVAL:-3600}"
-RELAY_TRUST_CA="${RELAY_TRUST_CA:-1}"
+RELAY_TRUST_CA="${RELAY_TRUST_CA:-auto}"
+RELAY_RELAYBAR_APP="${RELAY_RELAYBAR_APP:-/usr/local/litellm-relay/RelayBarGlass.app}"
+RELAYBAR_LABEL="ai.litellm.relaybar"
+RELAYBAR_PLIST="$HOME/Library/LaunchAgents/$RELAYBAR_LABEL.plist"
 RELAY_PORT="4142"
 NETWORK_SERVICE=""
 BACKGROUND_SERVICE=0
@@ -38,7 +41,7 @@ Options:
   --skip-setup                    Skip the interactive gateway setup wizard (managed deploys)
   --skip-autoconfigure            Do not auto-detect and wire installed AI tools to the Gateway
                                   (also disables periodic re-detection of later installs)
-  --skip-trust-ca                 Install without adding the Relay CA to login keychain
+  --skip-trust-ca                 Install without adding the Relay CA to the login keychain
   --background                    Configure Gateway auth now, restart the Relay LaunchAgent,
                                   and re-detect AI tools on an interval
   --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
@@ -52,7 +55,11 @@ RELAY_SOURCE_URL/--source-url. Mutable main.tar.gz installs require the explicit
 RELAY_ALLOW_UNPINNED_MAIN=1 or --allow-unpinned-main opt-in.
 
 By default this installs the relay command and trusts the Relay local CA in your
-login keychain so AI app payloads can be captured. Then run:
+login keychain so AI app payloads can be captured; macOS asks for your account
+password in a Certificate Trust Settings sheet for that step. A managed install
+(--config-file or --skip-setup, which is what the .pkg postinstall runs) trusts
+the CA only when the seeded config sets capture.payloads: true, since nothing
+else needs it, and says so in the install log either way. Then run:
 
   relay
 
@@ -83,6 +90,11 @@ Environment:
   RELAY_AUTOCONFIGURE=0         Same as --skip-autoconfigure
   RELAY_AUTOCONFIGURE_INTERVAL  Seconds between periodic re-detection (default 3600)
   RELAY_TRUST_CA=0              Same as --skip-trust-ca
+  RELAY_TRUST_CA=1              Trust the Relay CA on a managed install whose
+                                config keeps payload capture off
+  RELAY_RELAYBAR_APP            RelayBar menu bar app bundle to register at login
+                                (default /usr/local/litellm-relay/RelayBarGlass.app;
+                                skipped when absent)
 USAGE
 }
 
@@ -97,6 +109,51 @@ autoconfigure_ai_tools() {
   "$RELAY_HOME/bin/litellm-relay" autoconfigure || {
     echo "warning: AI tool auto-configuration did not complete." >&2
   }
+}
+
+write_relaybar_plist() {
+  local plist_path="$1" app_path="$2" relay_home="$3"
+  cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.litellm.relaybar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$app_path/Contents/MacOS/RelayBarGlass</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>$relay_home/relaybar.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$relay_home/relaybar.err.log</string>
+</dict>
+</plist>
+PLIST
+}
+
+install_relaybar_agent() {
+  if [[ ! -x "$RELAY_RELAYBAR_APP/Contents/MacOS/RelayBarGlass" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$RELAYBAR_PLIST")"
+  write_relaybar_plist "$RELAYBAR_PLIST" "$RELAY_RELAYBAR_APP" "$RELAY_HOME"
+  launchctl bootout "gui/$(id -u)" "$RELAYBAR_PLIST" >/dev/null 2>&1 || true
+  if launchctl bootstrap "gui/$(id -u)" "$RELAYBAR_PLIST" && launchctl enable "gui/$(id -u)/$RELAYBAR_LABEL"; then
+    echo "Registered the RelayBar menu bar app ($RELAYBAR_LABEL); it starts at login."
+  else
+    echo "warning: could not start the RelayBar menu bar app; open $RELAY_RELAYBAR_APP to run it." >&2
+  fi
 }
 
 require_value() {
@@ -195,9 +252,13 @@ if [[ -n "$RELAY_SHA256" && ! "$RELAY_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
   exit 2
 fi
 
-if [[ "$RELAY_TRUST_CA" != "0" && "$RELAY_TRUST_CA" != "1" ]]; then
-  echo "RELAY_TRUST_CA must be 0 or 1." >&2
+if [[ "$RELAY_TRUST_CA" != "0" && "$RELAY_TRUST_CA" != "1" && "$RELAY_TRUST_CA" != "auto" ]]; then
+  echo "RELAY_TRUST_CA must be 0, 1, or auto." >&2
   exit 2
+fi
+
+if [[ "$RELAY_SKIP_SETUP" == "1" ]]; then
+  SKIP_SETUP=1
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -242,7 +303,13 @@ install_path_entry() {
   esac
 
   mkdir -p "$(dirname "$profile_path")"
-  touch "$profile_path"
+  if ! touch "$profile_path" 2>/dev/null || [[ ! -w "$profile_path" ]]; then
+    PATH_SKIPPED_PROFILE="$profile_path"
+    echo "warning: $profile_path is not writable by $(id -un) ($(ls -ld "$profile_path" 2>/dev/null | awk '{print $1, $3 ":" $4}')), so PATH was left alone; add this line to your shell profile:" >&2
+    echo "  export PATH=\"$bin_dir:\$PATH\"" >&2
+    export PATH="$bin_dir:$PATH"
+    return 0
+  fi
   if ! grep -Fqs "$bin_dir" "$profile_path"; then
     {
       printf '\n# LiteLLM Relay\n'
@@ -251,6 +318,37 @@ install_path_entry() {
     PATH_UPDATED_PROFILE="$profile_path"
   fi
   export PATH="$bin_dir:$PATH"
+}
+
+print_path_note() {
+  if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
+    cat <<DONE
+
+I added $INSTALL_BIN_DIR to PATH in:
+  $PATH_UPDATED_PROFILE
+
+Open a new terminal before running relay, or run:
+  export PATH="$INSTALL_BIN_DIR:\$PATH"
+  relay
+DONE
+  elif [[ -n "$PATH_SKIPPED_PROFILE" ]]; then
+    cat <<DONE
+
+PATH was not updated: $PATH_SKIPPED_PROFILE is not writable by $(id -un).
+Add this line to it, or run relay with:
+  export PATH="$INSTALL_BIN_DIR:\$PATH"
+  relay
+DONE
+  fi
+}
+
+install_relay_binary() {
+  local source="$1" target="$RELAY_HOME/bin/litellm-relay" staged
+  mkdir -p "$RELAY_HOME/bin"
+  staged="$(mktemp "$RELAY_HOME/bin/.litellm-relay.XXXXXX")"
+  cp "$source" "$staged"
+  chmod 700 "$staged"
+  mv -f "$staged" "$target"
 }
 
 stop_legacy_python_relay() {
@@ -365,8 +463,7 @@ if [[ -n "$RELAY_PREBUILT_BINARY" ]]; then
   fi
   stop_legacy_python_relay
   echo "Installing prebuilt LiteLLM Relay binary..."
-  mkdir -p "$RELAY_HOME/bin"
-  cp "$RELAY_PREBUILT_BINARY" "$RELAY_HOME/bin/litellm-relay"
+  install_relay_binary "$RELAY_PREBUILT_BINARY"
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   BUILD_DIR=""
@@ -390,10 +487,8 @@ else
 
   echo "Building LiteLLM Relay..."
   cargo build --quiet --release --manifest-path "$BUILD_DIR/Cargo.toml"
-  mkdir -p "$RELAY_HOME/bin"
-  cp "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
+  install_relay_binary "$BUILD_DIR/target/release/litellm-relay"
 fi
-chmod 700 "$RELAY_HOME/bin/litellm-relay"
 
 if [[ -n "$RELAY_MANAGED_CONFIG" ]]; then
   if [[ ! -f "$RELAY_MANAGED_CONFIG" ]]; then
@@ -407,26 +502,58 @@ fi
 
 INSTALL_BIN_DIR="$(choose_bin_dir)"
 PATH_UPDATED_PROFILE=""
+PATH_SKIPPED_PROFILE=""
 mkdir -p "$INSTALL_BIN_DIR"
 ln -sf "$RELAY_HOME/bin/litellm-relay" "$INSTALL_BIN_DIR/relay"
 ln -sf "$RELAY_HOME/bin/litellm-relay" "$INSTALL_BIN_DIR/litellm-relay"
 install_path_entry "$INSTALL_BIN_DIR"
 
 CA_PATH="$("$RELAY_HOME/bin/litellm-relay" ca-path)"
-if [[ "$RELAY_TRUST_CA" == "1" ]]; then
-  security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_PATH" >/dev/null 2>&1 || {
+CAPTURE_MODE="$("$RELAY_HOME/bin/litellm-relay" capture-mode)"
+LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+MANAGED_INSTALL=0
+if [[ -n "$RELAY_MANAGED_CONFIG" || "$SKIP_SETUP" == "1" ]]; then
+  MANAGED_INSTALL=1
+fi
+TRUST_CA="$RELAY_TRUST_CA"
+if [[ "$TRUST_CA" == "auto" ]]; then
+  if [[ "$MANAGED_INSTALL" == "1" && "$CAPTURE_MODE" != "payloads" ]]; then
+    TRUST_CA=0
+  else
+    TRUST_CA=1
+  fi
+fi
+CA_TRUST_STATE="not trusted"
+if [[ "$TRUST_CA" == "1" ]]; then
+  echo "Trusting the Relay CA in the login keychain so payload capture can read AI app traffic; macOS asks for your account password in the Certificate Trust Settings sheet."
+  if security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH" >/dev/null 2>&1; then
+    CA_TRUST_STATE="trusted in the login keychain"
+  else
     cat >&2 <<WARN
-warning: could not add the Relay CA to the login keychain.
-Payload capture requires trusting this certificate:
-  $CA_PATH
+warning: could not add the Relay CA to the login keychain: the Certificate Trust
+Settings sheet was cancelled, or no GUI session could show it (over ssh or from
+an MDM script the change is denied).
+Payload capture requires trusting this certificate; from a Terminal in your
+session run:
+  security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
 WARN
-  }
-else
+  fi
+elif [[ "$RELAY_TRUST_CA" == "0" ]]; then
   cat >&2 <<WARN
 Skipping Relay CA trust because RELAY_TRUST_CA=0 or --skip-trust-ca was set.
 Payload capture requires trusting this certificate later:
-  $CA_PATH
+  security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
 WARN
+else
+  cat <<SKIP
+Skipping Relay CA trust: this managed install keeps payload capture off
+(capture.payloads is not true in the seeded config), so nothing on this device
+needs the CA and no keychain password sheet is shown.
+To capture payloads later, set capture.payloads: true and trust the CA from a
+Terminal in the user's session:
+  security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
+or install with RELAY_TRUST_CA=1.
+SKIP
 fi
 
 if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
@@ -435,7 +562,7 @@ if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
 LiteLLM Relay installed.
 
 Command:     $INSTALL_BIN_DIR/relay
-Relay CA:    $CA_PATH
+Relay CA:    $CA_PATH ($CA_TRUST_STATE)
 
 Start the interactive setup:
   relay
@@ -443,22 +570,8 @@ Start the interactive setup:
 Setup wires your AI tools and keeps Relay running in the background as the
 ai.litellm.relay LaunchAgent, which the tools ask for their credential.
 DONE
-  if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
-    cat <<DONE
-
-I added $INSTALL_BIN_DIR to PATH in:
-  $PATH_UPDATED_PROFILE
-
-Open a new terminal before running relay, or run:
-  export PATH="$INSTALL_BIN_DIR:\$PATH"
-  relay
-DONE
-  fi
+  print_path_note
   exit 0
-fi
-
-if [[ "$RELAY_SKIP_SETUP" == "1" ]]; then
-  SKIP_SETUP=1
 fi
 
 if [[ "$SKIP_SETUP" == "1" ]]; then
@@ -497,6 +610,7 @@ mkdir -p "$(dirname "$PLIST")"
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl enable "gui/$(id -u)/ai.litellm.relay"
+install_relaybar_agent
 
 # Periodic auto-configuration: re-detect installed AI tools on an interval so a
 # tool installed after Relay gets wired to the Gateway automatically, with no
@@ -625,7 +739,7 @@ Command:     $INSTALL_BIN_DIR/relay
 Relay proxy: 127.0.0.1:$RELAY_PORT
 Dashboard:   http://127.0.0.1:$RELAY_PORT/
 PAC URL:     http://127.0.0.1:$RELAY_PORT/proxy.pac
-Relay CA:    $CA_PATH
+Relay CA:    $CA_PATH ($CA_TRUST_STATE)
 Logs:        $RELAY_HOME/relay.log.jsonl
 
 To open the interactive terminal view:
@@ -640,14 +754,4 @@ To verify interception without changing system settings:
 
 Gateway auth and Relay settings are saved in $RELAY_HOME/config.yaml.
 DONE
-if [[ -n "$PATH_UPDATED_PROFILE" ]]; then
-  cat <<DONE
-
-I added $INSTALL_BIN_DIR to PATH in:
-  $PATH_UPDATED_PROFILE
-
-Open a new terminal before running relay, or run:
-  export PATH="$INSTALL_BIN_DIR:\$PATH"
-  relay
-DONE
-fi
+print_path_note

@@ -1,3 +1,4 @@
+mod account;
 mod ai_tools;
 mod app;
 mod apps;
@@ -6,6 +7,7 @@ mod broker;
 mod cert;
 mod config;
 mod credential;
+mod daemon;
 mod events;
 mod gateway;
 mod http;

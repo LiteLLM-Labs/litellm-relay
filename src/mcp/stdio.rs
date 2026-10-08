@@ -169,6 +169,36 @@ pub fn meta_tools() -> Vec<Tool> {
             Some(true),
             Some(false),
         )),
+        Tool::new(
+            "switch_team",
+            "Switch the team that this user's Gateway spend is attributed to, for every client on the device. A call without an argument lists the current team, environment, and Gateway URL, the teams this user may pick, and the configured environments, and asks nothing. With team set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new team and key expiry plus the same selection.",
+            schema(
+                json!({"team": {"type": "string", "description": "The team id to switch to, as listed under teams by a call without an argument"}}),
+                &[],
+            ),
+        )
+        .annotate(ToolAnnotations::from_raw(
+            Some("Switch team".into()),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(false),
+        )),
+        Tool::new(
+            "switch_environment",
+            "Point every client on the device at another configured Gateway environment, keeping the sign-in. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
+            schema(
+                json!({"environment": {"type": "string", "description": "The environment name to switch to, as listed under environments by a call without an argument"}}),
+                &[],
+            ),
+        )
+        .annotate(ToolAnnotations::from_raw(
+            Some("Switch environment".into()),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(false),
+        )),
     ]
 }
 
@@ -568,6 +598,9 @@ mod tests {
                             (Some("search_tools"), _) => {
                                 json!({"ok": true, "result": {"tools": ["github-list_issues"], "inactive_servers": ["jira"]}})
                             }
+                            (Some("switch_team"), _) => {
+                                json!({"ok": true, "result": {"team": "team-a", "environment": "dev", "gateway_url": "https://gateway.example.com", "teams": [{"id": "team-a", "alias": "Team A"}], "teams_error": null, "environments": [{"name": "dev", "url": "https://gateway.example.com"}]}})
+                            }
                             (Some("call_tool"), Some("github-get_issue")) => {
                                 json!({"ok": true, "result": {"content": [{"type": "text", "text": "issue 1"}], "structuredContent": {"number": 1}, "isError": true}})
                             }
@@ -839,7 +872,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn should_list_the_four_meta_tools_with_truthful_annotations() {
+    async fn should_list_the_six_meta_tools_with_truthful_annotations() {
         let socket = socket_in_temp_dir();
         let client = connect(socket, FakeClient::without_elicitation()).await;
         let info = client.peer_info().expect("server info");
@@ -876,6 +909,25 @@ mod tests {
             .unwrap()
             .contains("at most five"));
         assert_eq!(search.input_schema["required"], json!(["query"]));
+        for (name, argument) in [
+            ("switch_team", "team"),
+            ("switch_environment", "environment"),
+        ] {
+            let switch = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert_eq!(switch.input_schema["required"], json!([]));
+            assert_eq!(
+                switch.input_schema["properties"][argument]["type"],
+                "string"
+            );
+            let annotations = switch.annotations.as_ref().unwrap();
+            assert_eq!(annotations.destructive_hint, Some(false));
+            assert_eq!(annotations.idempotent_hint, Some(true));
+            assert!(switch
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("without an argument"));
+        }
         let _ = client
             .list_tools(Some(PaginatedRequestParams::default()))
             .await;
@@ -919,11 +971,26 @@ mod tests {
         assert_eq!(text_of(&refused), "unknown_tool: no tool is named nope");
         assert!(refused.structured_content.is_none());
 
+        let listed = call(&client, "switch_team", json!({})).await;
+        assert_eq!(listed.is_error, Some(false));
+        assert_eq!(
+            listed.structured_content.as_ref().unwrap()["team"],
+            "team-a"
+        );
+        assert_eq!(
+            listed.structured_content.as_ref().unwrap()["environments"],
+            json!([{"name": "dev", "url": "https://gateway.example.com"}])
+        );
+        assert_eq!(
+            stand_in.requests.lock().unwrap()[3],
+            json!({"op": "switch_team"})
+        );
+
         let unknown = client
-            .call_tool(CallToolRequestParams::new("switch_team".to_string()))
+            .call_tool(CallToolRequestParams::new("forget_tool".to_string()))
             .await;
         assert!(unknown.is_err());
-        assert_eq!(stand_in.requests.lock().unwrap().len(), 3);
+        assert_eq!(stand_in.requests.lock().unwrap().len(), 4);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

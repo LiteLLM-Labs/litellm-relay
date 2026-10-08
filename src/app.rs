@@ -7,8 +7,8 @@ use crate::{
     ai_tools::{
         autoconfigure,
         credential::{
-            daemon_answers, run_credential, run_sign_in, run_sign_out, Audience, Host,
-            LAUNCH_AGENT_LABEL,
+            daemon_answers, run_credential, run_recheck, run_sign_in, run_sign_out,
+            run_switch_environment, run_switch_team, Audience, Host, LAUNCH_AGENT_LABEL,
         },
         detect::AiTool,
         launch_agent::{host_plist, runs_as_agent, DaemonHost, Launchd},
@@ -56,6 +56,15 @@ enum HelperCommand {
     SignIn,
     /// Forget the daemon's IdP session and delete its Gateway key.
     SignOut,
+    /// Mint the Gateway key under another team, keeping the IdP session; prints
+    /// one JSON line.
+    SwitchTeam { team: String },
+    /// Point the daemon at a configured environment's Gateway, keeping the IdP
+    /// session; prints one JSON line.
+    SwitchEnvironment { environment: String },
+    /// Probe the Gateway and fetch the teams and the budget now; prints the
+    /// account block of /api/status as one JSON line.
+    Recheck,
     /// Serve the Gateway's MCP tools to the calling client over stdio; every
     /// call goes to the daemon, which holds the credential and the catalog.
     Mcp,
@@ -99,6 +108,9 @@ enum CommandKind {
     LaunchAgent,
     /// Create the local CA and print its path.
     CaPath,
+    /// Print `payloads` when the config turns payload capture on, which is
+    /// the one thing that needs the Relay CA trusted, and `metadata` otherwise.
+    CaptureMode,
     /// Configure Gateway URL and API key for Relay ingest.
     Setup {
         #[arg(long)]
@@ -202,6 +214,11 @@ pub async fn run() -> Result<ExitCode> {
         }
         Some(Command::Helper(HelperCommand::SignIn)) => Ok(run_sign_in()),
         Some(Command::Helper(HelperCommand::SignOut)) => Ok(run_sign_out()),
+        Some(Command::Helper(HelperCommand::SwitchTeam { team })) => Ok(run_switch_team(&team)),
+        Some(Command::Helper(HelperCommand::SwitchEnvironment { environment })) => {
+            Ok(run_switch_environment(&environment))
+        }
+        Some(Command::Helper(HelperCommand::Recheck)) => Ok(run_recheck()),
         Some(Command::Helper(HelperCommand::Mcp)) => Ok(run_mcp().await),
     }
 }
@@ -245,6 +262,14 @@ enum ServeRefusal {
     AgentLoaded,
 }
 
+fn capture_mode_label(mitm_enabled: bool) -> &'static str {
+    if mitm_enabled {
+        "payloads"
+    } else {
+        "metadata"
+    }
+}
+
 fn another_daemon_answers(host: Host, answers: impl FnOnce() -> bool) -> bool {
     host == Host::MacOs && answers()
 }
@@ -282,6 +307,10 @@ async fn run_command(command: CommandKind) -> Result<()> {
         CommandKind::CaPath => {
             let ca = ensure_ca(&config.mitm_ca_dir)?;
             println!("{}", ca.cert_path.display());
+            Ok(())
+        }
+        CommandKind::CaptureMode => {
+            println!("{}", capture_mode_label(config.mitm_enabled));
             Ok(())
         }
         CommandKind::Setup {
@@ -392,7 +421,11 @@ fn parse_only(values: &[String]) -> Result<Vec<AiTool>> {
 async fn serve(settings: RelaySettings) -> Result<()> {
     use std::sync::Arc;
 
+    use crate::account::{
+        poll_forever, AccountDependencies, AccountService, HttpAccount, POLL_TICK,
+    };
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
+    use crate::daemon::Daemon;
     use crate::mcp::{
         service::{watch_session, McpDependencies, McpService, SESSION_CHECK_INTERVAL},
         socket as mcp_socket,
@@ -420,26 +453,38 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         None => {}
     }
     let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
+    let account = Arc::new(AccountService::new(
+        Arc::clone(&broker),
+        AccountDependencies {
+            http: Arc::new(HttpAccount),
+            clock: Arc::new(crate::broker::SystemClock),
+            settings: Box::new(crate::broker::FileSettings),
+        },
+    ));
+    let daemon = Arc::new(Daemon::new(Arc::clone(&broker), Arc::clone(&account)));
     let listener = socket::bind(&path)?;
     eprintln!("broker: listening on {}", path.display());
     let socket_task = tokio::spawn(socket::serve(
-        Arc::clone(&broker),
+        Arc::clone(&daemon),
         listener,
         socket::daemon_uid(),
     ));
     let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
+    let poller = tokio::spawn(poll_forever(Arc::clone(&account), POLL_TICK));
     let mcp = Arc::new(McpService::new(
         Arc::clone(&broker),
         &settings.mcp,
         McpDependencies {
             upstream: Arc::new(RmcpUpstream::default()),
+            switcher: daemon.clone(),
             settings: Box::new(crate::broker::FileSettings),
             clock: Box::new(crate::broker::SystemClock),
         },
     ));
     let proxy = RelayProxy::new(settings.to_config())
         .with_broker(Arc::clone(&broker))
-        .with_mcp(Arc::clone(&mcp));
+        .with_mcp(Arc::clone(&mcp))
+        .with_account(Arc::clone(&account));
     let mcp_path = mcp_socket::socket_path();
     let mcp_listener = mcp_socket::bind(&mcp_path)?;
     eprintln!("mcp: listening on {}", mcp_path.display());
@@ -466,6 +511,7 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         }
     };
     ticker.abort();
+    poller.abort();
     mcp_watcher.abort();
     tokio::task::spawn_blocking(move || broker.shutdown()).await?;
     outcome
@@ -538,6 +584,7 @@ mod tests {
             CommandKind::Pac => "pac",
             CommandKind::LaunchAgent => "launch-agent",
             CommandKind::CaPath => "ca-path",
+            CommandKind::CaptureMode => "capture-mode",
             CommandKind::Setup { .. } => "setup",
             CommandKind::Autoconfigure { .. } => "autoconfigure",
             CommandKind::Onboard { .. } => "onboard",
@@ -551,27 +598,59 @@ mod tests {
     #[test]
     fn should_parse_the_helper_commands_next_to_the_daemon_ones() {
         for (args, expected) in [
-            (["relay", "credential"], "credential"),
-            (["relay", "sign-in"], "sign-in"),
-            (["relay", "sign-out"], "sign-out"),
-            (["relay", "mcp"], "mcp"),
+            (vec!["relay", "credential"], "credential".to_string()),
+            (vec!["relay", "sign-in"], "sign-in".to_string()),
+            (vec!["relay", "sign-out"], "sign-out".to_string()),
+            (
+                vec!["relay", "switch-team", "eng"],
+                "switch-team eng".to_string(),
+            ),
+            (
+                vec!["relay", "switch-environment", "uat"],
+                "switch-environment uat".to_string(),
+            ),
+            (vec!["relay", "recheck"], "recheck".to_string()),
+            (vec!["relay", "mcp"], "mcp".to_string()),
         ] {
             let cli = Cli::try_parse_from(args).expect("the command line must parse");
             let parsed = match cli.command.expect("a subcommand") {
-                Command::Helper(HelperCommand::Credential { proxy: false }) => "credential",
-                Command::Helper(HelperCommand::Credential { proxy: true }) => "credential --proxy",
-                Command::Helper(HelperCommand::SignIn) => "sign-in",
-                Command::Helper(HelperCommand::SignOut) => "sign-out",
-                Command::Helper(HelperCommand::Mcp) => "mcp",
-                Command::Daemon(other) => describe(&other),
+                Command::Helper(HelperCommand::Credential { proxy: false }) => {
+                    "credential".to_string()
+                }
+                Command::Helper(HelperCommand::Credential { proxy: true }) => {
+                    "credential --proxy".to_string()
+                }
+                Command::Helper(HelperCommand::SignIn) => "sign-in".to_string(),
+                Command::Helper(HelperCommand::SignOut) => "sign-out".to_string(),
+                Command::Helper(HelperCommand::SwitchTeam { team }) => {
+                    format!("switch-team {team}")
+                }
+                Command::Helper(HelperCommand::SwitchEnvironment { environment }) => {
+                    format!("switch-environment {environment}")
+                }
+                Command::Helper(HelperCommand::Recheck) => "recheck".to_string(),
+                Command::Helper(HelperCommand::Mcp) => "mcp".to_string(),
+                Command::Daemon(other) => describe(&other).to_string(),
             };
             assert_eq!(parsed, expected);
         }
+        assert!(Cli::try_parse_from(["relay", "switch-team"]).is_err());
+        assert!(Cli::try_parse_from(["relay", "switch-environment"]).is_err());
         assert_eq!(describe(&daemon_command(&["relay", "serve"])), "serve");
         assert_eq!(
             describe(&daemon_command(&["relay", "claude-token"])),
             "claude-token"
         );
+        assert_eq!(
+            describe(&daemon_command(&["relay", "capture-mode"])),
+            "capture-mode"
+        );
+    }
+
+    #[test]
+    fn should_name_the_capture_mode_the_installer_keys_ca_trust_on() {
+        assert_eq!(capture_mode_label(true), "payloads");
+        assert_eq!(capture_mode_label(false), "metadata");
     }
 
     #[test]

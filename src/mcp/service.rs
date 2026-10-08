@@ -21,7 +21,7 @@ use crate::{
     broker::{
         caller::Peer,
         session::{SessionBearer, SessionIdentity},
-        Broker, Clock, Context, Refusal, SettingsSource, SettingsVersion,
+        Broker, Clock, Context, Refusal, Reply, SettingsSource, SettingsVersion,
     },
     config::McpSection,
 };
@@ -48,6 +48,14 @@ pub enum McpRequest {
     ActivateServer {
         server: String,
     },
+    SwitchTeam {
+        #[serde(default)]
+        team: Option<String>,
+    },
+    SwitchEnvironment {
+        #[serde(default)]
+        environment: Option<String>,
+    },
 }
 
 impl McpRequest {
@@ -57,6 +65,8 @@ impl McpRequest {
             McpRequest::DescribeTool { .. } => "mcp describe_tool",
             McpRequest::CallTool { .. } => "mcp call_tool",
             McpRequest::ActivateServer { .. } => "mcp activate_server",
+            McpRequest::SwitchTeam { .. } => "mcp switch_team",
+            McpRequest::SwitchEnvironment { .. } => "mcp switch_environment",
         }
     }
 }
@@ -66,6 +76,8 @@ impl McpRequest {
 pub enum QuestionKind {
     ConfirmCall,
     ActivateServer,
+    SwitchTeam,
+    SwitchEnvironment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,6 +100,12 @@ pub trait Asker: Send {
         &'a mut self,
         question: Question,
     ) -> Pin<Box<dyn Future<Output = Answer> + Send + 'a>>;
+}
+
+pub trait Switcher: Send + Sync {
+    fn switch_team(&self, team: &str) -> Reply;
+    fn switch_environment(&self, name: &str) -> Reply;
+    fn selection(&self) -> Value;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +263,7 @@ pub struct McpDependencies {
     pub upstream: Arc<dyn Upstream>,
     pub settings: Box<dyn SettingsSource>,
     pub clock: Box<dyn Clock>,
+    pub switcher: Arc<dyn Switcher>,
 }
 
 pub struct McpService {
@@ -276,22 +295,27 @@ impl McpService {
     ) -> Result<Value, McpRefusal> {
         let service = Arc::clone(self);
         let label = request.label();
-        let bearer = tokio::task::spawn_blocking(move || service.admit(peer, label))
-            .await
-            .map_err(|_| {
-                McpRefusal::Broker(Refusal::GatewayError(
-                    "the broker could not answer this request".to_string(),
-                ))
-            })??;
-        let catalog = self.catalog_for(&bearer).await?;
+        let bearer = blocking(move || service.admit(peer, label)).await??;
         match request {
-            McpRequest::SearchTools { query } => Ok(self.search(&catalog, &bearer, &query)),
-            McpRequest::DescribeTool { name } => self.describe(&catalog, &bearer, &name),
+            McpRequest::SearchTools { query } => {
+                let catalog = self.catalog_for(&bearer).await?;
+                Ok(self.search(&catalog, &bearer, &query))
+            }
+            McpRequest::DescribeTool { name } => {
+                let catalog = self.catalog_for(&bearer).await?;
+                self.describe(&catalog, &bearer, &name)
+            }
             McpRequest::CallTool { name, arguments } => {
+                let catalog = self.catalog_for(&bearer).await?;
                 self.call(&catalog, &bearer, &name, arguments, asker).await
             }
             McpRequest::ActivateServer { server } => {
+                let catalog = self.catalog_for(&bearer).await?;
                 self.activate(&catalog, &bearer, &server, asker).await
+            }
+            McpRequest::SwitchTeam { team } => self.switch_team(&bearer, team, asker).await,
+            McpRequest::SwitchEnvironment { environment } => {
+                self.switch_environment(environment, asker).await
             }
         }
     }
@@ -600,9 +624,120 @@ impl McpService {
         ))
     }
 
+    async fn switch_team(
+        &self,
+        bearer: &SessionBearer,
+        team: Option<String>,
+        asker: &mut dyn Asker,
+    ) -> Result<Value, McpRefusal> {
+        let Some(team) = team else {
+            return self.selection().await;
+        };
+        let question = Question {
+            kind: QuestionKind::SwitchTeam,
+            message: format!("Switch the team to {}?", quoted(&team)),
+        };
+        confirm(question, asker).await?;
+        let switcher = Arc::clone(&self.deps.switcher);
+        let switched = switched(blocking(move || switcher.switch_team(&team)).await?)?;
+        self.forget_fetch_time(&bearer.identity);
+        self.selection_after(switched).await
+    }
+
+    async fn switch_environment(
+        &self,
+        environment: Option<String>,
+        asker: &mut dyn Asker,
+    ) -> Result<Value, McpRefusal> {
+        let Some(name) = environment else {
+            return self.selection().await;
+        };
+        let question = Question {
+            kind: QuestionKind::SwitchEnvironment,
+            message: match environment_url(&self.selection().await?, &name) {
+                Some(url) => format!("Switch the environment to {} ({url})?", quoted(&name)),
+                None => format!("Switch the environment to {}?", quoted(&name)),
+            },
+        };
+        confirm(question, asker).await?;
+        let switcher = Arc::clone(&self.deps.switcher);
+        let switched = switched(blocking(move || switcher.switch_environment(&name)).await?)?;
+        self.selection_after(switched).await
+    }
+
+    async fn selection(&self) -> Result<Value, McpRefusal> {
+        let switcher = Arc::clone(&self.deps.switcher);
+        blocking(move || switcher.selection()).await
+    }
+
+    async fn selection_after(&self, switched: Value) -> Result<Value, McpRefusal> {
+        let selection = self.selection().await?;
+        Ok(Value::Object(
+            entries(switched)
+                .into_iter()
+                .chain(entries(selection))
+                .collect(),
+        ))
+    }
+
+    fn forget_fetch_time(&self, identity: &SessionIdentity) {
+        let mut state = self.lock_state();
+        let session = state
+            .session
+            .as_mut()
+            .filter(|session| &session.identity == identity);
+        if let Some(session) = session {
+            session.fetch_attempted_at = None;
+        }
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, McpRefusal> {
+    tokio::task::spawn_blocking(work).await.map_err(|_| {
+        McpRefusal::Broker(Refusal::GatewayError(
+            "the broker could not answer this request".to_string(),
+        ))
+    })
+}
+
+fn switched(reply: Reply) -> Result<Value, McpRefusal> {
+    match reply {
+        Reply::Switched(switched) => serde_json::to_value(&switched).map_err(|error| {
+            McpRefusal::Broker(Refusal::GatewayError(format!(
+                "the switch outcome could not be rendered: {error}"
+            )))
+        }),
+        Reply::Refused(refusal) => Err(McpRefusal::Broker(refusal)),
+        Reply::Credential(_)
+        | Reply::SignedIn { .. }
+        | Reply::SignedOut
+        | Reply::Status(_)
+        | Reply::Account(_) => Err(McpRefusal::Broker(Refusal::GatewayError(
+            "the daemon answered the switch with something other than a switch outcome".to_string(),
+        ))),
+    }
+}
+
+fn entries(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    }
+}
+
+fn environment_url(selection: &Value, name: &str) -> Option<String> {
+    selection["environments"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .and_then(|entry| entry["url"].as_str())
+        .map(str::to_string)
 }
 
 fn gateway_target(bearer: &SessionBearer) -> GatewayTarget {

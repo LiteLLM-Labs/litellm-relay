@@ -21,6 +21,7 @@ BINARY=""
 CONFIG_FILE=""
 OUTPUT=""
 SIGN_IDENTITY=""
+RELAYBAR="${RELAY_PKG_RELAYBAR:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -39,6 +40,11 @@ Options:
                           (default: dist/litellm-relay-<version>.pkg)
   --identifier ID         Package identifier (default: ai.litellm.relay)
   --sign "IDENTITY"       Developer ID Installer identity for productsign
+  --relaybar              Build macos/RelayBarGlass with swift and ship
+                          RelayBarGlass.app in the package, so install.sh
+                          registers the menu bar app at login
+                          (RELAY_PKG_RELAYBAR=1 does the same; skipped with a
+                          message when swift is not on PATH)
   -h, --help              Show this help
 
 Notarization (staple) is a follow-up step handled outside this script.
@@ -53,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --identifier) IDENTIFIER="${2:-}"; shift 2 ;;
     --sign) SIGN_IDENTITY="${2:-}"; shift 2 ;;
+    --relaybar) RELAYBAR=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -76,7 +83,7 @@ fi
 if [[ -z "$BINARY" ]]; then
   echo "Building release binary with cargo..."
   cargo build --release --locked --manifest-path "$REPO_ROOT/Cargo.toml"
-  BINARY="$REPO_ROOT/target/release/litellm-relay"
+  BINARY="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/litellm-relay"
 fi
 
 if [[ ! -f "$BINARY" ]]; then
@@ -92,6 +99,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 STAGE_DIR="$(mktemp -d)"
 SCRIPTS_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR" "$SCRIPTS_DIR"' EXIT
+chmod 755 "$STAGE_DIR"
 
 # Payload laid down at $INSTALL_LOCATION on the device.
 install -m 0755 "$BINARY" "$STAGE_DIR/litellm-relay"
@@ -99,6 +107,15 @@ install -m 0755 "$REPO_ROOT/src/install.sh" "$STAGE_DIR/install.sh"
 install -m 0755 "$REPO_ROOT/src/uninstall.sh" "$STAGE_DIR/uninstall.sh"
 if [[ -n "$CONFIG_FILE" ]]; then
   install -m 0644 "$CONFIG_FILE" "$STAGE_DIR/config.yaml"
+fi
+if [[ "$RELAYBAR" == "1" ]]; then
+  if command -v swift >/dev/null 2>&1; then
+    echo "Building the RelayBar menu bar app..."
+    "$REPO_ROOT/macos/RelayBarGlass/build.sh"
+    ditto "$REPO_ROOT/macos/RelayBarGlass/RelayBarGlass.app" "$STAGE_DIR/RelayBarGlass.app"
+  else
+    echo "Skipping the RelayBar menu bar app: swift is not on PATH, so the package ships without it." >&2
+  fi
 fi
 
 # Postinstall runs the installer as the console user.
@@ -117,6 +134,7 @@ pkgbuild \
   --install-location "$INSTALL_LOCATION" \
   --scripts "$SCRIPTS_DIR" \
   "$UNSIGNED_PKG"
+"$SCRIPT_DIR/macos-pkg/check-payload.sh" "$UNSIGNED_PKG"
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "Signing package with: $SIGN_IDENTITY"

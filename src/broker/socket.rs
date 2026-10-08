@@ -15,7 +15,7 @@ use tokio::{
 
 use super::{
     caller::{Peer, AUDIT_TOKEN_BYTES},
-    Broker, Refusal, Reply, Request,
+    Handler, Refusal, Reply, Request,
 };
 
 const MAX_REQUEST_BYTES: u64 = 4096;
@@ -48,25 +48,33 @@ pub fn bind(path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
-pub async fn serve(broker: Arc<Broker>, listener: UnixListener, daemon_uid: u32) -> Result<()> {
+pub async fn serve<H: Handler + 'static>(
+    handler: Arc<H>,
+    listener: UnixListener,
+    daemon_uid: u32,
+) -> Result<()> {
     loop {
         let (stream, _) = listener
             .accept()
             .await
             .context("the broker socket stopped accepting connections")?;
-        let broker = Arc::clone(&broker);
+        let handler = Arc::clone(&handler);
         tokio::spawn(async move {
-            let _ = handle(broker, stream, daemon_uid).await;
+            let _ = handle(handler, stream, daemon_uid).await;
         });
     }
 }
 
-async fn handle(broker: Arc<Broker>, mut stream: UnixStream, daemon_uid: u32) -> Result<()> {
+async fn handle<H: Handler + 'static>(
+    handler: Arc<H>,
+    mut stream: UnixStream,
+    daemon_uid: u32,
+) -> Result<()> {
     let reply = match admit(identity(&stream), daemon_uid) {
         Err(refusal) => Reply::Refused(refusal),
         Ok(peer) => match read_request(&mut stream).await {
             Err(refusal) => Reply::Refused(refusal),
-            Ok(request) => tokio::task::spawn_blocking(move || broker.handle(request, peer))
+            Ok(request) => tokio::task::spawn_blocking(move || handler.handle(request, peer))
                 .await
                 .unwrap_or_else(|_| {
                     Reply::Refused(Refusal::GatewayError(
@@ -255,6 +263,17 @@ mod tests {
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["signed_in"], true);
         assert!(reply.get("token").is_none());
+        let switch_path = path.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            exchange(
+                &switch_path,
+                "{\"op\":\"switch_team\",\"team\":\"team-b\"}\n",
+            )
+        })
+        .await
+        .expect("exchange");
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["reason"], "gateway_error");
         let reply = tokio::task::spawn_blocking(move || exchange(&path, "{\"op\":\"sign_out\"}\n"))
             .await
             .expect("exchange");
