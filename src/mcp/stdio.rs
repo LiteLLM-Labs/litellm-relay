@@ -13,7 +13,7 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ElicitRequest,
         ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationSchema, Implementation,
         InputRequest, InputRequiredResult, JsonObject, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
+        ResultType, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
     },
     service::RequestContext,
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
@@ -261,12 +261,16 @@ impl Conversation {
         if self.op != "call_tool" {
             return CallToolResult::structured(result);
         }
-        serde_json::from_value::<CallToolResult>(result).unwrap_or_else(|error| {
-            refused(
+        match serde_json::from_value::<CallToolResult>(result) {
+            Ok(mut passed) => {
+                passed.result_type.get_or_insert(ResultType::COMPLETE);
+                passed
+            }
+            Err(error) => refused(
                 "upstream_error",
                 &format!("the daemon's tool result could not be read: {error}"),
-            )
-        })
+            ),
+        }
     }
 
     fn continues(&self, request: &CallToolRequestParams) -> bool {
@@ -1227,6 +1231,24 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("confirmation_expired: "));
+        assert_eq!(stand_in.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_mark_a_passed_through_tool_result_complete_under_the_inline_lifecycle() {
+        let socket = socket_in_temp_dir();
+        let stand_in = StandIn::serve(&socket, 1);
+        let mut wire = discovered_wire(RelayServer::new(socket)).await;
+        let passed = wire
+            .call(
+                json!({"name": "github-get_issue", "arguments": {"number": 1}}),
+                None,
+            )
+            .await;
+        assert_eq!(passed["resultType"], "complete");
+        assert_eq!(passed["isError"], json!(true));
+        assert_eq!(passed["content"][0]["text"], "issue 1");
+        assert_eq!(passed["structuredContent"], json!({"number": 1}));
         assert_eq!(stand_in.requests.lock().unwrap().len(), 1);
     }
 }
