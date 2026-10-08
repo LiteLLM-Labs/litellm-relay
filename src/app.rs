@@ -56,6 +56,9 @@ enum HelperCommand {
     SignIn,
     /// Forget the daemon's IdP session and delete its Gateway key.
     SignOut,
+    /// Serve the Gateway's MCP tools to the calling client over stdio; every
+    /// call goes to the daemon, which holds the credential and the catalog.
+    Mcp,
 }
 
 #[derive(Args, Clone, Debug, Default)]
@@ -199,7 +202,19 @@ pub async fn run() -> Result<ExitCode> {
         }
         Some(Command::Helper(HelperCommand::SignIn)) => Ok(run_sign_in()),
         Some(Command::Helper(HelperCommand::SignOut)) => Ok(run_sign_out()),
+        Some(Command::Helper(HelperCommand::Mcp)) => Ok(run_mcp().await),
     }
+}
+
+#[cfg(unix)]
+async fn run_mcp() -> ExitCode {
+    crate::mcp::stdio::run_mcp(crate::mcp::socket::socket_path()).await
+}
+
+#[cfg(not(unix))]
+async fn run_mcp() -> ExitCode {
+    eprintln!("relay mcp: the MCP relay needs the Relay daemon's Unix socket, which this platform does not have");
+    ExitCode::FAILURE
 }
 
 async fn run_interactive_default() -> Result<()> {
@@ -378,6 +393,11 @@ async fn serve(settings: RelaySettings) -> Result<()> {
     use std::sync::Arc;
 
     use crate::broker::{socket, socket_path, Broker, Dependencies, TICK};
+    use crate::mcp::{
+        service::{watch_session, McpDependencies, McpService, SESSION_CHECK_INTERVAL},
+        socket as mcp_socket,
+        upstream::RmcpUpstream,
+    };
 
     let path = socket_path();
     let refusal = serve_refusal(
@@ -400,7 +420,6 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         None => {}
     }
     let broker = Arc::new(Broker::new(&settings, Dependencies::live()));
-    let proxy = RelayProxy::new(settings.to_config()).with_broker(Arc::clone(&broker));
     let listener = socket::bind(&path)?;
     eprintln!("broker: listening on {}", path.display());
     let socket_task = tokio::spawn(socket::serve(
@@ -409,6 +428,27 @@ async fn serve(settings: RelaySettings) -> Result<()> {
         socket::daemon_uid(),
     ));
     let ticker = tokio::spawn(tick_forever(Arc::clone(&broker), TICK));
+    let mcp = Arc::new(McpService::new(
+        Arc::clone(&broker),
+        &settings.mcp,
+        McpDependencies {
+            upstream: Arc::new(RmcpUpstream::default()),
+            settings: Box::new(crate::broker::FileSettings),
+            clock: Box::new(crate::broker::SystemClock),
+        },
+    ));
+    let proxy = RelayProxy::new(settings.to_config())
+        .with_broker(Arc::clone(&broker))
+        .with_mcp(Arc::clone(&mcp));
+    let mcp_path = mcp_socket::socket_path();
+    let mcp_listener = mcp_socket::bind(&mcp_path)?;
+    eprintln!("mcp: listening on {}", mcp_path.display());
+    let mcp_socket_task = tokio::spawn(mcp_socket::serve(
+        Arc::clone(&mcp),
+        mcp_listener,
+        socket::daemon_uid(),
+    ));
+    let mcp_watcher = tokio::spawn(watch_session(Arc::clone(&mcp), SESSION_CHECK_INTERVAL));
 
     let outcome = tokio::select! {
         served = proxy.serve_forever() => served,
@@ -416,12 +456,17 @@ async fn serve(settings: RelaySettings) -> Result<()> {
             Ok(served) => served,
             Err(error) => Err(anyhow::anyhow!("broker socket task stopped: {error}")),
         },
+        joined = mcp_socket_task => match joined {
+            Ok(served) => served,
+            Err(error) => Err(anyhow::anyhow!("mcp socket task stopped: {error}")),
+        },
         () = shutdown_signal() => {
             eprintln!("broker: stopping");
             Ok(())
         }
     };
     ticker.abort();
+    mcp_watcher.abort();
     tokio::task::spawn_blocking(move || broker.shutdown()).await?;
     outcome
 }
@@ -509,6 +554,7 @@ mod tests {
             (["relay", "credential"], "credential"),
             (["relay", "sign-in"], "sign-in"),
             (["relay", "sign-out"], "sign-out"),
+            (["relay", "mcp"], "mcp"),
         ] {
             let cli = Cli::try_parse_from(args).expect("the command line must parse");
             let parsed = match cli.command.expect("a subcommand") {
@@ -516,6 +562,7 @@ mod tests {
                 Command::Helper(HelperCommand::Credential { proxy: true }) => "credential --proxy",
                 Command::Helper(HelperCommand::SignIn) => "sign-in",
                 Command::Helper(HelperCommand::SignOut) => "sign-out",
+                Command::Helper(HelperCommand::Mcp) => "mcp",
                 Command::Daemon(other) => describe(&other),
             };
             assert_eq!(parsed, expected);

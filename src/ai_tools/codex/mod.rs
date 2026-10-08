@@ -1,7 +1,7 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
-use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
 use crate::{
     ai_tools::{
@@ -14,6 +14,7 @@ use crate::{
         launch_agent::{require_daemon, DaemonHost, Launchd},
     },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
+    mcp::CLIENT_SERVER_NAME,
     system::home_dir,
 };
 
@@ -153,6 +154,9 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
         match &credential {
             Credential::Broker => {
                 println!("Codex asks the Relay daemon for a credential via `relay credential`.");
+                println!(
+                    "Registered the Gateway's MCP tools as the `{CLIENT_SERVER_NAME}` server in the same file."
+                );
             }
             Credential::TokenHelper => {
                 println!("Codex fetches a Gateway credential via `relay codex-token`.");
@@ -210,7 +214,8 @@ fn write_codex_config(
     } else {
         String::new()
     };
-    let rendered = render_codex_config(&existing, settings, credential, exe)?;
+    let rendered = render_codex_config(&existing, settings, credential, exe)
+        .with_context(|| format!("refusing to rewrite {}", path.display()))?;
     fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
     secure_file(&path)?;
     Ok(path)
@@ -232,15 +237,37 @@ fn render_codex_config(
     doc["model"] = value(settings.codex.model.clone());
     doc["model_provider"] = value(provider_id);
 
-    if !doc.contains_key("model_providers") {
-        let mut providers = Table::new();
-        providers.set_implicit(true);
-        doc["model_providers"] = Item::Table(providers);
+    table_like_mut(&mut doc, "model_providers")?.insert(
+        provider_id,
+        Item::Table(build_provider_table(settings, credential, exe)),
+    );
+
+    if *credential == Credential::Broker {
+        table_like_mut(&mut doc, "mcp_servers")?
+            .insert(CLIENT_SERVER_NAME, Item::Table(mcp_server_table(exe)));
     }
-    doc["model_providers"][provider_id] =
-        Item::Table(build_provider_table(settings, credential, exe));
 
     Ok(doc.to_string())
+}
+
+fn table_like_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> Result<&'doc mut dyn TableLike> {
+    if !doc.contains_key(key) {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        doc[key] = Item::Table(table);
+    }
+    match doc[key].as_table_like_mut() {
+        Some(table) => Ok(table),
+        None => bail!("`{key}` is not a table"),
+    }
+}
+
+fn mcp_server_table(exe: &str) -> Table {
+    let mut server = Table::new();
+    server["command"] = value(exe);
+    server["args"] = value(["mcp"].into_iter().collect::<Array>());
+    server["default_tools_approval_mode"] = value("approve");
+    server
 }
 
 fn build_provider_table(settings: &RelaySettings, credential: &Credential, exe: &str) -> Table {
@@ -513,6 +540,132 @@ base_url = \"https://other.example.com/v1\"
             Some("https://other.example.com/v1")
         );
         assert_eq!(doc["model_provider"].as_str(), Some("litellm"));
+    }
+
+    #[test]
+    fn should_register_relay_mcp_with_approval_on_the_broker_path_and_keep_other_servers() {
+        let existing = "\
+# hand-written: keep me
+approval_policy = \"never\"
+
+[mcp_servers.github]
+command = \"github-mcp\"
+args = [\"stdio\"]
+
+[mcp_servers.litellm]
+command = \"/old/relay\"
+args = [\"mcp\"]
+
+[projects.\"/home/dev/app\"]
+trust_level = \"trusted\" # inline comment
+";
+        let settings = settings_with_team(None);
+        let once = render_codex_config(
+            existing,
+            &settings,
+            &Credential::Broker,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
+        let twice = render_codex_config(
+            &once,
+            &settings,
+            &Credential::Broker,
+            "/opt/relay/litellm-relay",
+        )
+        .unwrap();
+        assert_eq!(once, twice);
+        assert!(once.contains("# hand-written: keep me\napproval_policy = \"never\""));
+        assert!(once
+            .contains("[projects.\"/home/dev/app\"]\ntrust_level = \"trusted\" # inline comment"));
+        let doc = parse(&once);
+        let litellm = &doc["mcp_servers"]["litellm"];
+        assert_eq!(
+            litellm["command"].as_str(),
+            Some("/opt/relay/litellm-relay")
+        );
+        assert_eq!(
+            litellm["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|arg| arg.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["mcp"]
+        );
+        assert_eq!(
+            litellm["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["github"]["command"].as_str(),
+            Some("github-mcp")
+        );
+        assert_eq!(doc["mcp_servers"].as_table().unwrap().len(), 2);
+
+        let fresh = parse(
+            &render_codex_config(
+                "",
+                &settings,
+                &Credential::Broker,
+                "/opt/relay/litellm-relay",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            fresh["mcp_servers"]["litellm"]["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
+
+        for credential in [
+            Credential::TokenHelper,
+            Credential::EnvKey("KEY"),
+            Credential::StaticKey("sk-1"),
+        ] {
+            let left_alone =
+                render_codex_config(existing, &settings, &credential, "/opt/relay/x").unwrap();
+            let doc = parse(&left_alone);
+            assert_eq!(
+                doc["mcp_servers"]["litellm"]["command"].as_str(),
+                Some("/old/relay")
+            );
+            assert!(doc["mcp_servers"]["litellm"]
+                .get("default_tools_approval_mode")
+                .is_none());
+            let none =
+                parse(&render_codex_config("", &settings, &credential, "/opt/relay/x").unwrap());
+            assert!(none.get("mcp_servers").is_none());
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_config_whose_mcp_servers_or_model_providers_is_not_a_table() {
+        let settings = settings_with_team(None);
+        for (existing, key) in [
+            ("mcp_servers = \"github\"\n", "mcp_servers"),
+            ("mcp_servers = [\"github\"]\n", "mcp_servers"),
+            ("[[mcp_servers]]\ncommand = \"x\"\n", "mcp_servers"),
+            ("model_providers = 1\n", "model_providers"),
+        ] {
+            let error =
+                render_codex_config(existing, &settings, &Credential::Broker, "/opt/relay/x")
+                    .expect_err(existing)
+                    .to_string();
+            assert!(error.contains(key), "{existing}: {error}");
+        }
+
+        let inline = "mcp_servers = { github = { command = \"github-mcp\" } }\n";
+        let doc = parse(
+            &render_codex_config(inline, &settings, &Credential::Broker, "/opt/relay/x").unwrap(),
+        );
+        assert_eq!(
+            doc["mcp_servers"]["github"]["command"].as_str(),
+            Some("github-mcp")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["litellm"]["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
     }
 
     #[test]

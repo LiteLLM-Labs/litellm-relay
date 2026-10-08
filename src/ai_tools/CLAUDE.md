@@ -24,11 +24,13 @@ ai_tools/
   gateway_credential.rs  ID token to Gateway credential exchange and cache (shared)
   blocking.rs     one async HTTP exchange run from a synchronous command (shared)
   credential.rs   `relay credential` / `sign-in` / `sign-out` and the per-host bearer plan (shared)
-  claude_cli/     Claude Code settings writer
+  claude_cli/     Claude Code settings writer, plus the `litellm` MCP server in ~/.claude.json and its allow rules (broker plan)
     mod.rs
-  codex/          Codex CLI config writer
+  codex/          Codex CLI config writer, plus the `[mcp_servers.litellm]` table with approval (broker plan)
   claude_desktop/ Claude Desktop managed settings writer
 ```
+
+`relay mcp` itself lives in `src/mcp/stdio.rs`: a stdio MCP server with no credential and no catalog that relays each of its four meta tools (`search_tools`, `describe_tool`, `call_tool`, `activate_server`) to the daemon's `mcp.sock` and turns the daemon's one question into an MCP elicitation (an `elicitation/create` request for an `initialize` client, an `input_required` tool result the client answers by retrying the call under the 2026-07-28 inline lifecycle, with the daemon conversation parked under a random request state for up to 600 s). The two writers above register it only on the broker plan and switch the client's own per-tool prompt off for those four tools, so the daemon's confirmation is the one gate; off the broker plan nothing about MCP is written
 
 ## Adding a tool
 

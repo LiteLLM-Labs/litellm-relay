@@ -7,6 +7,7 @@ pub mod caller;
 pub mod key;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod session;
 #[cfg(unix)]
 pub mod socket;
 #[cfg(test)]

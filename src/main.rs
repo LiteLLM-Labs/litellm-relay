@@ -10,6 +10,7 @@ mod events;
 mod gateway;
 mod http;
 mod inference;
+mod mcp;
 mod pac;
 mod proxy;
 mod setup;
