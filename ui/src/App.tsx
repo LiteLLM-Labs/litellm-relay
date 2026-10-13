@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
+
+import { keyEvents } from "@/lib/eventKeys"
 import type { ComponentType, ReactNode } from "react"
 import {
   Activity,
@@ -130,13 +132,15 @@ function App() {
       events?: RelayEvent[]
     }
 
+    const nextEvents = eventsPayload.events ?? []
+    const nextKeys = keyEvents(nextEvents)
     setStatus(statusPayload)
-    setEvents(eventsPayload.events ?? [])
+    setEvents(nextEvents)
     setSelectedEventId((current) => {
-      if (current && eventsPayload.events?.some((event) => getEventId(event) === current)) {
+      if (current && nextKeys.some((item) => item.key === current)) {
         return current
       }
-      return getEventId(eventsPayload.events?.at(-1))
+      return nextKeys.at(-1)?.key ?? null
     })
   }, [])
 
@@ -179,33 +183,35 @@ function App() {
     return Array.from(seen)
   }, [events, knownApps])
 
-  const sortedEvents = useMemo(
+  const sortedRows = useMemo(
     () =>
-      events
-        .map((event, index) => ({ event, index }))
+      keyEvents(events)
+        .map((row, index) => ({ row, index }))
         .sort((left, right) => {
-          const rightTime = getEventTimestamp(right.event)
-          const leftTime = getEventTimestamp(left.event)
+          const rightTime = getEventTimestamp(right.row.event)
+          const leftTime = getEventTimestamp(left.row.event)
           if (rightTime !== leftTime) {
             return rightTime - leftTime
           }
           return right.index - left.index
         })
-        .map(({ event }) => event),
+        .map(({ row }) => row),
     [events]
   )
 
-  const filteredEvents = useMemo(
-    () => sortedEvents.filter((event) => appFilter === "all" || asText(event.app) === appFilter),
-    [appFilter, sortedEvents]
+  const filteredRows = useMemo(
+    () => sortedRows.filter(({ event }) => appFilter === "all" || asText(event.app) === appFilter),
+    [appFilter, sortedRows]
   )
 
-  const selectedEvent = useMemo(
-    () => filteredEvents.find((event) => getEventId(event) === selectedEventId) ?? filteredEvents.at(0) ?? null,
-    [filteredEvents, selectedEventId]
+  const selectedRow = useMemo(
+    () => filteredRows.find((row) => row.key === selectedEventId) ?? filteredRows.at(0) ?? null,
+    [filteredRows, selectedEventId]
   )
+  const selectedEvent = selectedRow?.event ?? null
 
   const stats = useMemo(() => {
+    const filteredEvents = filteredRows.map(({ event }) => event)
     const requests = filteredEvents.filter((event) => asText(event.event) === "http_request").length
     const responses = filteredEvents.filter((event) => asText(event.event) === "http_response").length
     const ingestAttempts = filteredEvents.filter((event) => asText(event.event) === "gateway_ingest")
@@ -219,7 +225,7 @@ function App() {
       ingestOk,
       errors,
     }
-  }, [filteredEvents])
+  }, [filteredRows])
 
   const clearEvents = async () => {
     await fetch("/api/events/clear", { method: "POST" })
@@ -327,20 +333,20 @@ function App() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredEvents.length === 0 ? (
+                    {filteredRows.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={eventColumns.length} className="h-28 text-center text-muted-foreground">
                           {loading ? "Loading relay events..." : "No relay events for this filter."}
                         </TableCell>
                       </TableRow>
                     ) : (
-                      filteredEvents
-                        .map((event) => (
+                      filteredRows
+                        .map(({ event, key }) => (
                           <TableRow
-                            key={getEventId(event)}
-                            data-state={getEventId(event) === getEventId(selectedEvent ?? {}) ? "selected" : undefined}
+                            key={key}
+                            data-state={key === selectedRow?.key ? "selected" : undefined}
                             className="cursor-pointer"
-                            onClick={() => setSelectedEventId(getEventId(event))}
+                            onClick={() => setSelectedEventId(key)}
                           >
                             <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                               {formatEventTime(event)}
@@ -706,13 +712,6 @@ function Metric({ label, value }: { label: string; value: number }) {
       <div className="mt-1 font-mono text-xl font-semibold">{value}</div>
     </div>
   )
-}
-
-function getEventId(event?: RelayEvent | null) {
-  if (!event) {
-    return ""
-  }
-  return asText(event.event_id) || `${asText(event.event)}-${asText(event.host)}-${asText(event.path)}-${asText(event.status_code)}`
 }
 
 function getEventTimestamp(event: RelayEvent) {

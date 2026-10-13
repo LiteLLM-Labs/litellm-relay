@@ -46,6 +46,14 @@ jobs:
       - name: Check pkg builder help path
         run: bash scripts/build-macos-pkg.sh --help
 
+  relaybar:
+    name: RelayBar menu bar app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test --package-path macos/RelayBarGlass
+
   proxy-smoke:
     name: Proxy/TLS smoke
     runs-on: ubuntu-latest
