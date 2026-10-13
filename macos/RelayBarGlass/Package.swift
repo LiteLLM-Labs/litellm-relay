@@ -9,6 +9,11 @@ let package = Package(
             name: "RelayBarGlass",
             path: "Sources/RelayBarGlass",
             resources: [.process("Resources")]
-        )
+        ),
+        .testTarget(
+            name: "RelayBarGlassTests",
+            dependencies: ["RelayBarGlass"],
+            path: "Tests/RelayBarGlassTests"
+        ),
     ]
 )

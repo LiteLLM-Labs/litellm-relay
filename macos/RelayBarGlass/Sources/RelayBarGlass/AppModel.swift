@@ -398,12 +398,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Flips the macOS PAC auto-proxy for Wi-Fi on/off (best-effort), then
-    /// re-reads the actual state to keep `routingOn` truthful.
+    /// Flips the macOS PAC auto-proxy for the active network service on/off
+    /// (best-effort), then re-reads the actual state to keep `routingOn` truthful.
     func setRouting(_ on: Bool) {
         routingOn = on // optimistic; reconciled below
         Task.detached { [weak self] in
-            _ = AppModel.runNetworkSetup(["-setautoproxystate", "Wi-Fi", on ? "on" : "off"])
+            let service = AppModel.primaryNetworkService()
+            _ = AppModel.runNetworkSetup(["-setautoproxystate", service, on ? "on" : "off"])
             let actual = AppModel.readRoutingEnabled()
             await MainActor.run { self?.routingOn = actual }
         }
@@ -491,10 +492,72 @@ final class AppModel: ObservableObject {
         return soError == 0
     }
 
-    /// Reads whether the Wi-Fi PAC auto-proxy is currently enabled.
+    /// Reads whether the PAC auto-proxy of the active network service is enabled.
     nonisolated private static func readRoutingEnabled() -> Bool {
-        guard let out = runNetworkSetup(["-getautoproxyurl", "Wi-Fi"]) else { return false }
+        guard let out = runNetworkSetup(["-getautoproxyurl", primaryNetworkService()]) else { return false }
         return out.contains("Enabled: Yes")
+    }
+
+    /// The network service that owns the default route ("Ethernet" on a wired
+    /// Mac, "Wi-Fi" on a laptop), so routing never assumes a service name the
+    /// machine does not have. Falls back to the first listed service, then "Wi-Fi".
+    nonisolated static func primaryNetworkService() -> String {
+        let device = defaultRouteDevice(from: run("/sbin/route", ["-n", "get", "default"]))
+        let order = runNetworkSetup(["-listnetworkserviceorder"]) ?? ""
+        return networkService(forDevice: device, serviceOrder: order) ?? "Wi-Fi"
+    }
+
+    /// Parses `route -n get default` output down to its `interface:` device.
+    nonisolated static func defaultRouteDevice(from routeOutput: String?) -> String? {
+        guard let routeOutput else { return nil }
+        for line in routeOutput.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("interface:") {
+                let device = trimmed.dropFirst("interface:".count).trimmingCharacters(in: .whitespaces)
+                return device.isEmpty ? nil : device
+            }
+        }
+        return nil
+    }
+
+    /// Picks the service whose `Device:` matches `device` out of
+    /// `networksetup -listnetworkserviceorder` output; with no match (or no
+    /// device) it is the first enabled service in the order.
+    nonisolated static func networkService(forDevice device: String?, serviceOrder: String) -> String? {
+        var current: String?
+        var first: String?
+        for rawLine in serviceOrder.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("("), let close = line.firstIndex(of: ")") {
+                let name = line[line.index(after: close)...].trimmingCharacters(in: .whitespaces)
+                let position = line[line.index(after: line.startIndex)..<close]
+                if Int(position) != nil, !name.isEmpty {
+                    current = name
+                    if first == nil { first = name }
+                } else if let device, let range = line.range(of: "Device: ") {
+                    let found = line[range.upperBound...].trimmingCharacters(in: CharacterSet(charactersIn: ") "))
+                    if found == device, let current { return current }
+                }
+            }
+        }
+        return first
+    }
+
+    nonisolated private static func run(_ executable: String, _ args: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = args
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8)
     }
 
     /// Runs `/usr/sbin/networksetup` with the given args, returning stdout as a
