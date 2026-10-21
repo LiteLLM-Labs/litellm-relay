@@ -373,6 +373,7 @@ fn identity_of(status: &BrokerStatus) -> Option<SessionIdentity> {
     status.signed_in.then(|| SessionIdentity {
         gateway_url: status.gateway_url.clone(),
         user_id: status.user_id.clone(),
+        team: status.team.clone(),
     })
 }
 

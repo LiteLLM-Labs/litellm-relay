@@ -119,6 +119,31 @@ async fn should_fetch_the_catalog_on_sign_in_and_drop_it_with_the_activations_on
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_refetch_the_catalog_after_a_team_switch_made_outside_the_mcp_tools() {
+    let upstream = FakeUpstream::serving(tools());
+    let (rig, service) = service_on(idp_settings(Some("team-a")), &upstream);
+    let broker = Arc::clone(&rig.broker);
+    tokio::task::spawn_blocking(move || broker.sign_in())
+        .await
+        .expect("sign in");
+    service.check_session().await;
+    assert_eq!(upstream.lists().len(), 1);
+    let team_a_key = upstream.lists()[0].credential.clone();
+
+    let broker = Arc::clone(&rig.broker);
+    tokio::task::spawn_blocking(move || broker.switch_team("team-b"))
+        .await
+        .expect("switch");
+    service.check_session().await;
+    assert_eq!(upstream.lists().len(), 2);
+    assert_ne!(upstream.lists()[1].credential, team_a_key);
+    assert_eq!(
+        rig.keys.mints().last().map(|mint| mint.team.as_str()),
+        Some("team-b")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_keep_the_catalog_and_activations_while_an_expired_credential_waits_for_its_renewal()
 {
     let upstream = FakeUpstream::serving(tools());
