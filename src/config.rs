@@ -1,8 +1,9 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{borrow::Cow, collections::HashMap, fs, ops::Range, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_saphyr::granit_parser::{Event, Marker, Parser, ScalarStyle, Span, Tag};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
 use crate::{broker::caller::AllowedCaller, system::home_dir};
@@ -171,7 +172,9 @@ pub struct CaptureSection {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DomainSection {
+    #[serde(deserialize_with = "null_items_as_empty")]
     pub notion: Vec<String>,
+    #[serde(deserialize_with = "null_items_as_empty")]
     pub ai: Vec<String>,
 }
 
@@ -326,7 +329,10 @@ pub const DEFAULT_MCP_TOOL_PREFIX_SEPARATOR: &str = "-";
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct McpSection {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_null_items_as_empty"
+    )]
     pub allow: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_calls: Option<usize>,
@@ -398,7 +404,7 @@ pub fn save_settings(settings: &RelaySettings) -> Result<PathBuf> {
 
 fn parse_settings(contents: &str) -> Result<RelaySettings, serde_saphyr::Error> {
     serde_saphyr::from_str_with_options(
-        contents,
+        &as_serde_yaml_0_9_read(contents),
         serde_saphyr::options! {
             merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
             with_snippet: false,
@@ -413,6 +419,140 @@ where
     T: Deserialize<'de> + Default,
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_items_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(empty_for_null_items(Vec::deserialize(deserializer)?))
+}
+
+fn optional_null_items_as_empty<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.map(empty_for_null_items))
+}
+
+fn empty_for_null_items(items: Vec<Option<String>>) -> Vec<String> {
+    items.into_iter().map(Option::unwrap_or_default).collect()
+}
+
+const YAML_CORE_SCHEMA: &str = "tag:yaml.org,2002:";
+
+enum OpenNode {
+    Mapping { next_is_key: bool },
+    Sequence,
+}
+
+fn as_serde_yaml_0_9_read(contents: &str) -> Cow<'_, str> {
+    let edits = serde_yaml_0_9_edits(contents);
+    if edits.is_empty() {
+        return Cow::Borrowed(contents);
+    }
+    let mut rewritten = String::with_capacity(contents.len() + 2 * edits.len());
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        rewritten.push_str(&contents[copied..range.start]);
+        rewritten.push_str(&replacement);
+        copied = range.end;
+    }
+    rewritten.push_str(&contents[copied..]);
+    Cow::Owned(rewritten)
+}
+
+fn serde_yaml_0_9_edits(contents: &str) -> Vec<(Range<usize>, String)> {
+    let mut parser = Parser::new_from_str(contents);
+    let mut open = Vec::new();
+    let mut edits = Vec::new();
+    while let Some(parsed) = parser.next_event() {
+        let Ok((event, span)) = parsed else {
+            return Vec::new();
+        };
+        let is_key = matches!(open.last(), Some(OpenNode::Mapping { next_is_key: true }));
+        match event {
+            Event::Scalar(value, style, _, tag) => {
+                edits.extend(scalar_edits(
+                    contents,
+                    &value,
+                    style,
+                    tag.as_deref(),
+                    span,
+                    is_key,
+                ));
+                finish_node(&mut open);
+            }
+            Event::Alias(_) => finish_node(&mut open),
+            Event::MappingStart(..) => open.push(OpenNode::Mapping { next_is_key: true }),
+            Event::SequenceStart(..) => open.push(OpenNode::Sequence),
+            Event::MappingEnd | Event::SequenceEnd => {
+                open.pop();
+                finish_node(&mut open);
+            }
+            _ => {}
+        }
+    }
+    edits
+}
+
+fn scalar_edits(
+    contents: &str,
+    value: &str,
+    style: ScalarStyle,
+    tag: Option<&Tag>,
+    span: Span,
+    is_key: bool,
+) -> Vec<(Range<usize>, String)> {
+    let has_value = span.start.index() < span.end.index();
+    let ignored_tag = has_value && tag.is_some_and(|tag| serde_yaml_0_9_ignores(tag, value, style));
+    let dropped_tag = span
+        .tag_start
+        .filter(|_| ignored_tag)
+        .and_then(|start| tag_token(contents, start))
+        .map(|range| (range, String::new()));
+    let null_key = is_key
+        && style == ScalarStyle::Plain
+        && (tag.is_none() || ignored_tag)
+        && is_null_like(value);
+    let quoted_null_key = span
+        .start
+        .byte_offset()
+        .zip(span.end.byte_offset())
+        .filter(|_| null_key)
+        .map(|(start, end)| (start..end, format!("'{value}'")));
+    dropped_tag.into_iter().chain(quoted_null_key).collect()
+}
+
+fn finish_node(open: &mut [OpenNode]) {
+    if let Some(OpenNode::Mapping { next_is_key }) = open.last_mut() {
+        *next_is_key = !*next_is_key;
+    }
+}
+
+fn serde_yaml_0_9_ignores(tag: &Tag, value: &str, style: ScalarStyle) -> bool {
+    match core_schema_type(tag) {
+        Some("int" | "float" | "bool" | "null" | "timestamp") => true,
+        Some("str") => style != ScalarStyle::Plain || !is_null_like(value),
+        _ => false,
+    }
+}
+
+fn core_schema_type(tag: &Tag) -> Option<&str> {
+    match tag.handle() {
+        YAML_CORE_SCHEMA => Some(tag.suffix()),
+        _ => tag.suffix().strip_prefix(YAML_CORE_SCHEMA),
+    }
+}
+
+fn is_null_like(value: &str) -> bool {
+    value.is_empty() || value == "~" || value.eq_ignore_ascii_case("null")
+}
+
+fn tag_token(contents: &str, start: Marker) -> Option<Range<usize>> {
+    let start = start.byte_offset()?;
+    let rest = contents.get(start..).filter(|rest| rest.starts_with('!'))?;
+    Some(start..start + rest.find(char::is_whitespace)?)
 }
 
 fn settings_yaml(settings: &RelaySettings) -> Result<String, serde_saphyr::SerializeError> {
@@ -990,7 +1130,23 @@ mcp:
     }
 
     #[test]
-    fn should_save_gateway_and_relay_values_on_the_lines_relaybar_reads() {
+    fn should_reload_a_saved_config_into_the_settings_it_came_from() {
+        let settings =
+            parse_settings(SERDE_YAML_0_9_SAVED_CONFIG).expect("settings yaml should parse");
+
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+        let reloaded = parse_settings(&saved).expect("saved settings should parse");
+
+        assert_eq!(
+            format!("{reloaded:#?}"),
+            format!("{settings:#?}"),
+            "{saved}"
+        );
+        assert!(reloaded.credential.allowed_callers.is_some(), "{saved}");
+    }
+
+    #[test]
+    fn should_save_gateway_values_on_the_lines_relaybar_reads() {
         let api_key = format!(
             "eyJhbGciOiJSUzI1NiJ9.{}.{}",
             "eyJzdWIiOiJyZWxheSJ9".repeat(6),
@@ -998,10 +1154,6 @@ mcp:
         );
         let url = "https://litellm-gateway.internal.example-company.com/teams/platform/environments/production";
         let settings = RelaySettings {
-            relay: RelaySection {
-                port: 4143,
-                ..RelaySection::default()
-            },
             gateway: GatewaySection {
                 url: url.into(),
                 api_key: Some(api_key.clone()),
@@ -1020,11 +1172,6 @@ mcp:
         assert_eq!(
             relaybar_field(&saved, "gateway", "api_key"),
             Some(api_key.as_str()),
-            "{saved}"
-        );
-        assert_eq!(
-            relaybar_field(&saved, "relay", "port"),
-            Some("4143"),
             "{saved}"
         );
     }
@@ -1085,6 +1232,67 @@ mcp:
             settings.credential.allowed_callers,
             Some(vec![AllowedCaller::new("", None)])
         );
+    }
+
+    #[test]
+    fn should_load_blank_tilde_and_null_list_items_as_empty() {
+        let settings = parse_settings(
+            "domains:\n  ai:\n  -\n  - ~\n  notion:\n  - null\n  - notion.so\n\
+             mcp:\n  allow:\n  - ~\n  - github-get_issue\n",
+        )
+        .expect("blank, ~ and null list items should load");
+
+        assert_eq!(settings.domains.ai, vec![String::new(), String::new()]);
+        assert_eq!(
+            settings.domains.notion,
+            vec![String::new(), "notion.so".to_string()]
+        );
+        assert_eq!(
+            settings.mcp.allow,
+            Some(vec![String::new(), "github-get_issue".to_string()])
+        );
+    }
+
+    #[test]
+    fn should_load_core_tagged_values_by_field_type_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "relay:\n  port: !!str 4142\n  host: !!int 127\n\
+             gateway:\n  url: !!float 1.5\n  enrolled_at: !!timestamp 2026-09-21T21:27:58Z\n\
+             shadow:\n  enabled: !!str true\n  model: !!str ~\n\
+             capture:\n  payloads: !!bool yes\n\
+             timeouts:\n  request_seconds: !!int 10\n\
+             idp:\n  issuer: !!bool true\n  client_id: !<tag:yaml.org,2002:int> 5\n  redirect_port: !!float 8765\n\
+             mcp:\n  allow: [!!int 7, !!str x, !!null]\n  max_concurrent_calls: !!str 4\n",
+        )
+        .expect("core-tagged values should load");
+
+        assert_eq!(settings.relay.port, 4142);
+        assert_eq!(settings.relay.host, "127");
+        assert_eq!(settings.gateway.url, "1.5");
+        assert_eq!(
+            settings.gateway.enrolled_at,
+            Some("2026-09-21T21:27:58Z".parse().expect("timestamp"))
+        );
+        assert!(settings.shadow.enabled);
+        assert_eq!(settings.shadow.model, "~");
+        assert!(settings.capture.payloads);
+        assert_eq!(settings.timeouts.request_seconds, 10.0);
+        assert_eq!(settings.idp.issuer, "true");
+        assert_eq!(settings.idp.client_id, "5");
+        assert_eq!(settings.idp.redirect_port, Some(8765));
+        assert_eq!(
+            settings.mcp.allow,
+            Some(vec!["7".into(), "x".into(), String::new()])
+        );
+        assert_eq!(settings.mcp.max_concurrent_calls, Some(4));
+    }
+
+    #[test]
+    fn should_ignore_a_null_mapping_key_as_serde_yaml_0_9_did() {
+        let settings = parse_settings("~: x\nnull: y\ngateway:\n  ~: z\n  url: https://g\n")
+            .expect("a null key should be ignored like any unknown key");
+
+        assert_eq!(settings.gateway.url, "https://g");
     }
 
     #[test]
