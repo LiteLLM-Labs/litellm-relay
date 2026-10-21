@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap, fs, ops::Range, path::PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_saphyr::granit_parser::{Event, Marker, Parser, Span};
+use serde_saphyr::granit_parser::{Event, Marker, Parser, ScalarStyle, Span, Tag};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
 use crate::{broker::caller::AllowedCaller, system::home_dir};
@@ -473,9 +473,16 @@ fn serde_yaml_0_9_edits(contents: &str) -> Vec<(Range<usize>, String)> {
         let since_previous = previous_end;
         previous_end = span.end.byte_offset().unwrap_or(previous_end);
         match event {
-            Event::Scalar(value, ..) => {
+            Event::Scalar(value, style, anchor_id, tag) => {
+                let scalar = ScalarAt {
+                    value: &value,
+                    is_null_word: style == ScalarStyle::Plain && is_null_like(&value),
+                    anchored: anchor_id != 0,
+                    tag: tag.as_deref(),
+                    span,
+                };
                 let key_after = is_key.then_some(since_previous);
-                edits.extend(scalar_edits(contents, &value, span, key_after));
+                edits.extend(scalar_edits(contents, scalar, key_after));
                 finish_node(&mut open);
             }
             Event::Alias(_) => finish_node(&mut open),
@@ -491,43 +498,88 @@ fn serde_yaml_0_9_edits(contents: &str) -> Vec<(Range<usize>, String)> {
     edits
 }
 
+#[derive(Clone, Copy)]
+struct ScalarAt<'a> {
+    value: &'a str,
+    is_null_word: bool,
+    anchored: bool,
+    tag: Option<&'a Tag>,
+    span: Span,
+}
+
 fn scalar_edits(
     contents: &str,
-    value: &str,
-    span: Span,
+    scalar: ScalarAt,
     key_after: Option<usize>,
 ) -> Vec<(Range<usize>, String)> {
+    let ScalarAt {
+        value,
+        is_null_word,
+        anchored,
+        tag,
+        span,
+    } = scalar;
     let has_value = span.start.index() < span.end.index();
-    let dropped_tag = span
-        .tag_start
-        .filter(|_| has_value)
-        .and_then(|start| tag_token(contents, start))
-        .map(|range| (range, String::new()));
-    let quoted_key = key_after.and_then(|key_after| match (has_value, span.tag_start) {
-        (true, _) if is_null_like(value) => quoted_null_key(value, span),
-        (true, _) => None,
-        (false, Some(tag_start)) => quoted_tagged_empty_key(tag_start, span),
-        (false, None) => quoted_empty_key(contents, key_after, span),
-    });
-    dropped_tag.into_iter().chain(quoted_key).collect()
+    let tagged_null = tag.is_some_and(|tag| tag.core_suffix() == Some("null"));
+    match (span.tag_start, has_value) {
+        (None, true) => key_after
+            .filter(|_| is_null_word)
+            .and_then(|_| quoted_null_word(value, span))
+            .into_iter()
+            .collect(),
+        (None, false) => key_after
+            .and_then(|key_after| quoted_empty_key(contents, key_after, span, anchored))
+            .into_iter()
+            .collect(),
+        (Some(tag_start), true) => {
+            let reads_as_text = is_null_word && (key_after.is_some() || !tagged_null);
+            tag_token(contents, tag_start)
+                .map(|range| (range, String::new()))
+                .into_iter()
+                .chain(
+                    reads_as_text
+                        .then(|| quoted_null_word(value, span))
+                        .flatten(),
+                )
+                .collect()
+        }
+        (Some(tag_start), false) => {
+            let empty = if key_after.is_some() { "''" } else { "~" };
+            untagged_empty_node(contents, tag_start, span, empty)
+                .into_iter()
+                .collect()
+        }
+    }
 }
 
-fn quoted_tagged_empty_key(tag_start: Marker, span: Span) -> Option<(Range<usize>, String)> {
-    let tag = tag_start.byte_offset()?..span.start.byte_offset()?;
-    Some((tag, "''".to_string()))
+fn untagged_empty_node(
+    contents: &str,
+    tag_start: Marker,
+    span: Span,
+    empty: &str,
+) -> Option<(Range<usize>, String)> {
+    let properties = tag_start.byte_offset()?..span.start.byte_offset()?;
+    let other_properties = contents.get(tag_end(contents, properties.start)?..properties.end)?;
+    let node = match other_properties {
+        "" => empty.to_string(),
+        anchor => format!("{anchor} {empty}"),
+    };
+    Some((properties, node))
 }
 
-fn quoted_null_key(value: &str, span: Span) -> Option<(Range<usize>, String)> {
-    let key = span.start.byte_offset()?..span.end.byte_offset()?;
-    Some((key, format!("'{value}'")))
+fn quoted_null_word(value: &str, span: Span) -> Option<(Range<usize>, String)> {
+    let word = span.start.byte_offset()?..span.end.byte_offset()?;
+    Some((word, format!("'{value}'")))
 }
 
 fn quoted_empty_key(
     contents: &str,
     key_after: usize,
     span: Span,
+    anchored: bool,
 ) -> Option<(Range<usize>, String)> {
-    let gap = contents.get(key_after..span.start.byte_offset()?)?;
+    let key_start = span.start.byte_offset()?;
+    let gap = contents.get(key_after..key_start)?;
     let in_comment = |at: usize| {
         gap[..at]
             .rsplit('\n')
@@ -535,8 +587,12 @@ fn quoted_empty_key(
             .is_some_and(|line| line.contains('#'))
     };
     let (at, _) = gap.match_indices('?').find(|&(at, _)| !in_comment(at))?;
-    let after_indicator = key_after + at + 1;
-    Some((after_indicator..after_indicator, " ''".to_string()))
+    let key_end = if anchored {
+        key_start
+    } else {
+        key_after + at + 1
+    };
+    Some((key_end..key_end, " ''".to_string()))
 }
 
 fn finish_node(open: &mut [OpenNode]) {
@@ -551,11 +607,21 @@ fn is_null_like(value: &str) -> bool {
 
 fn tag_token(contents: &str, start: Marker) -> Option<Range<usize>> {
     let start = start.byte_offset()?;
-    let rest = contents.get(start..).filter(|rest| rest.starts_with('!'))?;
-    let tag_len = rest.find(char::is_whitespace)?;
-    let after_tag = &rest[tag_len..];
-    let separator_len = after_tag.len() - after_tag.trim_start_matches([' ', '\t']).len();
-    Some(start..start + tag_len + separator_len)
+    let end = tag_end(contents, start)?;
+    let separator_len =
+        contents[end..].len() - contents[end..].trim_start_matches([' ', '\t']).len();
+    Some(start..end + separator_len)
+}
+
+fn tag_end(contents: &str, start: usize) -> Option<usize> {
+    let tag = contents.get(start..).filter(|rest| rest.starts_with('!'))?;
+    let tag_len = match tag.strip_prefix("!<") {
+        Some(verbatim) => verbatim.find('>')? + 3,
+        None => tag
+            .find(|c: char| c.is_whitespace() || ",[]{}".contains(c))
+            .unwrap_or(tag.len()),
+    };
+    Some(start + tag_len)
 }
 
 fn settings_yaml(settings: &RelaySettings) -> Result<String, serde_saphyr::SerializeError> {
@@ -1294,7 +1360,7 @@ mcp:
     #[test]
     fn should_ignore_a_null_mapping_key_as_serde_yaml_0_9_did() {
         let settings = parse_settings(
-            "~: x\nnull: y\n?\n: w\n? !!str\n: u\n? !!null # c\n: t\n!x : s\n\
+            "~: x\nnull: y\n?\n: w\n? !!str\n: u\n? !!null # c\n: t\n!x : s\n!!null ~: r\n\
              gateway:\n  ~: z\n  url: https://g # why?\n  ?\n  : v\nshadow: {!!null, model: m}\n",
         )
         .expect("a null key should be ignored like any unknown key");
@@ -1345,5 +1411,69 @@ mcp:
             .expect("settings yaml should parse");
 
         assert_eq!(settings.gateway.url, "aHR0cHM6Ly9leGFtcGxlLmNvbQ==");
+    }
+
+    #[test]
+    fn should_load_a_tagged_null_word_as_text_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "gateway:\n  url: https://g\n  api_key: !!str null\n\
+             idp:\n  issuer: !!str ~\n  client_id: !foo NULL\n\
+             claude:\n  team: !!null null\n\
+             codex:\n  team: !!str &t Null\n\
+             domains:\n  ai: [!!str null, !<tag:yaml.org,2002:str> ~, *t]\n  notion:\n  - !!str |-\n    ~\n",
+        )
+        .expect("tagged null words should load");
+
+        assert_eq!(settings.gateway.api_key.as_deref(), Some("null"));
+        assert_eq!(settings.idp.issuer, "~");
+        assert_eq!(settings.idp.client_id, "NULL");
+        assert_eq!(settings.claude.team, None);
+        assert_eq!(settings.codex.team.as_deref(), Some("Null"));
+        assert_eq!(settings.domains.ai, vec!["null", "~", "Null"]);
+        assert_eq!(settings.domains.notion, vec!["~"]);
+    }
+
+    #[test]
+    fn should_read_a_tagged_empty_value_like_an_untagged_one() {
+        let tagged = parse_settings(
+            "relay: !!map\n\
+             gateway:\n  url: https://g\n  api_key: !!str\n\
+             credential: !!map &c # note\n\
+             claude:\n  team: *c\n\
+             domains:\n  ai: !!seq\n  notion: [!!str &n, a, *n]\n\
+             idp: !<tag:yaml.org,2002:map>\n\
+             codex: !foo\n\
+             mcp:\n  allow: [!!str, b]\n",
+        )
+        .expect("tagged empty values should load");
+        let untagged = parse_settings(
+            "relay:\n\
+             gateway:\n  url: https://g\n  api_key:\n\
+             credential: &c # note\n\
+             claude:\n  team: *c\n\
+             domains:\n  ai:\n  notion: [&n ~, a, *n]\n\
+             idp:\n\
+             codex:\n\
+             mcp:\n  allow: [~, b]\n",
+        )
+        .expect("untagged empty values should load");
+
+        assert_eq!(format!("{tagged:?}"), format!("{untagged:?}"));
+        assert_eq!(tagged.domains.notion, vec!["", "a", ""]);
+    }
+
+    #[test]
+    fn should_ignore_an_anchored_empty_key_like_any_unknown_key() {
+        let settings = parse_settings(
+            "? &a # c\n: x\n? &b\t\n: y\n?\t&e\n: v\n?\n  &f\n: w\n\
+             relay:\n  ? &c\n  : z\n  port: 4142\n\
+             shadow: {? &d, model: m}\n\
+             gateway:\n  url: https://g\n",
+        )
+        .expect("an anchored empty key should be ignored like any unknown key");
+
+        assert_eq!(settings.relay.port, 4142);
+        assert_eq!(settings.shadow.model, "m");
+        assert_eq!(settings.gateway.url, "https://g");
     }
 }
