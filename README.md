@@ -132,6 +132,13 @@ configuration profile, and step-by-step Jamf and Intune runbooks.
 Relay does not log cookies or authorization headers. Payload previews are
 truncated and headers are redacted.
 
+The dashboard's event table is the proxy's metadata log: CONNECT tunnels and
+their attribution, optional payload captures, shadow completions, and
+collector runs. Requests a configured tool sends to Relay's local inference
+endpoint (`ANTHROPIC_BASE_URL`, Codex's `base_url`) are forwarded to the
+Gateway with the developer's credential and are accounted there, in the
+Gateway logs and the menu bar usage card, not as rows in this table.
+
 ## Install
 
 Relay has no tagged release yet, so install it from GitHub. The installer

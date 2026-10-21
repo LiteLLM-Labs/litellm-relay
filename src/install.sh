@@ -44,7 +44,9 @@ Options:
   --skip-trust-ca                 Install without adding the Relay CA to the login keychain
   --background                    Configure Gateway auth now, restart the Relay LaunchAgent,
                                   and re-detect AI tools on an interval
-  --set-system-proxy "Wi-Fi"      Route the named macOS network service through Relay
+  --set-system-proxy SERVICE      Route the named macOS network service through Relay
+                                  (a name from `networksetup -listallnetworkservices`,
+                                  e.g. "Wi-Fi" or "Ethernet")
   --gateway-url URL               Gateway URL for non-interactive setup
   --api-key KEY                   Gateway key for non-interactive setup
   --bin-dir DIR                   Install relay shims into DIR
@@ -342,15 +344,6 @@ DONE
   fi
 }
 
-install_relay_binary() {
-  local source="$1" target="$RELAY_HOME/bin/litellm-relay" staged
-  mkdir -p "$RELAY_HOME/bin"
-  staged="$(mktemp "$RELAY_HOME/bin/.litellm-relay.XXXXXX")"
-  cp "$source" "$staged"
-  chmod 700 "$staged"
-  mv -f "$staged" "$target"
-}
-
 stop_legacy_python_relay() {
   if ! command -v lsof >/dev/null 2>&1; then
     return 0
@@ -371,6 +364,35 @@ stop_legacy_python_relay() {
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done < <(lsof -tiTCP:"$RELAY_PORT" -sTCP:LISTEN 2>/dev/null || true)
+}
+
+# Replaces the installed binary through a staged copy in the same directory
+# and an atomic rename, so the file gets a new inode. Copying over the old
+# file in place keeps the inode a running daemon has mapped, which on macOS
+# invalidates that file's code signature: every later exec of it dies with
+# "Killed: 9", and the installer itself exits 137 at its first `relay` call.
+install_relay_binary() {
+  local source="$1" target="$2" staged
+  staged="$(mktemp "$(dirname "$target")/.litellm-relay.XXXXXX")"
+  cp "$source" "$staged"
+  chmod 700 "$staged"
+  mv -f "$staged" "$target"
+}
+
+# The macOS network service that owns the default route, for the manual PAC
+# hints; falls back to the first listed service, then to "Wi-Fi".
+detect_network_service() {
+  local device="" service=""
+  device="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')"
+  if [[ -n "$device" ]]; then
+    service="$(networksetup -listnetworkserviceorder 2>/dev/null | awk -v dev="$device" '
+      /^\([0-9]+\) / { name = substr($0, index($0, ")") + 2) }
+      /Device: / { sub(/\)$/, "", $NF); if ($NF == dev) { print name; exit } }')"
+  fi
+  if [[ -z "$service" ]]; then
+    service="$(networksetup -listallnetworkservices 2>/dev/null | awk 'NR > 1 && !/^\*/ { print; exit }')"
+  fi
+  printf '%s' "${service:-Wi-Fi}"
 }
 
 verify_source_archive() {
@@ -463,7 +485,8 @@ if [[ -n "$RELAY_PREBUILT_BINARY" ]]; then
   fi
   stop_legacy_python_relay
   echo "Installing prebuilt LiteLLM Relay binary..."
-  install_relay_binary "$RELAY_PREBUILT_BINARY"
+  mkdir -p "$RELAY_HOME/bin"
+  install_relay_binary "$RELAY_PREBUILT_BINARY" "$RELAY_HOME/bin/litellm-relay"
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   BUILD_DIR=""
@@ -487,7 +510,8 @@ else
 
   echo "Building LiteLLM Relay..."
   cargo build --quiet --release --manifest-path "$BUILD_DIR/Cargo.toml"
-  install_relay_binary "$BUILD_DIR/target/release/litellm-relay"
+  mkdir -p "$RELAY_HOME/bin"
+  install_relay_binary "$BUILD_DIR/target/release/litellm-relay" "$RELAY_HOME/bin/litellm-relay"
 fi
 
 if [[ -n "$RELAY_MANAGED_CONFIG" ]]; then
@@ -558,7 +582,11 @@ fi
 
 if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
   autoconfigure_ai_tools
-  cat <<DONE
+  # `relay setup` owns the LaunchAgent on this path; on an upgrade it is already
+  # loaded and keeps serving the binary it started from, so restart it onto the
+  # one this run installed (no-op when it is not registered yet).
+  launchctl kickstart -k "gui/$(id -u)/ai.litellm.relay" >/dev/null 2>&1 || true
+cat <<DONE
 LiteLLM Relay installed.
 
 Command:     $INSTALL_BIN_DIR/relay
@@ -610,6 +638,10 @@ mkdir -p "$(dirname "$PLIST")"
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl enable "gui/$(id -u)/ai.litellm.relay"
+# bootout returns before launchd finishes unloading, so a running daemon can
+# survive the bootstrap above and keep serving the binary it was started
+# from; kickstart -k restarts it on the binary this run installed.
+launchctl kickstart -k "gui/$(id -u)/ai.litellm.relay" >/dev/null 2>&1 || true
 install_relaybar_agent
 
 # Periodic auto-configuration: re-detect installed AI tools on an interval so a
@@ -732,6 +764,7 @@ if [[ -n "$NETWORK_SERVICE" ]]; then
   networksetup -setautoproxystate "$NETWORK_SERVICE" on
 fi
 
+PILOT_SERVICE="${NETWORK_SERVICE:-$(detect_network_service)}"
 cat <<DONE
 LiteLLM Relay installed.
 
@@ -746,8 +779,8 @@ To open the interactive terminal view:
   relay
 
 To route Notion through Relay for a manual pilot:
-  networksetup -setautoproxyurl "Wi-Fi" http://127.0.0.1:$RELAY_PORT/proxy.pac
-  networksetup -setautoproxystate "Wi-Fi" on
+  networksetup -setautoproxyurl "$PILOT_SERVICE" http://127.0.0.1:$RELAY_PORT/proxy.pac
+  networksetup -setautoproxystate "$PILOT_SERVICE" on
 
 To verify interception without changing system settings:
   curl --cacert "$CA_PATH" -x http://127.0.0.1:$RELAY_PORT https://www.notion.so

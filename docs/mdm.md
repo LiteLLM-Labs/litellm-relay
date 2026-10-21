@@ -79,6 +79,8 @@ curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src
   | RELAY_ALLOW_UNPINNED_MAIN=1 bash -s -- --set-system-proxy "Wi-Fi"
 ```
 
+`--set-system-proxy` takes the service name as `networksetup -listallnetworkservices` prints it, so a wired Mac passes `"Ethernet"`. The installer's closing hints and the menu bar app's routing switch use the service that owns the default route.
+
 Dashboard is served locally at `http://127.0.0.1:4142/`. Verify capture without
 touching system settings:
 
