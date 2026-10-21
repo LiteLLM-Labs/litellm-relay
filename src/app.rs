@@ -1,4 +1,4 @@
-use std::{io::IsTerminal, process::ExitCode};
+use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -16,7 +16,7 @@ use crate::{
         AutoConfigureParams, CodexOnboardParams, OnboardDesktopParams, OnboardParams,
     },
     cert::ensure_ca,
-    config::{load_settings, IdpOverrides, RelayConfig, RelaySettings},
+    config::{carry_selection, load_settings, IdpOverrides, RelayConfig, RelaySettings},
     pac::build_pac,
     proxy::RelayProxy,
     setup::run_setup,
@@ -199,6 +199,11 @@ enum CommandKind {
     },
     /// Print a valid IdP bearer token for Codex's auth command hook.
     CodexToken,
+    /// Carry the environment and team picks from a replaced config.yaml into the current one.
+    CarrySelection {
+        /// The config.yaml the install replaced.
+        previous: PathBuf,
+    },
 }
 
 pub async fn run() -> Result<ExitCode> {
@@ -311,6 +316,10 @@ async fn run_command(command: CommandKind) -> Result<()> {
         }
         CommandKind::CaptureMode => {
             println!("{}", capture_mode_label(config.mitm_enabled));
+            Ok(())
+        }
+        CommandKind::CarrySelection { previous } => {
+            println!("{}", carry_selection(&previous)?);
             Ok(())
         }
         CommandKind::Setup {
@@ -592,6 +601,7 @@ mod tests {
             CommandKind::ClaudeToken => "claude-token",
             CommandKind::OnboardCodex { .. } => "onboard-codex",
             CommandKind::CodexToken => "codex-token",
+            CommandKind::CarrySelection { .. } => "carry-selection",
         }
     }
 
@@ -645,6 +655,15 @@ mod tests {
             describe(&daemon_command(&["relay", "capture-mode"])),
             "capture-mode"
         );
+        assert_eq!(
+            describe(&daemon_command(&[
+                "relay",
+                "carry-selection",
+                "/tmp/previous.yaml"
+            ])),
+            "carry-selection"
+        );
+        assert!(Cli::try_parse_from(["relay", "carry-selection"]).is_err());
     }
 
     #[test]
