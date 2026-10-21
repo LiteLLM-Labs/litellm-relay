@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+printf 'launchctl %s\n' "$*" >> "${RELAY_SMOKE_LOG:?the smoke stubs need RELAY_SMOKE_LOG}"
+if [[ "${1:-}" == "managername" ]]; then
+  echo "${RELAY_SMOKE_MANAGERNAME:-Aqua}"
+fi

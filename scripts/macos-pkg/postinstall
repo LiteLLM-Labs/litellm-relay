@@ -2,9 +2,10 @@
 #
 # LiteLLM Relay package postinstall.
 #
-# Runs as root at install time. Relay is a per-user proxy (login-keychain CA
-# trust + a user LaunchAgent), so this installs it for the active console user
-# using the prebuilt binary — no Rust/cargo on the endpoint.
+# Runs as root at install time. Relay is a per-user proxy (a user LaunchAgent,
+# plus login-keychain CA trust when the managed config captures payloads), so
+# this installs it for the active console user using the prebuilt binary; no
+# Rust/cargo on the endpoint.
 set -euo pipefail
 
 PAYLOAD="/usr/local/litellm-relay"

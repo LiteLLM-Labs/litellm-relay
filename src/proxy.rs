@@ -1,4 +1,10 @@
-use std::{fs, io::ErrorKind, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    fs,
+    io::ErrorKind,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -7,14 +13,16 @@ use serde_json::{json, Value};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
+    sync::Mutex as AsyncMutex,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
 use crate::{
+    account::AccountService,
     apps::{classify_app_attribution, known_apps, AppAttribution},
     broker::Broker,
-    cert::{client_tls_config, ensure_ca, server_tls_config},
+    cert::{client_tls_config, ensure_ca, server_tls_config, trust_command, CaTrust, UserCaTrust},
     config::{is_ai_host, is_notion_host, RelayConfig},
     events::{append_event, clear_events, read_events},
     gateway::{CaptureIngest, GatewayClient, IngestResult},
@@ -38,12 +46,22 @@ const DASHBOARD_JS: &[u8] = include_bytes!("static/dashboard/assets/dashboard.js
 const DASHBOARD_FAVICON: &[u8] =
     br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#171717"/><text x="16" y="21" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#fafafa">LR</text></svg>"##;
 
+const CA_TRUST_RECHECK: Duration = Duration::from_secs(60);
+
 pub struct RelayProxy {
     config: Arc<RelayConfig>,
     gateway: GatewayClient,
     broker: Option<Arc<Broker>>,
     mcp: Option<Arc<McpService>>,
+    account: Option<Arc<AccountService>>,
     inference: reqwest::Client,
+    ca_trust: Arc<dyn CaTrust>,
+    ca_verdict: AsyncMutex<Option<CaVerdict>>,
+}
+
+struct CaVerdict {
+    trusted: bool,
+    checked_at: Instant,
 }
 
 impl RelayProxy {
@@ -55,7 +73,10 @@ impl RelayProxy {
             gateway,
             broker: None,
             mcp: None,
+            account: None,
             inference: gateway_client(),
+            ca_trust: Arc::new(UserCaTrust),
+            ca_verdict: AsyncMutex::new(None),
         }
     }
 
@@ -71,6 +92,29 @@ impl RelayProxy {
     pub fn with_mcp(self, mcp: Arc<McpService>) -> Self {
         Self {
             mcp: Some(mcp),
+            ..self
+        }
+    }
+
+    pub fn with_account(self, account: Arc<AccountService>) -> Self {
+        Self {
+            account: Some(account),
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    fn with_ca_trust(self, ca_trust: Arc<dyn CaTrust>) -> Self {
+        Self { ca_trust, ..self }
+    }
+
+    #[cfg(test)]
+    fn with_saved_settings(
+        self,
+        saved_settings: Box<dyn Fn() -> Option<crate::config::RelaySettings> + Send + Sync>,
+    ) -> Self {
+        Self {
+            gateway: self.gateway.with_saved_settings(saved_settings),
             ..self
         }
     }
@@ -106,6 +150,9 @@ impl RelayProxy {
             "runtime": "rust",
         }))?;
         print_runtime_panel(&self.config);
+        if self.config.mitm_enabled {
+            self.capture_ca_trusted().await;
+        }
 
         let proxy = Arc::new(self);
         loop {
@@ -123,7 +170,11 @@ impl RelayProxy {
         }
     }
 
-    async fn handle_client(&self, mut stream: TcpStream, peer: SocketAddr) -> Result<()> {
+    async fn handle_client(
+        self: &Arc<Self>,
+        mut stream: TcpStream,
+        peer: SocketAddr,
+    ) -> Result<()> {
         let header = match read_until_headers(&mut stream).await {
             Ok(header) => header,
             Err(_) => return Ok(()),
@@ -194,11 +245,26 @@ impl RelayProxy {
             .await;
         }
 
+        if route.path.starts_with("/api/")
+            && !is_local_dashboard_request(&header_text, self.config.port)
+        {
+            return write_response(
+                &mut stream,
+                403,
+                "application/json; charset=utf-8",
+                br#"{"error":"the Relay API only answers requests addressed to this machine's loopback address"}"#,
+                true,
+            )
+            .await;
+        }
+
         if method == "GET" && route.path == "/api/status" {
-            let credential = self.gateway.credential_status().await.to_json();
-            return self
-                .write_json(&mut stream, self.status_payload(credential)?)
-                .await;
+            let proxy = Arc::clone(self);
+            let payload = tokio::task::spawn_blocking(move || {
+                proxy.status_payload(proxy.gateway.credential_status().to_json())
+            })
+            .await??;
+            return self.write_json(&mut stream, payload).await;
         }
 
         if method == "GET" && route.path == "/api/events" {
@@ -281,7 +347,7 @@ impl RelayProxy {
         }
         self.log_event(event)?;
 
-        if self.config.mitm_enabled && ai_match {
+        if self.config.mitm_enabled && ai_match && self.capture_ca_trusted().await {
             return self
                 .handle_mitm_connect(target.host, target.port, event_id, started_at, client)
                 .await;
@@ -326,6 +392,40 @@ impl RelayProxy {
             &attribution,
         ))?;
         Ok(())
+    }
+
+    async fn capture_ca_trusted(&self) -> bool {
+        let mut verdict = self.ca_verdict.lock().await;
+        if let Some(fresh) = verdict
+            .as_ref()
+            .filter(|verdict| verdict.checked_at.elapsed() < CA_TRUST_RECHECK)
+        {
+            return fresh.trusted;
+        }
+        let ca = ensure_ca(&self.config.mitm_ca_dir);
+        let trusted = match &ca {
+            Ok(ca) => {
+                let (ca_trust, cert_path) = (Arc::clone(&self.ca_trust), ca.cert_path.clone());
+                tokio::task::spawn_blocking(move || ca_trust.trusts(&cert_path))
+                    .await
+                    .unwrap_or(false)
+            }
+            Err(_) => false,
+        };
+        if !trusted && verdict.as_ref().is_none_or(|previous| previous.trusted) {
+            let _ = self.log_event(json!({
+                "event": "capture_ca_untrusted",
+                "detail": "Payload capture is on, but this user does not trust the Relay CA, so Relay tunnels AI hosts without capturing payloads instead of breaking their TLS. Run trust_command in a Terminal in this user's session; capture resumes within a minute.",
+                "ca_path": ca.as_ref().ok().map(|ca| ca.cert_path.display().to_string()),
+                "trust_command": ca.as_ref().ok().map(|ca| trust_command(&ca.cert_path)),
+                "error": ca.as_ref().err().map(|error| format!("{error:#}")),
+            }));
+        }
+        *verdict = Some(CaVerdict {
+            trusted,
+            checked_at: Instant::now(),
+        });
+        trusted
     }
 
     async fn handle_mitm_connect(
@@ -689,6 +789,8 @@ impl RelayProxy {
             "credential": credential,
             "broker": self.broker.as_ref().map(|broker| broker.status()),
             "mcp": self.mcp.as_ref().map(|mcp| mcp.status()),
+            "account": self.account.as_ref().map(|account| account.status()),
+            "environments": self.account.as_ref().map(|account| account.environments()),
         }))
     }
 
@@ -744,6 +846,28 @@ impl RelayProxy {
         print_trace_event(&event);
         append_event(&self.config.log_path, event)
     }
+}
+
+fn is_local_dashboard_request(header_text: &str, port: u16) -> bool {
+    let local_hosts = ["127.0.0.1", "localhost", "[::1]"].map(|host| format!("{host}:{port}"));
+    let is_local = |host: &str| {
+        local_hosts
+            .iter()
+            .any(|local| local.eq_ignore_ascii_case(host))
+    };
+    let values = |name: &str| -> Vec<&str> {
+        header_text
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+            .collect()
+    };
+    matches!(values("host").as_slice(), [host] if is_local(host))
+        && values("origin")
+            .iter()
+            .all(|origin| origin.strip_prefix("http://").is_some_and(is_local))
 }
 
 fn metadata_tunnel_decision(
@@ -824,11 +948,13 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "account",
                 "ai_domains",
                 "attribution",
                 "broker",
                 "capture_payloads",
                 "credential",
+                "environments",
                 "events_loaded",
                 "gateway_url",
                 "known_apps",
@@ -844,6 +970,61 @@ mod tests {
         assert_eq!(payload["credential"], json!({"state": "rejected"}));
         assert_eq!(payload["broker"], Value::Null);
         assert_eq!(payload["mcp"], Value::Null);
+        assert_eq!(payload["account"], Value::Null);
+        assert_eq!(payload["environments"], Value::Null);
+    }
+
+    #[test]
+    fn should_report_the_account_and_the_environments_on_status_without_any_token() {
+        use crate::{account::test_support::account_on, config::EnvironmentEntry};
+
+        let mut settings = static_key_settings("sk-status-secret");
+        settings.gateway.team = Some("team-a".to_string());
+        settings.environments = vec![EnvironmentEntry {
+            name: "dev".to_string(),
+            url: settings.gateway.url.clone(),
+            team: None,
+        }];
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let (_rig, http, account) = account_on(settings.clone());
+        http.answer(
+            "/user/info",
+            200,
+            r#"{"user_id":"u","user_info":{"user_email":"dev@example.com"},"teams":[{"team_id":"team-a","team_alias":"Team A"}]}"#,
+        );
+        http.answer(
+            "/team/info?team_id=team-a",
+            200,
+            r#"{"team_id":"team-a","team_info":{"spend":2.5,"max_budget":10.0,"budget_reset_at":null}}"#,
+        );
+        http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+        let proxy = RelayProxy::new(config).with_account(Arc::clone(&account));
+
+        let before = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("status payload should build");
+        assert_eq!(before["account"]["teams"], Value::Null);
+        assert_eq!(before["account"]["gateway"]["reachable"], Value::Null);
+        assert_eq!(
+            before["environments"],
+            json!({"current": "dev", "available": [{"name": "dev", "url": settings.gateway.url}]})
+        );
+
+        account.poll();
+        let after = proxy
+            .status_payload(json!({"state": "ok"}))
+            .expect("status payload should build");
+        assert_eq!(after["account"]["user"]["email"], json!("dev@example.com"));
+        assert_eq!(
+            after["account"]["teams"],
+            json!([{"id": "team-a", "alias": "Team A"}])
+        );
+        assert_eq!(after["account"]["team"]["spend"], json!(2.5));
+        assert_eq!(after["account"]["team"]["max_budget"], json!(10.0));
+        assert_eq!(after["account"]["gateway"]["reachable"], json!(true));
+        assert!(!after.to_string().contains("sk-status-secret"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -898,7 +1079,7 @@ mod tests {
             .status_payload(json!({"state": "ok"}))
             .expect("status payload should build");
         assert_eq!(before["broker"]["signed_in"], json!(true));
-        assert_eq!(before["broker"]["source"], Value::Null);
+        assert_eq!(before["broker"]["source"], "static_key");
 
         rig.broker.handle(
             Request::Credential {
@@ -976,11 +1157,18 @@ mod tests {
     }
 
     fn daemon(gateway_url: &str) -> Daemon {
+        daemon_logging_to(
+            gateway_url,
+            std::env::temp_dir().join("relay-inference-test-missing.log.jsonl"),
+        )
+    }
+
+    fn daemon_logging_to(gateway_url: &str, log_path: std::path::PathBuf) -> Daemon {
         let mut settings = static_key_settings(GATEWAY_KEY);
         settings.gateway.url = gateway_url.to_string();
         let mut config = settings.to_config();
         config.mitm_enabled = false;
-        config.log_path = std::env::temp_dir().join("relay-inference-test-missing.log.jsonl");
+        config.log_path = log_path;
         let rig = Rig::new(settings);
         let token = match rig.broker.handle(
             Request::ProxyCredential {
@@ -1040,6 +1228,264 @@ mod tests {
 
     const JSON_OK: &str =
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nx-litellm-call-id: call-1\r\n\r\n{\"ok\":true}";
+
+    #[tokio::test]
+    async fn should_answer_status_at_once_from_cached_checks_while_the_gateway_hangs() {
+        use crate::account::test_support::account_on;
+
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut settings = static_key_settings("sk-static");
+        settings.gateway.url = format!("http://{}", hung.local_addr().unwrap());
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let port = config.port;
+        let (rig, _http, account) = account_on(settings.clone());
+        let saved = settings.clone();
+        let proxy = Arc::new(
+            RelayProxy::new(config)
+                .with_broker(Arc::clone(&rig.broker))
+                .with_account(account)
+                .with_saved_settings(Box::new(move || Some(saved.clone()))),
+        );
+
+        let started = Instant::now();
+        let first = exchange(
+            &proxy,
+            None,
+            &format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        )
+        .await;
+        let again = exchange(
+            &proxy,
+            None,
+            &format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "status must not wait on the Gateway, took {:?}",
+            started.elapsed()
+        );
+        for answer in [first, again] {
+            let status: Value =
+                serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(status["credential"]["configured"], true);
+            assert_eq!(status["credential"]["state"], "unchecked");
+            assert_eq!(status["credential"]["checked_at"], Value::Null);
+            assert_eq!(status["broker"]["source"], "static_key");
+            assert_eq!(status["account"]["gateway"]["reachable"], Value::Null);
+        }
+    }
+
+    #[tokio::test]
+    async fn should_refuse_the_api_unless_host_and_origin_name_this_daemon_on_loopback() {
+        let upstream = Upstream::answering(&[JSON_OK]).await;
+        let log_path =
+            std::env::temp_dir().join(format!("relay-api-guard-{}.log.jsonl", Uuid::new_v4()));
+        let daemon = daemon_logging_to(&upstream.url, log_path.clone());
+        let port = daemon.proxy.config.port;
+        let seed = || {
+            clear_events(&log_path).unwrap();
+            append_event(&log_path, json!({"event": "seeded"})).unwrap();
+        };
+        let seeded = || {
+            read_events(&log_path, 10)
+                .iter()
+                .any(|event| event["event"] == "seeded")
+        };
+        let clear = |headers: String| {
+            format!("POST /api/events/clear HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n")
+        };
+
+        for headers in [
+            "Host: attacker.example\r\n".to_string(),
+            format!("Host: attacker.example:{port}\r\n"),
+            format!("Host: 127.0.0.1:{}\r\n", port + 1),
+            String::new(),
+            format!("Host: 127.0.0.1:{port}\r\nHost: attacker.example:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: http://attacker.example\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: http://attacker.example:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: null\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: https://127.0.0.1:{port}\r\n"),
+        ] {
+            seed();
+            let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
+            assert!(
+                answer.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+                "{headers}: {answer}"
+            );
+            assert!(
+                seeded(),
+                "a refused clear must leave the log alone: {headers}"
+            );
+        }
+
+        for headers in [
+            format!("Host: 127.0.0.1:{port}\r\n"),
+            format!("host: LOCALHOST:{port}\r\n"),
+            format!("Host: [::1]:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n"),
+            format!("Host: localhost:{port}\r\nOrigin: http://localhost:{port}\r\n"),
+        ] {
+            seed();
+            let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
+            assert!(
+                answer.starts_with("HTTP/1.1 200 OK\r\n"),
+                "{headers}: {answer}"
+            );
+            assert!(!seeded(), "an allowed clear must empty the log: {headers}");
+        }
+
+        let refused = exchange(
+            &daemon.proxy,
+            None,
+            "GET /api/events HTTP/1.1\r\nHost: attacker.example\r\n\r\n",
+        )
+        .await;
+        assert!(
+            refused.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "{refused}"
+        );
+
+        let forwarded = exchange(
+            &daemon.proxy,
+            None,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\nHost: attacker.example\r\nOrigin: http://attacker.example\r\nAuthorization: Bearer {}\r\n\r\n",
+                daemon.token
+            ),
+        )
+        .await;
+        assert!(forwarded.ends_with("{\"ok\":true}"), "{forwarded}");
+        let _ = fs::remove_file(&log_path);
+    }
+
+    struct FakeCaTrust {
+        trusted: bool,
+        checks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CaTrust for FakeCaTrust {
+        fn trusts(&self, _cert_path: &std::path::Path) -> bool {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.trusted
+        }
+    }
+
+    fn capturing_proxy(trusted: bool) -> (Arc<RelayProxy>, Arc<FakeCaTrust>, std::path::PathBuf) {
+        let scratch = std::env::temp_dir().join(format!("relay-capture-{}", Uuid::new_v4()));
+        let ca_dir = scratch.join("ca");
+        fs::create_dir_all(ca_dir.join("certs")).unwrap();
+        for file in [
+            "litellm-relay-ca.pem",
+            "litellm-relay-ca-key.pem",
+            "certs/127.0.0.1.pem",
+            "certs/127.0.0.1-key.pem",
+        ] {
+            fs::write(ca_dir.join(file), "not a certificate").unwrap();
+        }
+        let mut config = RelaySettings::default().to_config();
+        config.mitm_enabled = true;
+        config.shadow_enabled = false;
+        config.ai_domains = vec!["127.0.0.1".to_string()];
+        config.mitm_ca_dir = ca_dir;
+        config.log_path = scratch.join("events.jsonl");
+        let trust = Arc::new(FakeCaTrust {
+            trusted,
+            checks: Default::default(),
+        });
+        let proxy = Arc::new(RelayProxy::new(config).with_ca_trust(trust.clone()));
+        (proxy, trust, scratch)
+    }
+
+    const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+    async fn open_tunnel(proxy: &Arc<RelayProxy>, upstream: &TcpListener) -> TcpStream {
+        let port = upstream.local_addr().unwrap().port();
+        let mut client = connect(proxy, None).await;
+        client
+            .write_all(
+                format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut established = vec![0u8; ESTABLISHED.len()];
+        timeout(PATIENCE, client.read_exact(&mut established))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(established, ESTABLISHED);
+        client
+    }
+
+    #[tokio::test]
+    async fn should_tunnel_ai_hosts_untouched_while_capture_is_on_and_the_ca_is_untrusted() {
+        let (proxy, trust, scratch) = capturing_proxy(false);
+        let hello = b"\x16\x03\x01\x00\x05hello";
+
+        for _ in 0..2 {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = open_tunnel(&proxy, &upstream).await;
+            let (mut upstream_side, _) =
+                timeout(PATIENCE, upstream.accept()).await.unwrap().unwrap();
+            client.write_all(hello).await.unwrap();
+            let mut seen = vec![0u8; hello.len()];
+            timeout(PATIENCE, upstream_side.read_exact(&mut seen))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(seen, hello);
+        }
+
+        let events = read_events(&proxy.config.log_path, 100);
+        let untrusted: Vec<&Value> = events
+            .iter()
+            .filter(|event| event["event"] == "capture_ca_untrusted")
+            .collect();
+        assert_eq!(untrusted.len(), 1, "{events:?}");
+        let ca_path = proxy.config.mitm_ca_dir.join("litellm-relay-ca.pem");
+        assert_eq!(
+            untrusted[0]["trust_command"],
+            format!(
+                "security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"{}\"",
+                ca_path.display()
+            )
+        );
+        assert!(events
+            .iter()
+            .all(|event| event["event"] != "payload_capture_failed"));
+        assert_eq!(trust.checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_still_intercept_ai_hosts_once_the_ca_is_trusted() {
+        let (proxy, _trust, scratch) = capturing_proxy(true);
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let mut client = open_tunnel(&proxy, &upstream).await;
+        let mut rest = Vec::new();
+        timeout(PATIENCE, client.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err());
+        let events = read_events(&proxy.config.log_path, 100);
+        assert!(events
+            .iter()
+            .any(|event| event["event"] == "payload_capture_failed"));
+        assert!(events
+            .iter()
+            .all(|event| event["event"] != "capture_ca_untrusted"));
+        fs::remove_dir_all(scratch).unwrap();
+    }
 
     #[tokio::test]
     async fn should_forward_v1_with_the_gateway_credential_in_every_header_the_client_used() {
@@ -1155,7 +1601,10 @@ mod tests {
         }
         assert!(upstream.requests().is_empty());
 
-        daemon.rig.broker.sign_out();
+        let mut without_key = static_key_settings(GATEWAY_KEY);
+        without_key.gateway.url = upstream.url.clone();
+        without_key.gateway.api_key = None;
+        daemon.rig.settings.set(without_key);
         let request =
             format!("POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {token}\r\n{body}");
         let answer = exchange(&daemon.proxy, None, &request).await;

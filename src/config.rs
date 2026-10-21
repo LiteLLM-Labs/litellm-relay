@@ -1,4 +1,10 @@
-use std::{borrow::Cow, collections::HashMap, fs, ops::Range, path::PathBuf};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+    fs,
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -49,9 +55,146 @@ pub struct RelaySettings {
     pub codex: CodexSection,
     pub credential: CredentialSection,
     pub mcp: McpSection,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<EnvironmentEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct EnvironmentEntry {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+}
+
+fn without_trailing_slash(url: &str) -> &str {
+    url.strip_suffix('/').unwrap_or(url)
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+pub enum CarriedSelection {
+    Carried {
+        settings: Box<RelaySettings>,
+        summary: String,
+    },
+    Nothing(String),
 }
 
 impl RelaySettings {
+    pub fn current_environment(&self) -> Option<&EnvironmentEntry> {
+        self.environment_with_url(&self.gateway.url)
+    }
+
+    pub fn environment_with_url(&self, url: &str) -> Option<&EnvironmentEntry> {
+        let wanted = without_trailing_slash(url.trim());
+        self.environments
+            .iter()
+            .find(|entry| without_trailing_slash(entry.url.trim()) == wanted)
+    }
+
+    pub fn environment_named(&self, name: &str) -> Option<&EnvironmentEntry> {
+        self.environments.iter().find(|entry| entry.name == name)
+    }
+
+    pub fn managed_team(&self) -> Option<String> {
+        let selected = non_empty(self.gateway.team.as_deref());
+        let environment = non_empty(
+            self.current_environment()
+                .and_then(|entry| entry.team.as_deref()),
+        );
+        let claude = non_empty(self.claude.team.as_deref());
+        let codex = non_empty(self.codex.team.as_deref());
+        if let (None, None, Some(claude), Some(codex)) = (selected, environment, claude, codex) {
+            if claude != codex {
+                eprintln!(
+                    "broker: claude.team ({claude}) and codex.team ({codex}) differ; minting keys for {claude}"
+                );
+            }
+        }
+        selected
+            .or(environment)
+            .or(claude)
+            .or(codex)
+            .map(str::to_string)
+    }
+
+    pub fn carrying_selection_from(self, previous: &RelaySettings) -> CarriedSelection {
+        let Some(picked) = previous.current_environment() else {
+            return self.carrying_team_on_the_same_gateway(previous);
+        };
+        let Some(kept) = self.environment_named(&picked.name).cloned() else {
+            return CarriedSelection::Nothing(format!(
+                "the new config does not name the environment {}",
+                picked.name
+            ));
+        };
+        let parked: BTreeMap<String, String> = previous
+            .gateway
+            .team_by_environment
+            .iter()
+            .filter(|(name, _)| self.environment_named(name).is_some())
+            .map(|(name, team)| (name.clone(), team.clone()))
+            .collect();
+        let team = previous.gateway.team.clone();
+        let unchanged =
+            self.current_environment() == Some(&kept) && team.is_none() && parked.is_empty();
+        if unchanged {
+            return CarriedSelection::Nothing(format!(
+                "the environment {} is the new config's default and no team was picked",
+                kept.name
+            ));
+        }
+        let parked_names = parked.keys().cloned().collect::<Vec<_>>().join(", ");
+        let summary = format!(
+            "carried the environment {}{}{}",
+            kept.name,
+            team.as_deref()
+                .map(|team| format!(" with the team {team}"))
+                .unwrap_or_default(),
+            match parked_names.is_empty() {
+                true => String::new(),
+                false => format!(" and the team picks for {parked_names}"),
+            }
+        );
+        let gateway = GatewaySection {
+            url: kept.url,
+            team,
+            team_by_environment: parked,
+            ..self.gateway
+        };
+        CarriedSelection::Carried {
+            settings: Box::new(RelaySettings { gateway, ..self }),
+            summary,
+        }
+    }
+
+    fn carrying_team_on_the_same_gateway(self, previous: &RelaySettings) -> CarriedSelection {
+        let same_gateway = self.current_environment().is_none()
+            && without_trailing_slash(self.gateway.url.trim())
+                == without_trailing_slash(previous.gateway.url.trim());
+        if !same_gateway {
+            return CarriedSelection::Nothing(format!(
+                "the new config does not name the previous Gateway {}",
+                previous.gateway.url
+            ));
+        }
+        let Some(team) = previous.gateway.team.clone() else {
+            return CarriedSelection::Nothing("no team was picked".to_string());
+        };
+        let summary = format!("carried the team {team} on {}", self.gateway.url);
+        let gateway = GatewaySection {
+            team: Some(team),
+            ..self.gateway
+        };
+        CarriedSelection::Carried {
+            settings: Box::new(RelaySettings { gateway, ..self }),
+            summary,
+        }
+    }
+
     pub fn to_config(&self) -> RelayConfig {
         RelayConfig {
             host: self.relay.host.clone(),
@@ -114,6 +257,10 @@ pub struct GatewaySection {
     pub enrolled_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub team_by_environment: BTreeMap<String, String>,
 }
 
 impl Default for GatewaySection {
@@ -123,6 +270,8 @@ impl Default for GatewaySection {
             api_key: None,
             enrolled_at: None,
             expires_at: None,
+            team: None,
+            team_by_environment: BTreeMap::new(),
         }
     }
 }
@@ -385,21 +534,58 @@ pub fn load_settings() -> Result<RelaySettings> {
     Ok(RelaySettings::default())
 }
 
+pub fn carry_selection(previous: &Path) -> Result<String> {
+    let contents = fs::read_to_string(previous)
+        .with_context(|| format!("failed to read {}", previous.display()))?;
+    let previous = parse_settings(&contents)
+        .with_context(|| format!("failed to parse {}", previous.display()))?;
+    match load_settings()?.carrying_selection_from(&previous) {
+        CarriedSelection::Carried { settings, summary } => {
+            save_settings(&settings)?;
+            Ok(summary)
+        }
+        CarriedSelection::Nothing(reason) => Ok(format!("carried nothing: {reason}")),
+    }
+}
+
 pub fn save_settings(settings: &RelaySettings) -> Result<PathBuf> {
     let path = config_path();
+    save_settings_to(&path, settings)?;
+    Ok(path)
+}
+
+fn save_settings_to(path: &Path, settings: &RelaySettings) -> Result<()> {
+    let contents = settings_yaml(settings).context("failed to serialize Relay config")?;
+    if is_saved_owner_only(path, &contents) {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let contents = settings_yaml(settings).context("failed to serialize Relay config")?;
-    fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("failed to secure {}", path.display()))?;
     }
-    Ok(path)
+    Ok(())
+}
+
+fn is_saved_owner_only(path: &Path, contents: &str) -> bool {
+    if !fs::read_to_string(path).is_ok_and(|saved| saved == contents) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o777 == 0o600)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn parse_settings(contents: &str) -> Result<RelaySettings, serde_saphyr::Error> {
@@ -839,6 +1025,7 @@ gateway:
                 api_key: Some("sk-test".into()),
                 enrolled_at: Some(enrolled_at),
                 expires_at: Some(expires_at),
+                ..GatewaySection::default()
             },
             ..RelaySettings::default()
         };
@@ -1023,6 +1210,243 @@ capture:
             .contains("authorize_url is no longer used"));
         assert!(!IdpSection::default().setup_hint().contains("authorize_url"));
         assert!(IdpSection::default().setup_hint().contains("--oidc-issuer"));
+    }
+
+    const THREE_ENVIRONMENTS: &str = r#"
+gateway:
+  url: https://uat.example.com/
+  team: picked
+environments:
+  - name: prod
+    url: https://prod.example.com
+    team: prod-team
+  - name: uat
+    url: https://uat.example.com
+  - name: test
+    url: https://test.example.com/
+    team: test-team
+claude:
+  team: claude-team
+codex:
+  team: codex-team
+"#;
+
+    #[test]
+    fn should_parse_the_environments_list_and_the_selected_team() {
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+
+        assert_eq!(settings.gateway.team.as_deref(), Some("picked"));
+        assert_eq!(
+            settings
+                .environments
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["prod", "uat", "test"]
+        );
+        assert_eq!(
+            settings.environments[2],
+            EnvironmentEntry {
+                name: "test".into(),
+                url: "https://test.example.com/".into(),
+                team: Some("test-team".into()),
+            }
+        );
+        assert_eq!(settings.environments[1].team, None);
+        assert_eq!(
+            settings.environment_named("test"),
+            Some(&settings.environments[2])
+        );
+        assert_eq!(
+            settings
+                .environment_named("prod")
+                .map(|entry| entry.url.as_str()),
+            Some("https://prod.example.com")
+        );
+        assert_eq!(settings.environment_named("staging"), None);
+        assert_eq!(settings.environment_named("Prod"), None);
+    }
+
+    #[test]
+    fn should_match_the_current_environment_by_url_ignoring_one_trailing_slash() {
+        let mut settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+
+        settings.gateway.url = "https://uat.example.com".into();
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+
+        settings.gateway.url = "https://test.example.com".into();
+        assert_eq!(settings.current_environment().unwrap().name, "test");
+
+        settings.gateway.url = "https://elsewhere.example.com".into();
+        assert_eq!(settings.current_environment(), None);
+
+        settings.gateway.url = "https://uat.example.com//".into();
+        assert_eq!(settings.current_environment(), None);
+
+        assert_eq!(RelaySettings::default().current_environment(), None);
+    }
+
+    #[test]
+    fn should_pick_the_managed_team_from_gateway_then_environment_then_claude_then_codex() {
+        let mut settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        settings.gateway.url = "https://prod.example.com".into();
+        assert_eq!(settings.managed_team().as_deref(), Some("picked"));
+
+        settings.gateway.team = None;
+        assert_eq!(settings.managed_team().as_deref(), Some("prod-team"));
+
+        settings.gateway.url = "https://uat.example.com".into();
+        assert_eq!(settings.managed_team().as_deref(), Some("claude-team"));
+
+        settings.claude.team = Some("  ".into());
+        assert_eq!(settings.managed_team().as_deref(), Some("codex-team"));
+
+        settings.codex.team = None;
+        assert_eq!(settings.managed_team(), None);
+
+        settings.gateway.team = Some(" picked ".into());
+        assert_eq!(settings.managed_team().as_deref(), Some("picked"));
+    }
+
+    #[test]
+    fn should_save_a_config_without_environments_or_a_picked_team_with_none_of_their_keys() {
+        let settings: RelaySettings =
+            parse_settings(include_str!("../mdm/config.yaml.example")).expect("settings");
+
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+
+        let keys: Vec<&str> = saved
+            .lines()
+            .filter_map(|line| line.trim_start().split(':').next())
+            .collect();
+        for absent in ["environments", "team", "team_by_environment"] {
+            assert!(!keys.contains(&absent), "{absent} saved in {saved}");
+        }
+        let reloaded = parse_settings(&saved).expect("saved settings parse");
+        assert_eq!(
+            format!("{reloaded:#?}"),
+            format!("{settings:#?}"),
+            "{saved}"
+        );
+    }
+
+    #[test]
+    fn should_round_trip_environments_and_the_picked_team_through_yaml() {
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+        let reloaded: RelaySettings = parse_settings(&saved).expect("saved settings parse");
+
+        assert_eq!(reloaded.environments, settings.environments);
+        assert_eq!(reloaded.gateway.team.as_deref(), Some("picked"));
+        assert_eq!(reloaded.gateway.url, "https://uat.example.com/");
+    }
+
+    fn carried(outcome: CarriedSelection) -> (RelaySettings, String) {
+        match outcome {
+            CarriedSelection::Carried { settings, summary } => (*settings, summary),
+            CarriedSelection::Nothing(reason) => panic!("expected a carry, got: {reason}"),
+        }
+    }
+
+    fn carried_nothing(outcome: CarriedSelection) -> String {
+        match outcome {
+            CarriedSelection::Carried { summary, .. } => panic!("expected nothing, got: {summary}"),
+            CarriedSelection::Nothing(reason) => reason,
+        }
+    }
+
+    #[test]
+    fn should_leave_config_yaml_untouched_when_a_save_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("relay-config-save-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.yaml");
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        save_settings_to(&path, &settings).expect("first save");
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("backdate");
+
+        save_settings_to(&path, &settings).expect("unchanged save");
+        let after_unchanged = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+
+        let mut moved = settings.clone();
+        moved.gateway.team = Some("another-team".into());
+        save_settings_to(&path, &moved).expect("changed save");
+        let reread: RelaySettings =
+            parse_settings(&fs::read_to_string(&path).expect("read")).expect("parse");
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert_eq!(after_unchanged, long_ago);
+        assert_eq!(reread.gateway.team.as_deref(), Some("another-team"));
+    }
+
+    #[test]
+    fn should_carry_the_picked_environment_and_teams_into_a_new_managed_config_by_name() {
+        let mut previous: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        previous.gateway.team_by_environment = BTreeMap::from([
+            ("prod".into(), "prod-pick".into()),
+            ("gone".into(), "x".into()),
+        ]);
+        let managed: RelaySettings = parse_settings(
+            "gateway:\n  url: https://prod.example.com\nenvironments:\n  - name: prod\n    url: https://prod.example.com\n  - name: uat\n    url: https://uat-v2.example.com\nclaude:\n  model: new-model\n",
+        )
+        .expect("settings");
+
+        let (settings, summary) = carried(managed.carrying_selection_from(&previous));
+
+        assert_eq!(settings.gateway.url, "https://uat-v2.example.com");
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+        assert_eq!(settings.gateway.team.as_deref(), Some("picked"));
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("prod".into(), "prod-pick".into())])
+        );
+        assert_eq!(settings.claude.model, "new-model");
+        assert_eq!(
+            summary,
+            "carried the environment uat with the team picked and the team picks for prod"
+        );
+    }
+
+    #[test]
+    fn should_carry_nothing_when_the_new_config_drops_the_picked_environment() {
+        let previous: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        let managed: RelaySettings = parse_settings(
+            "gateway:\n  url: https://prod.example.com\nenvironments:\n  - name: prod\n    url: https://prod.example.com\n",
+        )
+        .expect("settings");
+
+        assert_eq!(
+            carried_nothing(managed.carrying_selection_from(&previous)),
+            "the new config does not name the environment uat"
+        );
+    }
+
+    #[test]
+    fn should_carry_the_team_only_while_a_single_gateway_config_keeps_the_same_url() {
+        let previous: RelaySettings =
+            parse_settings("gateway:\n  url: https://gw.example.com/\n  team: eng\n")
+                .expect("settings");
+        let same: RelaySettings =
+            parse_settings("gateway:\n  url: https://gw.example.com\n").expect("settings");
+        let moved: RelaySettings =
+            parse_settings("gateway:\n  url: https://gw2.example.com\n").expect("settings");
+
+        let (settings, summary) = carried(same.carrying_selection_from(&previous));
+        assert_eq!(settings.gateway.team.as_deref(), Some("eng"));
+        assert_eq!(settings.gateway.url, "https://gw.example.com");
+        assert_eq!(summary, "carried the team eng on https://gw.example.com");
+
+        assert_eq!(
+            carried_nothing(moved.carrying_selection_from(&previous)),
+            "the new config does not name the previous Gateway https://gw.example.com/"
+        );
     }
 
     #[test]

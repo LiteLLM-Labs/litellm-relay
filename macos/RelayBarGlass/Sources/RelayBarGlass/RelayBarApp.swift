@@ -2,14 +2,13 @@ import SwiftUI
 
 @main
 struct RelayBarGlassApp: App {
-    @StateObject private var model = AppModel()
+    private let model = AppModel()
 
     var body: some Scene {
         MenuBarExtra {
             PopoverView(model: model)
         } label: {
             Text("✨🚅")
-                .onAppear { model.start() }
         }
         .menuBarExtraStyle(.window)
     }

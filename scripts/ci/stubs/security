@@ -1,0 +1,62 @@
+#!/bin/bash
+set -euo pipefail
+printf 'security %s\n' "$*" >> "${RELAY_SMOKE_LOG:?the smoke stubs need RELAY_SMOKE_LOG}"
+trusted="${RELAY_SMOKE_TRUSTED:?the smoke stubs need RELAY_SMOKE_TRUSTED}"
+touch "$trusted"
+
+sha1_of() {
+  openssl x509 -in "$1" -noout -fingerprint -sha1 | sed 's/^.*=//; s/://g'
+}
+
+untrust() {
+  grep -vx "$1" "$trusted" > "$trusted.next" || true
+  mv "$trusted.next" "$trusted"
+}
+
+real_on_sandbox_keychain() {
+  if [[ "${*: -1}" != "${RELAY_SMOKE_SANDBOX:?the smoke stubs need RELAY_SMOKE_SANDBOX}"/* ]]; then
+    echo "security stub: refusing to run on ${*: -1}, which is outside $RELAY_SMOKE_SANDBOX" >&2
+    exit 97
+  fi
+  exec /usr/bin/security "$@"
+}
+
+case "${1:-}" in
+  add-trusted-cert)
+    sha1_of "${*: -1}" >> "$trusted"
+    ;;
+  remove-trusted-cert)
+    untrust "$(sha1_of "${*: -1}")"
+    ;;
+  verify-cert)
+    grep -qx "$(sha1_of "${*: -1}")" "$trusted"
+    ;;
+  dump-trust-settings)
+    sed 's/^/Cert: LiteLLM Relay Local Root CA /' "$trusted"
+    ;;
+  find-certificate)
+    real_on_sandbox_keychain "$@"
+    ;;
+  delete-certificate)
+    shift
+    args=()
+    hash=""
+    remove_trust=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -t) remove_trust=1 ;;
+        -Z) hash="$2"; args+=("$1" "$2"); shift ;;
+        *) args+=("$1") ;;
+      esac
+      shift
+    done
+    if [[ "$remove_trust" == "1" && -n "$hash" ]]; then
+      untrust "$hash"
+    fi
+    real_on_sandbox_keychain delete-certificate "${args[@]}"
+    ;;
+  *)
+    echo "security stub: unexpected call: $*" >&2
+    exit 97
+    ;;
+esac

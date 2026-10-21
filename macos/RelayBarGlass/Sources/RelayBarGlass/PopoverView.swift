@@ -1,53 +1,281 @@
 import SwiftUI
 
-/// Dark-glass popover: agent tab row on top, one tab-driven per-tool card below.
 struct PopoverView: View {
     @ObservedObject var model: AppModel
-    /// Measured height of the card body. A `ScrollView` has no intrinsic
-    /// height, and the `MenuBarExtra` window sizes itself to the view's ideal
-    /// size, so without an explicit height the body collapses to zero and only
-    /// the tab row is visible (seen on macOS 26).
-    @State private var bodyHeight: CGFloat = 0
-
-    static let maxBodyHeight: CGFloat = 560
 
     var body: some View {
-        VStack(spacing: 0) {
-            AgentTabBar(model: model)
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    UsageCard(model: model)
-                    footerBar
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 14)
-                .padding(.bottom, 16)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: BodyHeightKey.self, value: proxy.size.height)
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            connectivityCard
+            if model.daemonUp {
+                if model.status == nil {
+                    statusLine("Relay daemon answered an unreadable status", color: GlassTheme.orange)
+                } else if model.signedIn {
+                    accountCard
+                    if model.offersSelection {
+                        selectionCard
                     }
-                )
+                    mcpCard
+                } else {
+                    signInCard
+                }
             }
-            .onPreferenceChange(BodyHeightKey.self) { bodyHeight = $0 }
-            .frame(height: PopoverView.visibleBodyHeight(for: bodyHeight))
+            footerBar
         }
+        .padding(.horizontal, 18)
+        .padding(.top, 14)
+        .padding(.bottom, 16)
         .frame(width: 400)
         .background(GlassBackground())
         .environment(\.colorScheme, .dark)
     }
 
-    /// The height the body window gets: its content, capped so long cards scroll.
-    static func visibleBodyHeight(for contentHeight: CGFloat) -> CGFloat {
-        min(max(contentHeight, 1), maxBodyHeight)
+    private var header: some View {
+        HStack(spacing: 8) {
+            RelayMark().foregroundStyle(GlassTheme.ink)
+            Text("LiteLLM Relay").font(GlassTheme.sectionTitle).foregroundStyle(GlassTheme.ink)
+            Spacer()
+            if model.busy || model.signingIn {
+                ProgressView().controlSize(.small)
+            }
+        }
+    }
+
+    private var connectivityCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch model.daemon {
+            case .checking:
+                statusLine("Checking the Relay daemon", color: GlassTheme.muted)
+                portLine
+            case .down:
+                statusLine("Relay daemon is not running", color: Color.red)
+                portLine
+            case .up:
+                HStack(alignment: .top, spacing: 8) {
+                    gatewayLine
+                    Spacer()
+                    actionButton("Retry", disabled: model.busy) { model.run(.recheck) }
+                }
+                errorText(for: .recheck)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard()
+    }
+
+    private var portLine: some View {
+        Text("Port \(model.relayPort)").font(GlassTheme.caption).foregroundStyle(GlassTheme.textFaint)
+    }
+
+    private var gatewayLine: some View {
+        let probe = model.status?.account?.gateway
+        let url = probe?.url ?? model.status?.broker?.gatewayUrl
+        let host = StatusFormatter.gatewayHost(url) ?? "Gateway"
+        return VStack(alignment: .leading, spacing: 3) {
+            switch StatusFormatter.gatewayState(probe) {
+            case .reachable:
+                statusLine("Gateway \(host) reachable", color: GlassTheme.teal)
+            case .unreachable:
+                statusLine("Gateway \(host) unreachable", color: GlassTheme.orange)
+            case .checking:
+                statusLine("Checking Gateway \(host)", color: GlassTheme.muted)
+            case .unknown:
+                statusLine("Gateway \(host)", color: GlassTheme.muted)
+            }
+            if let error = probe?.error, !error.isEmpty {
+                Text(error).font(GlassTheme.caption).foregroundStyle(GlassTheme.textFaint).lineLimit(3)
+            }
+        }
+    }
+
+    private var signInCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Signed out").font(GlassTheme.label).foregroundStyle(GlassTheme.ink)
+            Text("Sign in with your corporate identity; the Relay daemon keeps the credential, this app never sees it.")
+                .font(GlassTheme.caption)
+                .foregroundStyle(GlassTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.signingIn {
+                Text("Waiting for the browser sign-in").font(GlassTheme.body).foregroundStyle(GlassTheme.ink)
+            }
+            HStack(spacing: 8) {
+                actionButton(model.signingIn ? "Sign in again" : "Sign in", disabled: false, prominent: true) { model.run(.signIn) }
+                if model.signingIn {
+                    actionButton("Cancel", disabled: false) { model.cancelSignIn() }
+                }
+            }
+            errorText(for: .signIn)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard()
+    }
+
+    private var accountCard: some View {
+        let broker = model.status?.broker
+        let account = model.status?.account
+        let budgetLine = StatusFormatter.budgetLine(team: account?.team, error: account?.budgetError, polled: account?.polledAt != nil)
+        let keyLine = StatusFormatter.keyLine(source: broker?.source, keyExpiresAt: model.keyExpiresAt, now: model.now)
+        return VStack(alignment: .leading, spacing: 6) {
+            iconLine("person.crop.circle", StatusFormatter.displayName(broker: broker, account: account), font: GlassTheme.label, color: GlassTheme.ink)
+            iconLine("key", keyLine, font: GlassTheme.body, color: GlassTheme.muted)
+            iconLine("dollarsign.circle", budgetLine, font: GlassTheme.body, color: GlassTheme.muted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard()
+    }
+
+    private var selectionCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !model.environmentOptions.isEmpty {
+                pickerRow("Environment") {
+                    Picker("Environment", selection: environmentSelection) {
+                        if model.status?.environments?.current == nil {
+                            Text("Choose").tag("")
+                        }
+                        ForEach(model.environmentOptions) { entry in
+                            Text(entry.name).tag(entry.name)
+                        }
+                    }
+                }
+                errorText(for: .switchEnvironment)
+            }
+            if model.teamOptions.isEmpty {
+                Text("No team selected").font(GlassTheme.body).foregroundStyle(GlassTheme.muted)
+            } else {
+                pickerRow("Team") {
+                    Picker("Team", selection: teamSelection) {
+                        if model.status?.broker?.team == nil {
+                            Text("Choose").tag("")
+                        }
+                        ForEach(model.teamOptions) { team in
+                            Text(StatusFormatter.teamLabel(team)).tag(team.id)
+                        }
+                    }
+                }
+                errorText(for: .switchTeam)
+            }
+            if let teamsError = model.status?.account?.teamsError, !teamsError.isEmpty {
+                Text(teamsError).font(GlassTheme.caption).foregroundStyle(GlassTheme.textFaint).lineLimit(3)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard()
+    }
+
+    private var mcpCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("MCP servers").font(GlassTheme.label).foregroundStyle(GlassTheme.ink)
+            if model.mcpServers.isEmpty {
+                Text("No MCP servers").font(GlassTheme.body).foregroundStyle(GlassTheme.muted)
+            } else {
+                ForEach(model.mcpServers, id: \.name) { entry in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .strokeBorder(GlassTheme.teal, lineWidth: 1.5)
+                            .background(Circle().fill(entry.server.active == true ? GlassTheme.teal : Color.clear))
+                            .frame(width: 8, height: 8)
+                        Text(entry.name).font(GlassTheme.body).foregroundStyle(GlassTheme.ink)
+                        Spacer()
+                        Text(toolCount(entry.server.tools)).font(GlassTheme.caption).foregroundStyle(GlassTheme.muted)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard()
     }
 
     private var footerBar: some View {
-        HStack(spacing: 8) {
-            footerButton("Dashboard", "safari") { model.openDashboard() }
-            Spacer()
-            footerButton("Quit", "power") { model.quit() }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                footerButton("Dashboard", "safari") { model.openDashboard() }
+                Spacer()
+                if model.offersSignOut {
+                    footerButton("Sign out", "rectangle.portrait.and.arrow.right") { model.run(.signOut) }
+                }
+                footerButton("Quit", "power") { model.quit() }
+            }
+            errorText(for: .signOut)
         }
         .padding(.top, 2)
+    }
+
+    private var environmentSelection: Binding<String> {
+        Binding(
+            get: { model.status?.environments?.current ?? "" },
+            set: { name in
+                guard !name.isEmpty, name != model.status?.environments?.current else { return }
+                model.run(.switchEnvironment(name))
+            }
+        )
+    }
+
+    private var teamSelection: Binding<String> {
+        Binding(
+            get: { model.status?.broker?.team ?? "" },
+            set: { team in
+                guard !team.isEmpty, team != model.status?.broker?.team else { return }
+                model.run(.switchTeam(team))
+            }
+        )
+    }
+
+    private func pickerRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 10) {
+            Text(title).font(GlassTheme.body).foregroundStyle(GlassTheme.muted).frame(width: 90, alignment: .leading)
+            content()
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .disabled(model.busy)
+                .accessibilityLabel(title)
+        }
+    }
+
+    private func toolCount(_ tools: Int?) -> String {
+        let count = tools ?? 0
+        return count == 1 ? "1 tool" : "\(count) tools"
+    }
+
+    private func statusLine(_ text: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(text).font(GlassTheme.body).foregroundStyle(color == GlassTheme.muted ? GlassTheme.ink : color)
+        }
+    }
+
+    private func iconLine(_ icon: String, _ text: String, font: Font, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(GlassTheme.muted).frame(width: 14)
+            Text(text).font(font).foregroundStyle(color).lineLimit(2)
+        }
+    }
+
+    @ViewBuilder
+    private func errorText(for kind: RelayCommand.Kind) -> some View {
+        if let message = model.errorMessage(for: kind) {
+            Text(message)
+                .font(GlassTheme.caption)
+                .foregroundStyle(GlassTheme.orange)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("error")
+        }
+    }
+
+    private func actionButton(_ title: String, disabled: Bool, prominent: Bool = false, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(GlassTheme.caption.weight(.semibold))
+                .foregroundStyle(prominent ? Color.black : GlassTheme.ink)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(prominent ? GlassTheme.ink : Color.white.opacity(0.10))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.5 : 1)
     }
 
     private func footerButton(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
@@ -69,12 +297,5 @@ struct PopoverView: View {
             )
         }
         .buttonStyle(.plain)
-    }
-}
-
-private struct BodyHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }

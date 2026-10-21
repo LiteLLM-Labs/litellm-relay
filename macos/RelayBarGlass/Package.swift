@@ -7,8 +7,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "RelayBarGlass",
-            path: "Sources/RelayBarGlass",
-            resources: [.process("Resources")]
+            path: "Sources/RelayBarGlass"
         ),
         .testTarget(
             name: "RelayBarGlassTests",

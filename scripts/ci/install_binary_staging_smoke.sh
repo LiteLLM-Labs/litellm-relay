@@ -7,7 +7,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1090
-source <(sed -n '/^install_relay_binary()/,/^}/p; /^detect_network_service()/,/^}/p' "$REPO_ROOT/src/install.sh")
+eval "$(sed -n '/^install_relay_binary()/,/^}/p; /^detect_network_service()/,/^}/p' "$REPO_ROOT/src/install.sh")"
 
 WORK="$(mktemp -d)"
 trap 'kill "${OLD_PID:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT

@@ -177,7 +177,12 @@ fn refusal_status(refusal: &Refusal) -> StatusCode {
         Refusal::CallerRefused(_) | Refusal::SignedOut(_) | Refusal::SignInFailed(_) => {
             StatusCode::UNAUTHORIZED
         }
-        Refusal::GatewayError(_) | Refusal::BadRequest(_) => StatusCode::BAD_GATEWAY,
+        Refusal::GatewayError(_)
+        | Refusal::BadRequest(_)
+        | Refusal::UnknownEnvironment(_)
+        | Refusal::UnknownTeam(_)
+        | Refusal::SwitchFailed(_)
+        | Refusal::StaticKey(_) => StatusCode::BAD_GATEWAY,
     }
 }
 

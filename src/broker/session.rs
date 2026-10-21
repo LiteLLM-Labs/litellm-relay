@@ -4,6 +4,7 @@ use super::{caller::Peer, Broker, Context, Mode, Refusal, Reply, Target};
 pub struct SessionIdentity {
     pub gateway_url: String,
     pub user_id: Option<String>,
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,7 @@ impl Broker {
                 .credential
                 .as_ref()
                 .and_then(|credential| credential.user_id.clone()),
+            team: target.team,
         })
     }
 
@@ -57,6 +59,7 @@ impl Broker {
                         .credential
                         .as_ref()
                         .and_then(|credential| credential.user_id.clone()),
+                    team: target.team.clone(),
                 },
             }),
             Reply::Refused(refusal) => Err(refusal),
