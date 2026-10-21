@@ -397,8 +397,8 @@ require_relay_subcommands() {
   if [[ -n "$missing" ]]; then
     cat >&2 <<ERROR
 prebuilt binary $1 has no '$missing' subcommand, so it is older than this
-installer. Nothing was changed. Use the litellm-relay binary from the same
-release as this install.sh.
+installer. The Relay install in $RELAY_HOME was not changed. Use the
+litellm-relay binary from the same release as this install.sh.
 ERROR
     exit 1
   fi

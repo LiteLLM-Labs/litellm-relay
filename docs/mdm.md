@@ -200,7 +200,9 @@ PAC profile so macOS stops using Auto Proxy:
 
 The uninstaller also boots out and removes the RelayBar LaunchAgent
 (`~/Library/LaunchAgents/ai.litellm.relaybar.plist`) when the package shipped
-the menu bar app.
+the menu bar app. Unless `--keep-bin` is set, it removes the package payload at
+`/usr/local/litellm-relay`, RelayBarGlass.app included, and forgets the
+`ai.litellm.relay` receipt.
 
 `--remove-ca-trust` removes every "LiteLLM Relay Local Root CA" certificate
 from the login keychain, including one a reinstall left behind, and its trust
@@ -209,8 +211,10 @@ Settings sheet, which macOS shows only in the user's GUI session, so run that
 flag from a Terminal in that session. Over ssh or from an MDM script the trust
 change is denied, and the uninstaller prints the SHA-1 and trust state of each
 certificate that stayed, why, and one `security delete-certificate -Z <SHA-1>
--t` command per certificate to finish from the session. Run as root, it looks
-in the console user's login keychain rather than root's.
+-t` command per certificate to finish from the session. Run as root, as an MDM
+script runs it, the uninstaller acts on the console user rather than root: it
+stops their LaunchAgents in their GUI domain and removes their plists, Relay
+data, shims and login keychain certificates.
 
 ## Credential broker
 

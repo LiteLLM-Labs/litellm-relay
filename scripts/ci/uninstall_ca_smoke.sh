@@ -74,15 +74,30 @@ grep -q "$(sha1_of "$current") untrusted" "$tmp_dir/uninstall.out" || fail "the 
 grep -qx "security delete-certificate -Z $(sha1_of "$stale") -t $keychain" "$tmp_dir/calls.log" \
   || fail "the trusted stale CA was not deleted together with its trust setting"
 [[ ! -s "$tmp_dir/trusted" ]] || fail "a Relay CA trust setting was left behind: $(cat "$tmp_dir/trusted")"
-grep -qx "launchctl bootout gui/$(id -u) $home/Library/LaunchAgents/ai.litellm.relaybar.plist" "$tmp_dir/calls.log" \
+grep -qx "launchctl bootout gui/$(id -u)/ai.litellm.relaybar" "$tmp_dir/calls.log" \
   || fail "the uninstall did not stop the RelayBar agent"
 
 run_uninstall
 grep -q "No \"$label\" certificate is in $keychain" "$tmp_dir/uninstall.out" || fail "a second uninstall did not report the empty keychain"
 
 mint_ca "$current"
-run_uninstall HOME="$tmp_dir/root-home" RELAY_SMOKE_UID=0 RELAY_SMOKE_MANAGERNAME=System \
-  RELAY_SMOKE_CONSOLE_USER=relay-smoke RELAY_SMOKE_CONSOLE_HOME="$home"
+mkdir -p "$home/Library/LaunchAgents"
+touch "$home/Library/LaunchAgents/ai.litellm.relaybar.plist"
+payload="$tmp_dir/payload"
+mkdir -p "$payload/RelayBarGlass.app/Contents/MacOS"
+: > "$tmp_dir/calls.log"
+with_stubs HOME="$tmp_dir/root-home" RELAY_SMOKE_UID=0 RELAY_SMOKE_MANAGERNAME=System \
+  RELAY_SMOKE_CONSOLE_USER=relay-smoke RELAY_SMOKE_CONSOLE_HOME="$home" RELAY_SMOKE_CONSOLE_UID=4242 \
+  RELAY_PKG_PAYLOAD="$payload" \
+  bash "$ROOT/src/uninstall.sh" --remove-ca-trust > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "uninstall.sh run as root exited non-zero"
+grep -qx "launchctl bootout gui/4242/ai.litellm.relaybar" "$tmp_dir/calls.log" \
+  || fail "an uninstall run as root did not stop the console user's RelayBar agent"
+[[ ! -e "$payload" ]] || fail "an uninstall run as root left the package payload with RelayBarGlass.app"
+grep -qx "pkgutil --forget ai.litellm.relay" "$tmp_dir/calls.log" || fail "an uninstall run as root kept the package receipt"
+grep -q "Package payload: $payload" "$tmp_dir/uninstall.out" || fail "the uninstall did not report the package payload it removed"
+[[ ! -e "$home/Library/LaunchAgents/ai.litellm.relaybar.plist" ]] || fail "an uninstall run as root left the console user's RelayBar plist"
+grep -q "Relay data: $relay_home" "$tmp_dir/uninstall.out" || fail "an uninstall run as root did not target the console user's Relay data"
 grep -q "warning: the Relay CA was left in $keychain" "$tmp_dir/uninstall.out" || fail "an uninstall run as root did not look in the console user's keychain"
 grep -q "^  $(sha1_of "$current")\$" "$tmp_dir/uninstall.out" || fail "an uninstall run as root did not list the console user's CA"
 
