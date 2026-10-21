@@ -77,6 +77,7 @@ struct AuthState {
     exchanges: u64,
     refreshes: u64,
     issued: u64,
+    gate: Option<Arc<Barrier>>,
 }
 
 #[derive(Clone)]
@@ -94,7 +95,14 @@ impl FakeAuth {
             exchanges: 0,
             refreshes: 0,
             issued: 0,
+            gate: None,
         })))
+    }
+
+    pub(crate) fn gate_next_exchange(&self) -> Arc<Barrier> {
+        let gate = Arc::new(Barrier::new(2));
+        self.0.lock().unwrap().gate = Some(Arc::clone(&gate));
+        gate
     }
 
     pub(crate) fn set_session_lifetime(&self, seconds: i64) {
@@ -179,6 +187,14 @@ impl AuthorizationServer for FakeAuth {
     }
 
     fn token(&self, _document: &AuthorizationServerDocument, grant: Grant) -> Result<TokenReply> {
+        let gate = match grant {
+            Grant::Exchange { .. } => self.0.lock().unwrap().gate.take(),
+            Grant::Refresh { .. } => None,
+        };
+        if let Some(gate) = gate {
+            gate.wait();
+            gate.wait();
+        }
         let mut state = self.0.lock().unwrap();
         match grant {
             Grant::Exchange {

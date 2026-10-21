@@ -14,7 +14,7 @@ pub mod socket;
 pub(crate) mod test_support;
 
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, BTreeMap},
     fs,
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -243,6 +243,7 @@ pub enum Refusal {
     UnknownEnvironment(String),
     UnknownTeam(String),
     SwitchFailed(String),
+    StaticKey(String),
 }
 
 impl Refusal {
@@ -256,6 +257,7 @@ impl Refusal {
             Refusal::UnknownEnvironment(_) => "unknown_environment",
             Refusal::UnknownTeam(_) => "unknown_team",
             Refusal::SwitchFailed(_) => "switch_failed",
+            Refusal::StaticKey(_) => "static_key",
         }
     }
 
@@ -268,7 +270,8 @@ impl Refusal {
             | Refusal::BadRequest(message)
             | Refusal::UnknownEnvironment(message)
             | Refusal::UnknownTeam(message)
-            | Refusal::SwitchFailed(message) => message,
+            | Refusal::SwitchFailed(message)
+            | Refusal::StaticKey(message) => message,
         }
     }
 }
@@ -437,7 +440,11 @@ impl Target {
 
 enum GatewayPatch {
     Team(Option<String>),
-    Environment { url: String, team: Option<String> },
+    Environment {
+        url: String,
+        team: Option<String>,
+        team_by_environment: BTreeMap<String, String>,
+    },
 }
 
 impl GatewayPatch {
@@ -447,9 +454,14 @@ impl GatewayPatch {
                 team: team.clone(),
                 ..settings.gateway
             },
-            GatewayPatch::Environment { url, team } => GatewaySection {
+            GatewayPatch::Environment {
+                url,
+                team,
+                team_by_environment,
+            } => GatewaySection {
                 url: url.clone(),
                 team: team.clone(),
+                team_by_environment: team_by_environment.clone(),
                 ..settings.gateway
             },
         };
@@ -458,6 +470,13 @@ impl GatewayPatch {
             ..settings
         }
     }
+}
+
+fn static_key_refusal(action: &str) -> Refusal {
+    Refusal::StaticKey(format!(
+        "{action} needs an IdP, and this device serves the static Gateway key from gateway.api_key in {}; delete gateway.api_key there to stop using it",
+        config_path().display()
+    ))
 }
 
 fn unknown_environment(name: &str, settings: &RelaySettings) -> String {
@@ -537,6 +556,7 @@ pub struct Broker {
     deps: Dependencies,
     state: Mutex<State>,
     renewal: Mutex<()>,
+    switching: Mutex<()>,
 }
 
 impl Broker {
@@ -549,6 +569,7 @@ impl Broker {
             deps,
             state: Mutex::new(State::default()),
             renewal: Mutex::new(()),
+            switching: Mutex::new(()),
         }
     }
 
@@ -662,13 +683,18 @@ impl Broker {
     }
 
     pub fn sign_out(&self) -> Reply {
+        self.refresh();
         let _renewal = self.lock_renewal();
-        let gateway_url = self.lock_target().gateway_url.clone();
-        self.forget(&gateway_url, true);
+        let target = self.lock_target().clone();
+        if matches!(target.mode, Mode::StaticKey(_)) {
+            return Reply::Refused(static_key_refusal("sign-out"));
+        }
+        self.forget(&target.gateway_url, true);
         Reply::SignedOut
     }
 
     pub fn switch_team(&self, team: &str) -> Reply {
+        let _switching = self.lock_switching();
         self.refresh();
         let settings = match self.switchable_settings() {
             Ok(settings) => settings,
@@ -696,6 +722,7 @@ impl Broker {
     }
 
     pub fn switch_environment(&self, name: &str) -> Reply {
+        let _switching = self.lock_switching();
         self.refresh();
         let (settings, entry) = match self.environment_destination(name) {
             Ok(destination) => destination,
@@ -707,13 +734,25 @@ impl Broker {
         {
             return Reply::Switched(self.switched());
         }
+        let parked = &settings.gateway.team_by_environment;
+        let leaving = settings
+            .current_environment()
+            .map(|current| current.name.clone())
+            .zip(settings.gateway.team.clone());
         let next = GatewayPatch::Environment {
             url: entry.url.clone(),
-            team: None,
+            team: parked.get(&entry.name).cloned(),
+            team_by_environment: parked
+                .iter()
+                .filter(|(name, _)| **name != entry.name)
+                .map(|(name, team)| (name.clone(), team.clone()))
+                .chain(leaving)
+                .collect(),
         };
         let previous = GatewayPatch::Environment {
             url: settings.gateway.url.clone(),
             team: settings.gateway.team.clone(),
+            team_by_environment: parked.clone(),
         };
         self.apply_switch(settings, next, previous)
     }
@@ -735,12 +774,7 @@ impl Broker {
         let target = self.lock_target().clone();
         match &target.mode {
             Mode::Idp(_) => {}
-            Mode::StaticKey(_) => {
-                return Err(Refusal::GatewayError(
-                    "switching needs an IdP; this device serves the configured Gateway key"
-                        .to_string(),
-                ))
-            }
+            Mode::StaticKey(_) => return Err(static_key_refusal("switching")),
             Mode::Unconfigured(hint) => return Err(Refusal::GatewayError(hint.clone())),
         }
         self.deps
@@ -820,7 +854,10 @@ impl Broker {
                 .as_ref()
                 .and_then(|key| key.extended_at)
                 .map(rfc3339),
-            source: state.last_source.map(Source::name),
+            source: match target.mode {
+                Mode::StaticKey(_) => Some(Source::StaticKey.name()),
+                _ => state.last_source.map(Source::name),
+            },
             refused_callers: state.refused_callers,
         }
     }
@@ -871,10 +908,15 @@ impl Broker {
         if current.version == Some(version) {
             return;
         }
-        if current.mode != next.mode {
-            eprintln!("broker: the Relay config changed its IdP; signing out");
+        let moved = current.gateway_url != next.gateway_url;
+        let between_environments = settings
+            .environment_with_url(&current.gateway_url)
+            .is_some()
+            && settings.environment_with_url(&next.gateway_url).is_some();
+        if current.mode != next.mode || (moved && !between_environments) {
+            eprintln!("broker: the Relay config changed its IdP or Gateway; signing out");
             self.forget(&current.gateway_url, true);
-        } else if current.gateway_url != next.gateway_url {
+        } else if moved {
             eprintln!(
                 "broker: the Relay config moved the Gateway from {} to {}; the next request exchanges there with the same IdP session",
                 current.gateway_url, next.gateway_url
@@ -1287,6 +1329,12 @@ impl Broker {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn lock_switching(&self) -> MutexGuard<'_, ()> {
+        self.switching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl Handler for Broker {
@@ -1696,6 +1744,33 @@ mod tests {
     }
 
     #[test]
+    fn should_refuse_sign_out_on_a_static_key_naming_the_key_and_change_nothing() {
+        let rig = Rig::new(static_key_settings("sk-static"));
+        assert_eq!(rig.broker.status().source, Some("static_key"));
+        let version = rig.settings.version();
+        let refusal = refused(rig.broker.handle(Request::SignOut, rig.peer()));
+        assert_eq!(refusal.reason(), "static_key");
+        assert!(
+            refusal.message().contains("gateway.api_key"),
+            "{}",
+            refusal.message()
+        );
+        assert!(
+            refusal.message().contains("config.yaml"),
+            "{}",
+            refusal.message()
+        );
+        assert_eq!(rig.settings.version(), version);
+        let status = rig.broker.status();
+        assert!(status.signed_in);
+        assert_eq!(status.source, Some("static_key"));
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-static"
+        );
+    }
+
+    #[test]
     fn should_refuse_when_neither_an_idp_nor_a_gateway_key_is_configured() {
         let rig = Rig::new(RelaySettings::default());
         let refusal = refused(credential(&rig, Context::Interactive));
@@ -1880,23 +1955,54 @@ mod tests {
     }
 
     #[test]
-    fn should_delete_the_key_at_the_old_gateway_and_keep_the_idp_session_when_the_config_moves_the_gateway(
-    ) {
+    fn should_sign_out_when_the_config_moves_the_gateway_outside_its_environments() {
         let rig = Rig::new(idp_settings(Some("team-a")));
         assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
         rig.settings.set(other_gateway_settings());
-        let moved = issued(credential(&rig, Context::NonInteractive));
-        assert_eq!(moved.token, "sk-2");
-        assert_eq!(moved.source, Source::MintedKey);
+        assert_eq!(
+            refused(credential(&rig, Context::NonInteractive)).reason(),
+            "signed_out"
+        );
         assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
         assert_eq!(
             rig.keys.deletes(),
             vec![("llm_session_1".to_string(), "sk-1".to_string())]
         );
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-2");
         assert_eq!(
             rig.keys.mints()[1].gateway_url,
             "https://other-gateway.example.com"
         );
+        assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(rig.browser_opens(), 2);
+    }
+
+    #[test]
+    fn should_sign_out_when_the_config_moves_from_a_listed_environment_to_an_unlisted_gateway() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let mut moved = environments_settings();
+        moved.gateway.url = "https://other-gateway.example.com".to_string();
+        rig.settings.set(moved);
+        assert_eq!(
+            refused(credential(&rig, Context::NonInteractive)).reason(),
+            "signed_out"
+        );
+        assert_eq!(rig.identity.sign_ins(), 1);
+    }
+
+    #[test]
+    fn should_keep_the_idp_session_when_the_config_moves_between_two_listed_environments() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let mut moved = environments_settings();
+        moved.gateway.url = UAT.to_string();
+        rig.settings.set(moved);
+        let issued = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(issued.token, "sk-2");
+        assert_eq!(issued.source, Source::MintedKey);
+        assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
+        assert_eq!(rig.keys.mints()[1].gateway_url, UAT);
         assert_eq!(rig.auth.exchanges(), 2);
         assert_eq!(rig.identity.sign_ins(), 1);
         assert_eq!(rig.browser_opens(), 1);
@@ -2157,15 +2263,115 @@ mod tests {
     fn should_refuse_a_switch_without_an_idp_before_touching_the_config() {
         let rig = Rig::new(static_key_settings("sk-static"));
         let version = rig.settings.version();
-        let refusal = refused(switch_team(&rig, "team-b"));
-        assert_eq!(refusal.reason(), "gateway_error");
-        assert!(
-            refusal.message().contains("needs an IdP"),
-            "{}",
-            refusal.message()
-        );
+        for refusal in [
+            refused(switch_team(&rig, "team-b")),
+            refused(switch_environment(&rig, "uat")),
+        ] {
+            assert_eq!(refusal.reason(), "static_key");
+            assert!(
+                refusal.message().contains("needs an IdP"),
+                "{}",
+                refusal.message()
+            );
+            assert!(
+                refusal.message().contains("gateway.api_key"),
+                "{}",
+                refusal.message()
+            );
+        }
         assert_eq!(rig.settings.version(), version);
         assert_eq!(rig.callers.checks(), 0);
+    }
+
+    #[test]
+    fn should_park_the_team_pick_per_environment_and_restore_it_on_return() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        assert_eq!(
+            switched(switch_team(&rig, "prod-pick")).team.as_deref(),
+            Some("prod-pick")
+        );
+        let on_uat = switched(switch_environment(&rig, "uat"));
+        assert_eq!(on_uat.team.as_deref(), Some("uat-team"));
+        assert_eq!(
+            rig.keys.mints().last().map(|mint| mint.team.clone()),
+            Some("uat-team".to_string())
+        );
+        assert_eq!(
+            switched(switch_team(&rig, "uat-pick")).team.as_deref(),
+            Some("uat-pick")
+        );
+        let back = switched(switch_environment(&rig, "prod"));
+        assert_eq!(back.team.as_deref(), Some("prod-pick"));
+        let mints = rig.keys.mints();
+        assert_eq!(
+            mints.last().map(|mint| mint.gateway_url.as_str()),
+            Some(GATEWAY)
+        );
+        assert_eq!(
+            mints.last().map(|mint| mint.team.as_str()),
+            Some("prod-pick")
+        );
+        assert!(mints
+            .iter()
+            .filter(|mint| mint.gateway_url == UAT)
+            .all(|mint| mint.team != "prod-pick"));
+        assert_eq!(
+            switched(switch_environment(&rig, "uat")).team.as_deref(),
+            Some("uat-pick")
+        );
+        assert_eq!(rig.identity.sign_ins(), 1);
+    }
+
+    #[test]
+    fn should_never_let_a_failed_switch_restore_its_team_over_a_later_switch() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.auth.refuse_team("team-z");
+        let gate = rig.auth.gate_next_exchange();
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let failing = thread::spawn(move || {
+            broker.handle(
+                Request::SwitchTeam {
+                    team: "team-z".to_string(),
+                },
+                peer,
+            )
+        });
+        gate.wait();
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let later = thread::spawn(move || {
+            broker.handle(
+                Request::SwitchTeam {
+                    team: "team-b".to_string(),
+                },
+                peer,
+            )
+        });
+        thread::sleep(Duration::from_millis(200));
+        gate.wait();
+        assert_eq!(
+            refused(failing.join().expect("failing switch")).reason(),
+            "switch_failed"
+        );
+        assert_eq!(
+            switched(later.join().expect("later switch"))
+                .team
+                .as_deref(),
+            Some("team-b")
+        );
+        assert_eq!(
+            rig.settings
+                .load()
+                .expect("settings")
+                .gateway
+                .team
+                .as_deref(),
+            Some("team-b")
+        );
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
     }
 
     #[test]
@@ -2238,6 +2444,7 @@ mod tests {
         let stored = rig.settings.load().expect("settings");
         assert_eq!(stored.gateway.url, GATEWAY);
         assert_eq!(stored.gateway.team.as_deref(), Some("picked-team"));
+        assert!(stored.gateway.team_by_environment.is_empty());
         assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
         let again = issued(credential(&rig, Context::NonInteractive));
         assert_eq!(again.token, "sk-2");

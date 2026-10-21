@@ -181,7 +181,8 @@ fn refusal_status(refusal: &Refusal) -> StatusCode {
         | Refusal::BadRequest(_)
         | Refusal::UnknownEnvironment(_)
         | Refusal::UnknownTeam(_)
-        | Refusal::SwitchFailed(_) => StatusCode::BAD_GATEWAY,
+        | Refusal::SwitchFailed(_)
+        | Refusal::StaticKey(_) => StatusCode::BAD_GATEWAY,
     }
 }
 

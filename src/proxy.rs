@@ -967,7 +967,7 @@ mod tests {
             .status_payload(json!({"state": "ok"}))
             .expect("status payload should build");
         assert_eq!(before["broker"]["signed_in"], json!(true));
-        assert_eq!(before["broker"]["source"], Value::Null);
+        assert_eq!(before["broker"]["source"], "static_key");
 
         rig.broker.handle(
             Request::Credential {
@@ -1224,7 +1224,10 @@ mod tests {
         }
         assert!(upstream.requests().is_empty());
 
-        daemon.rig.broker.sign_out();
+        let mut without_key = static_key_settings(GATEWAY_KEY);
+        without_key.gateway.url = upstream.url.clone();
+        without_key.gateway.api_key = None;
+        daemon.rig.settings.set(without_key);
         let request =
             format!("POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {token}\r\n{body}");
         let answer = exchange(&daemon.proxy, None, &request).await;

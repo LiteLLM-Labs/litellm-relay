@@ -273,11 +273,12 @@ mod tests {
         .await
         .expect("exchange");
         assert_eq!(reply["ok"], false);
-        assert_eq!(reply["reason"], "gateway_error");
+        assert_eq!(reply["reason"], "static_key");
         let reply = tokio::task::spawn_blocking(move || exchange(&path, "{\"op\":\"sign_out\"}\n"))
             .await
             .expect("exchange");
-        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["reason"], "static_key");
         assert_eq!(rig.callers.checks(), 0);
         server.abort();
     }
