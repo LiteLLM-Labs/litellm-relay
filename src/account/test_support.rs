@@ -18,6 +18,7 @@ pub(crate) struct Call {
 pub(crate) struct FakeHttp {
     answers: Arc<Mutex<HashMap<String, Result<HttpAnswer, String>>>>,
     calls: Arc<Mutex<Vec<Call>>>,
+    delays: Arc<Mutex<HashMap<String, Duration>>>,
 }
 
 impl FakeHttp {
@@ -36,6 +37,10 @@ impl FakeHttp {
             .lock()
             .unwrap()
             .insert(route.to_string(), Err(message.to_string()));
+    }
+
+    pub(crate) fn delay(&self, route: &str, delay: Duration) {
+        self.delays.lock().unwrap().insert(route.to_string(), delay);
     }
 
     pub(crate) fn calls_to(&self, route: &str) -> Vec<Call> {
@@ -69,6 +74,10 @@ impl AccountHttp for FakeHttp {
             timeout,
         });
         let route = route_of(url);
+        let delay = self.delays.lock().unwrap().get(&route).copied();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
         self.answers
             .lock()
             .unwrap()

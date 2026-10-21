@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread, time::Duration};
 
 use serde_json::{json, Value};
 
@@ -8,22 +8,41 @@ use crate::{
     mcp::service::Switcher,
 };
 
+const ACCOUNT_PATIENCE: Duration = Duration::from_secs(3);
+
 pub struct Daemon {
     broker: Arc<Broker>,
     account: Arc<AccountService>,
+    account_patience: Duration,
 }
 
 impl Daemon {
     pub fn new(broker: Arc<Broker>, account: Arc<AccountService>) -> Self {
-        Self { broker, account }
+        Self {
+            broker,
+            account,
+            account_patience: ACCOUNT_PATIENCE,
+        }
     }
 
     fn refreshed(&self, reply: Reply) -> Reply {
-        if matches!(
+        if !matches!(
             reply,
             Reply::Switched(_) | Reply::SignedIn { .. } | Reply::SignedOut
         ) {
-            self.account.recheck();
+            return reply;
+        }
+        let account = Arc::clone(&self.account);
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            account.recheck();
+            let _ = done.send(());
+        });
+        if finished.recv_timeout(self.account_patience).is_err() {
+            eprintln!(
+                "daemon: the account re-read is still running after {} s; answering now and finishing it in the background",
+                self.account_patience.as_secs_f32()
+            );
         }
         reply
     }
@@ -41,8 +60,9 @@ impl Daemon {
 
 impl Switcher for Daemon {
     fn team_refusal(&self, team: &str) -> Option<Refusal> {
-        self.unknown_team(team)
-            .or_else(|| self.broker.team_switch_refusal())
+        self.broker
+            .team_switch_refusal()
+            .or_else(|| self.unknown_team(team))
     }
 
     fn environment_refusal(&self, name: &str) -> Option<Refusal> {
@@ -50,7 +70,7 @@ impl Switcher for Daemon {
     }
 
     fn switch_team(&self, team: &str) -> Reply {
-        match self.unknown_team(team) {
+        match self.team_refusal(team) {
             Some(refusal) => Reply::Refused(refusal),
             None => self.refreshed(self.broker.switch_team(team)),
         }
@@ -91,10 +111,15 @@ impl Handler for Daemon {
 mod tests {
     use std::sync::Arc;
 
+    use std::time::Instant;
+
     use super::*;
     use crate::{
         account::test_support::{account_on, FakeHttp},
-        broker::test_support::{idp_settings, Rig, GATEWAY},
+        broker::{
+            test_support::{idp_settings, static_key_settings, Rig, GATEWAY},
+            SettingsSource,
+        },
         config::EnvironmentEntry,
     };
 
@@ -148,6 +173,76 @@ mod tests {
             Some("unknown_team")
         );
         assert_eq!(daemon.team_refusal("team-b"), None);
+    }
+
+    #[test]
+    fn should_refuse_a_switch_on_a_static_key_before_checking_the_team_list() {
+        let (rig, http, account, daemon) = daemon_on(static_key_settings("sk-static"));
+        account.recheck();
+        assert_eq!(account.status()["teams"].as_array().map(Vec::len), Some(2));
+        let version = rig.settings.version();
+        for team in ["team-z", "team-b"] {
+            let refused = daemon.handle(
+                Request::SwitchTeam {
+                    team: team.to_string(),
+                },
+                rig.peer(),
+            );
+            let Reply::Refused(refusal) = refused else {
+                panic!("expected a refusal, got {refused:?}");
+            };
+            assert_eq!(refusal.reason(), "static_key");
+            assert_eq!(
+                daemon.team_refusal(team).map(|refusal| refusal.reason()),
+                Some("static_key")
+            );
+        }
+        let refused = daemon.handle(Request::SignOut, rig.peer());
+        assert!(
+            matches!(&refused, Reply::Refused(refusal) if refusal.reason() == "static_key"),
+            "{refused:?}"
+        );
+        assert_eq!(rig.settings.version(), version);
+        assert_eq!(count(&http, "/user/info"), 1);
+    }
+
+    #[test]
+    fn should_answer_a_switch_within_the_patience_and_finish_the_account_re_read_behind_it() {
+        let (rig, http, account, daemon) = daemon_on(idp_settings(Some("team-a")));
+        let daemon = Daemon {
+            account_patience: Duration::from_millis(100),
+            ..daemon
+        };
+        daemon.handle(Request::SignIn, rig.peer());
+        assert_eq!(account.status()["teams"].as_array().map(Vec::len), Some(2));
+        http.delay("/user/info", Duration::from_millis(800));
+
+        let started = Instant::now();
+        let switched = daemon.handle(
+            Request::SwitchTeam {
+                team: "team-b".to_string(),
+            },
+            rig.peer(),
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(matches!(switched, Reply::Switched(_)), "{switched:?}");
+        let status = account.status();
+        assert!(status["teams"].is_null(), "{status}");
+        assert!(status["user"]["email"].is_null(), "{status}");
+        assert_eq!(status["team"]["id"], "team-b");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while account.status()["teams"].is_null() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let status = account.status();
+        assert_eq!(status["teams"].as_array().map(Vec::len), Some(2));
+        assert_eq!(status["user"]["email"], "dev@example.com");
+        assert_eq!(count(&http, "/user/info"), 2);
     }
 
     #[test]
