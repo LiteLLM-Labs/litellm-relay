@@ -12,7 +12,9 @@ struct PopoverView: View {
                     statusLine("Relay daemon answered an unreadable status", color: GlassTheme.orange)
                 } else if model.signedIn {
                     accountCard
-                    selectionCard
+                    if model.offersSelection {
+                        selectionCard
+                    }
                     mcpCard
                 } else {
                     signInCard
@@ -33,7 +35,7 @@ struct PopoverView: View {
             RelayMark().foregroundStyle(GlassTheme.ink)
             Text("LiteLLM Relay").font(GlassTheme.sectionTitle).foregroundStyle(GlassTheme.ink)
             Spacer()
-            if model.busy {
+            if model.busy || model.signingIn {
                 ProgressView().controlSize(.small)
             }
         }
@@ -41,10 +43,14 @@ struct PopoverView: View {
 
     private var connectivityCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !model.daemonUp {
+            switch model.daemon {
+            case .checking:
+                statusLine("Checking the Relay daemon", color: GlassTheme.muted)
+                portLine
+            case .down:
                 statusLine("Relay daemon is not running", color: Color.red)
-                Text("Port \(model.relayPort)").font(GlassTheme.caption).foregroundStyle(GlassTheme.textFaint)
-            } else {
+                portLine
+            case .up:
                 HStack(alignment: .top, spacing: 8) {
                     gatewayLine
                     Spacer()
@@ -57,17 +63,23 @@ struct PopoverView: View {
         .glassCard()
     }
 
+    private var portLine: some View {
+        Text("Port \(model.relayPort)").font(GlassTheme.caption).foregroundStyle(GlassTheme.textFaint)
+    }
+
     private var gatewayLine: some View {
         let probe = model.status?.account?.gateway
         let url = probe?.url ?? model.status?.broker?.gatewayUrl
         let host = StatusFormatter.gatewayHost(url) ?? "Gateway"
         return VStack(alignment: .leading, spacing: 3) {
-            switch probe?.reachable {
-            case .some(true):
+            switch StatusFormatter.gatewayState(probe) {
+            case .reachable:
                 statusLine("Gateway \(host) reachable", color: GlassTheme.teal)
-            case .some(false):
+            case .unreachable:
                 statusLine("Gateway \(host) unreachable", color: GlassTheme.orange)
-            case .none:
+            case .checking:
+                statusLine("Checking Gateway \(host)", color: GlassTheme.muted)
+            case .unknown:
                 statusLine("Gateway \(host)", color: GlassTheme.muted)
             }
             if let error = probe?.error, !error.isEmpty {
@@ -83,7 +95,15 @@ struct PopoverView: View {
                 .font(GlassTheme.caption)
                 .foregroundStyle(GlassTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
-            actionButton("Sign in", disabled: model.busy, prominent: true) { model.run(.signIn) }
+            if model.signingIn {
+                Text("Waiting for the browser sign-in").font(GlassTheme.body).foregroundStyle(GlassTheme.ink)
+            }
+            HStack(spacing: 8) {
+                actionButton(model.signingIn ? "Sign in again" : "Sign in", disabled: false, prominent: true) { model.run(.signIn) }
+                if model.signingIn {
+                    actionButton("Cancel", disabled: false) { model.cancelSignIn() }
+                }
+            }
             errorText(for: .signIn)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -92,11 +112,13 @@ struct PopoverView: View {
 
     private var accountCard: some View {
         let broker = model.status?.broker
+        let account = model.status?.account
+        let budgetLine = StatusFormatter.budgetLine(team: account?.team, error: account?.budgetError, polled: account?.polledAt != nil)
         let keyLine = StatusFormatter.keyLine(source: broker?.source, keyExpiresAt: model.keyExpiresAt, now: model.now)
         return VStack(alignment: .leading, spacing: 6) {
-            iconLine("person.crop.circle", StatusFormatter.displayName(broker: broker, account: model.status?.account), font: GlassTheme.label, color: GlassTheme.ink)
+            iconLine("person.crop.circle", StatusFormatter.displayName(broker: broker, account: account), font: GlassTheme.label, color: GlassTheme.ink)
             iconLine("key", keyLine, font: GlassTheme.body, color: GlassTheme.muted)
-            iconLine("dollarsign.circle", StatusFormatter.budgetLine(team: model.status?.account?.team, error: model.status?.account?.budgetError), font: GlassTheme.body, color: GlassTheme.muted)
+            iconLine("dollarsign.circle", budgetLine, font: GlassTheme.body, color: GlassTheme.muted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
@@ -164,13 +186,16 @@ struct PopoverView: View {
     }
 
     private var footerBar: some View {
-        HStack(spacing: 8) {
-            footerButton("Dashboard", "safari") { model.openDashboard() }
-            Spacer()
-            if model.signedIn {
-                footerButton("Sign out", "rectangle.portrait.and.arrow.right") { model.run(.signOut) }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                footerButton("Dashboard", "safari") { model.openDashboard() }
+                Spacer()
+                if model.offersSignOut {
+                    footerButton("Sign out", "rectangle.portrait.and.arrow.right") { model.run(.signOut) }
+                }
+                footerButton("Quit", "power") { model.quit() }
             }
-            footerButton("Quit", "power") { model.quit() }
+            errorText(for: .signOut)
         }
         .padding(.top, 2)
     }

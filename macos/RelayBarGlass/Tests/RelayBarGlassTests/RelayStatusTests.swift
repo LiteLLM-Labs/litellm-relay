@@ -56,6 +56,25 @@ import Testing
     }
     """
 
+    static let staticKey = """
+    {
+      "listen": "127.0.0.1:4142",
+      "credential": {"configured": true, "state": "valid"},
+      "broker": {"signed_in": true, "user_id": null, "display_name": null, "team": null, "environment": null, "gateway_url": "https://gateway.example.com", "key_expires_at": null, "key_extended_at": null, "source": "static_key", "refused_callers": 0},
+      "account": {
+        "user": {"id": null, "email": "dev@example.com"},
+        "teams": [{"id": "team-a", "alias": "Team A"}],
+        "teams_error": null,
+        "team": null,
+        "budget_error": null,
+        "gateway": {"url": "https://gateway.example.com", "reachable": false, "checked_at": null, "error": null},
+        "polled_at": "2027-01-15T08:00:00Z"
+      },
+      "environments": {"current": null, "available": []},
+      "mcp": {"catalog_tools": null, "servers": {}}
+    }
+    """
+
     static let olderDaemon = """
     {"listen": "127.0.0.1:4142", "runtime": "rust", "broker": null, "account": null, "environments": null, "mcp": null}
     """
@@ -90,6 +109,12 @@ import Testing
         #expect(status.environments?.available == [])
         #expect(status.mcp?.catalogTools == nil)
         #expect(status.mcp?.servers == [:])
+    }
+
+    @Test func namesAStaticKeyDeviceFromTheBrokerSource() throws {
+        #expect(try RelayStatus.decode(Data(Self.staticKey.utf8)).usesStaticKey)
+        #expect(try RelayStatus.decode(Data(Self.signedIn.utf8)).usesStaticKey == false)
+        #expect(try RelayStatus.decode(Data(Self.signedOut.utf8)).usesStaticKey == false)
     }
 
     @Test func decodesAnOlderDaemonWithEveryObjectNull() throws {

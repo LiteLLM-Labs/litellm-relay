@@ -9,6 +9,10 @@ struct RelayStatus: Decodable, Equatable {
     static func decode(_ data: Data) throws -> RelayStatus {
         try JSONDecoder().decode(RelayStatus.self, from: data)
     }
+
+    var usesStaticKey: Bool {
+        broker?.source == "static_key"
+    }
 }
 
 struct BrokerStatus: Decodable, Equatable {
