@@ -94,7 +94,7 @@ struct Budget {
 struct Reachability {
     url: String,
     reachable: bool,
-    checked_at: Option<i64>,
+    checked_at: i64,
     error: Option<String>,
 }
 
@@ -106,10 +106,9 @@ struct AccountState {
     user_email: Option<String>,
     budget: Option<Budget>,
     budget_error: Option<String>,
-    gateway: Reachability,
+    gateway: Option<Reachability>,
     polled_at: Option<i64>,
     account_checked_at: Option<i64>,
-    reachability_checked_at: Option<i64>,
     settings_version: Option<SettingsVersion>,
     environments: Vec<EnvironmentEntry>,
 }
@@ -134,7 +133,6 @@ pub struct AccountService {
 
 impl AccountService {
     pub fn new(broker: Arc<Broker>, deps: AccountDependencies) -> Self {
-        let gateway_url = broker.status().gateway_url;
         Self {
             broker,
             deps,
@@ -146,15 +144,9 @@ impl AccountService {
                 user_email: None,
                 budget: None,
                 budget_error: None,
-                gateway: Reachability {
-                    url: gateway_url,
-                    reachable: false,
-                    checked_at: None,
-                    error: None,
-                },
+                gateway: None,
                 polled_at: None,
                 account_checked_at: None,
-                reachability_checked_at: None,
                 settings_version: None,
                 environments: Vec::new(),
             }),
@@ -172,12 +164,8 @@ impl AccountService {
                 state.identity != identity_of(&broker)
                     || state.team != broker.team
                     || due(state.account_checked_at, now, BUDGET_INTERVAL_SECONDS),
-                state.gateway.url != broker.gateway_url
-                    || due(
-                        state.reachability_checked_at,
-                        now,
-                        REACHABILITY_INTERVAL_SECONDS,
-                    ),
+                probed_gateway(&state, &broker.gateway_url)
+                    .is_none_or(|probed| now - probed.checked_at >= REACHABILITY_INTERVAL_SECONDS),
             )
         };
         if account_due {
@@ -215,6 +203,7 @@ impl AccountService {
         let broker = self.broker.status();
         let state = self.lock_state();
         let session = (state.identity == identity_of(&broker)).then_some(&*state);
+        let probed = probed_gateway(&state, &broker.gateway_url);
         let known_teams = session.and_then(|session| session.teams.as_ref());
         let teams = known_teams.map(|teams| {
             teams
@@ -247,10 +236,10 @@ impl AccountService {
             "team": team,
             "budget_error": session.and_then(|session| session.budget_error.as_ref()),
             "gateway": {
-                "url": state.gateway.url,
-                "reachable": state.gateway.reachable,
-                "checked_at": state.gateway.checked_at.map(rfc3339),
-                "error": state.gateway.error,
+                "url": broker.gateway_url,
+                "reachable": probed.map(|probed| probed.reachable),
+                "checked_at": probed.map(|probed| rfc3339(probed.checked_at)),
+                "error": probed.and_then(|probed| probed.error.as_ref()),
             },
             "polled_at": session.and_then(|session| session.polled_at).map(rfc3339),
         })
@@ -351,13 +340,12 @@ impl AccountService {
             Err(message) => (false, Some(message)),
         };
         let mut state = self.lock_state();
-        state.gateway = Reachability {
+        state.gateway = Some(Reachability {
             url: url.to_string(),
             reachable,
-            checked_at: Some(now),
+            checked_at: now,
             error,
-        };
-        state.reachability_checked_at = Some(now);
+        });
     }
 
     fn lock_state(&self) -> MutexGuard<'_, AccountState> {
@@ -375,6 +363,10 @@ fn identity_of(status: &BrokerStatus) -> Option<SessionIdentity> {
         user_id: status.user_id.clone(),
         team: status.team.clone(),
     })
+}
+
+fn probed_gateway<'a>(state: &'a AccountState, url: &str) -> Option<&'a Reachability> {
+    state.gateway.as_ref().filter(|probed| probed.url == url)
 }
 
 fn due(checked_at: Option<i64>, now: i64, interval: i64) -> bool {

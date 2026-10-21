@@ -85,6 +85,17 @@ impl RelayProxy {
         }
     }
 
+    #[cfg(test)]
+    fn with_saved_settings(
+        self,
+        saved_settings: Box<dyn Fn() -> Option<crate::config::RelaySettings> + Send + Sync>,
+    ) -> Self {
+        Self {
+            gateway: self.gateway.with_saved_settings(saved_settings),
+            ..self
+        }
+    }
+
     pub async fn serve_forever(self) -> Result<()> {
         if let Some(parent) = self.config.log_path.parent() {
             fs::create_dir_all(parent)?;
@@ -133,7 +144,11 @@ impl RelayProxy {
         }
     }
 
-    async fn handle_client(&self, mut stream: TcpStream, peer: SocketAddr) -> Result<()> {
+    async fn handle_client(
+        self: &Arc<Self>,
+        mut stream: TcpStream,
+        peer: SocketAddr,
+    ) -> Result<()> {
         let header = match read_until_headers(&mut stream).await {
             Ok(header) => header,
             Err(_) => return Ok(()),
@@ -205,10 +220,12 @@ impl RelayProxy {
         }
 
         if method == "GET" && route.path == "/api/status" {
-            let credential = self.gateway.credential_status().await.to_json();
-            return self
-                .write_json(&mut stream, self.status_payload(credential)?)
-                .await;
+            let proxy = Arc::clone(self);
+            let payload = tokio::task::spawn_blocking(move || {
+                proxy.status_payload(proxy.gateway.credential_status().to_json())
+            })
+            .await??;
+            return self.write_json(&mut stream, payload).await;
         }
 
         if method == "GET" && route.path == "/api/events" {
@@ -894,7 +911,7 @@ mod tests {
             .status_payload(json!({"state": "ok"}))
             .expect("status payload should build");
         assert_eq!(before["account"]["teams"], Value::Null);
-        assert_eq!(before["account"]["gateway"]["reachable"], json!(false));
+        assert_eq!(before["account"]["gateway"]["reachable"], Value::Null);
         assert_eq!(
             before["environments"],
             json!({"current": "dev", "available": [{"name": "dev", "url": settings.gateway.url}]})
@@ -1109,6 +1126,56 @@ mod tests {
 
     const JSON_OK: &str =
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nx-litellm-call-id: call-1\r\n\r\n{\"ok\":true}";
+
+    #[tokio::test]
+    async fn should_answer_status_at_once_from_cached_checks_while_the_gateway_hangs() {
+        use crate::account::test_support::account_on;
+
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut settings = static_key_settings("sk-static");
+        settings.gateway.url = format!("http://{}", hung.local_addr().unwrap());
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let port = config.port;
+        let (rig, _http, account) = account_on(settings.clone());
+        let saved = settings.clone();
+        let proxy = Arc::new(
+            RelayProxy::new(config)
+                .with_broker(Arc::clone(&rig.broker))
+                .with_account(account)
+                .with_saved_settings(Box::new(move || Some(saved.clone()))),
+        );
+
+        let started = Instant::now();
+        let first = exchange(
+            &proxy,
+            None,
+            &format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        )
+        .await;
+        let again = exchange(
+            &proxy,
+            None,
+            &format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "status must not wait on the Gateway, took {:?}",
+            started.elapsed()
+        );
+        for answer in [first, again] {
+            let status: Value =
+                serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(status["credential"]["configured"], true);
+            assert_eq!(status["credential"]["state"], "unchecked");
+            assert_eq!(status["credential"]["checked_at"], Value::Null);
+            assert_eq!(status["broker"]["source"], "static_key");
+            assert_eq!(status["account"]["gateway"]["reachable"], Value::Null);
+        }
+    }
 
     #[tokio::test]
     async fn should_forward_v1_with_the_gateway_credential_in_every_header_the_client_used() {

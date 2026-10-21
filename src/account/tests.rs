@@ -215,7 +215,7 @@ fn should_probe_liveliness_without_a_bearer_and_flip_reachable_on_a_connection_e
     let (rig, http, account) = account_on(idp_settings(Some("team-a")));
     assert_eq!(
         account.status()["gateway"],
-        json!({"url": GATEWAY, "reachable": false, "checked_at": null, "error": null})
+        json!({"url": GATEWAY, "reachable": null, "checked_at": null, "error": null})
     );
     http.answer("/health/liveliness", 200, "\"I'm alive!\"");
     account.poll();
@@ -243,6 +243,30 @@ fn should_probe_liveliness_without_a_bearer_and_flip_reachable_on_a_connection_e
     let gateway = account.status()["gateway"].clone();
     assert_eq!(gateway["reachable"], true);
     assert_eq!(gateway["error"], "HTTP 503: not ready");
+}
+
+#[test]
+fn should_read_reachability_as_unknown_until_the_gateway_it_moved_to_is_probed() {
+    let (rig, http, account) = signed_in();
+    rig.settings.set(environments_settings());
+    account.poll();
+    assert_eq!(account.status()["gateway"]["reachable"], true);
+
+    http.fail("/health/liveliness", "connection refused");
+    assert!(matches!(
+        rig.broker.switch_environment("uat"),
+        Reply::Switched(_)
+    ));
+    assert_eq!(
+        account.status()["gateway"],
+        json!({"url": UAT, "reachable": null, "checked_at": null, "error": null})
+    );
+
+    account.poll();
+    assert_eq!(
+        account.status()["gateway"],
+        json!({"url": UAT, "reachable": false, "checked_at": rfc3339(NOW), "error": "connection refused"})
+    );
 }
 
 #[test]
