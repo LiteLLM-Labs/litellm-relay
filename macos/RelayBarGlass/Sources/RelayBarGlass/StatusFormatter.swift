@@ -1,5 +1,12 @@
 import Foundation
 
+enum GatewayState: Equatable {
+    case reachable
+    case unreachable
+    case checking
+    case unknown
+}
+
 enum StatusFormatter {
     static let defaultRelayPort = 4142
 
@@ -8,33 +15,59 @@ enum StatusFormatter {
     }
 
     static func yamlScalar(_ yaml: String, section: String, key: String) -> String? {
+        let text = yaml.hasPrefix("\u{FEFF}") ? String(yaml.dropFirst()) : yaml
         var inSection = false
-        for rawLine in yaml.split(separator: "\n") {
+        for rawLine in text.split(whereSeparator: \.isNewline) {
             let line = String(rawLine)
             let content = line.components(separatedBy: " #").first ?? line
             let trimmed = content.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
             let indented = line.first == " " || line.first == "\t"
             if !indented {
-                inSection = trimmed == "\(section):"
+                let entry = mappingEntry(trimmed)
+                inSection = entry?.key == section
+                if inSection, let flow = entry?.value, flow.hasPrefix("{") {
+                    return flowValue(flow, key: key)
+                }
                 continue
             }
-            guard inSection, trimmed.hasPrefix("\(key):") else { continue }
-            let value = trimmed.dropFirst(key.count + 1)
-                .trimmingCharacters(in: .whitespaces)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return value.isEmpty ? nil : value
+            guard inSection, let entry = mappingEntry(trimmed), entry.key == key else { continue }
+            return entry.value.isEmpty ? nil : entry.value
         }
         return nil
     }
 
+    private static func mappingEntry(_ text: String) -> (key: String, value: String)? {
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        return (unquoted(text[..<colon]), unquoted(text[text.index(after: colon)...]))
+    }
+
+    private static func flowValue(_ flow: String, key: String) -> String? {
+        let inner = flow.trimmingCharacters(in: CharacterSet(charactersIn: "{} "))
+        let value = inner.split(separator: ",")
+            .compactMap { mappingEntry(String($0)) }
+            .first { $0.key == key }?
+            .value
+        return value?.isEmpty == false ? value : nil
+    }
+
+    private static func unquoted(_ text: Substring) -> String {
+        text.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+    }
+
     static func timestamp(_ text: String?) -> Date? {
         guard let text else { return nil }
+        let zoned = hasZone(text) ? text : text + "Z"
         let plain = ISO8601DateFormatter()
-        if let date = plain.date(from: text) { return date }
+        if let date = plain.date(from: zoned) { return date }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: text)
+        return fractional.date(from: zoned)
+    }
+
+    private static func hasZone(_ text: String) -> Bool {
+        guard let time = text.split(separator: "T", maxSplits: 1).dropFirst().first else { return true }
+        return time.contains { "Zz+-".contains($0) }
     }
 
     static func countdown(_ seconds: TimeInterval) -> String {
@@ -61,12 +94,13 @@ enum StatusFormatter {
         }
     }
 
-    static func budgetLine(team: TeamBudget?, error: String?) -> String {
+    static func budgetLine(team: TeamBudget?, error: String?, polled: Bool, timeZone: TimeZone = NSTimeZone.default) -> String {
         if let error, !error.isEmpty { return error }
-        guard let team, let spend = team.spend else { return "Budget not read yet" }
+        guard let team else { return polled ? "No team picked" : "Budget not read yet" }
+        guard let spend = team.spend else { return "Budget not read yet" }
         let spent = money(spend)
         guard let cap = team.maxBudget else { return "\(spent), no budget" }
-        let reset = timestamp(team.budgetResetAt).map { ", resets \(resetDay($0))" } ?? ""
+        let reset = timestamp(team.budgetResetAt).map { ", resets \(resetDay($0, timeZone: timeZone))" } ?? ""
         return "\(spent) of \(money(cap))\(reset)"
     }
 
@@ -74,12 +108,18 @@ enum StatusFormatter {
         String(format: "$%.2f", amount)
     }
 
-    static func resetDay(_ date: Date, timeZone: TimeZone = .gmt) -> String {
+    static func resetDay(_ date: Date, timeZone: TimeZone = NSTimeZone.default) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
         formatter.dateFormat = "d MMM"
         return formatter.string(from: date)
+    }
+
+    static func gatewayState(_ probe: GatewayProbe?) -> GatewayState {
+        guard let probe else { return .unknown }
+        guard probe.checkedAt != nil, let reachable = probe.reachable else { return .checking }
+        return reachable ? .reachable : .unreachable
     }
 
     static func displayName(broker: BrokerStatus?, account: AccountStatus?) -> String {
@@ -95,6 +135,17 @@ enum StatusFormatter {
     static func gatewayHost(_ url: String?) -> String? {
         guard let url, !url.isEmpty else { return nil }
         return URLComponents(string: url)?.host ?? url
+    }
+
+    static func commandFailure(_ outcome: CommandOutcome) -> String? {
+        switch outcome {
+        case .exited(let result):
+            return result.exitCode == 0 ? nil : failureMessage(stderr: result.stderr, exitCode: result.exitCode)
+        case .timedOut(let seconds):
+            return "The Relay daemon did not answer within \(String(format: "%g", seconds)) s"
+        case .cancelled:
+            return nil
+        }
     }
 
     static func failureMessage(stderr: String, exitCode: Int32) -> String {

@@ -37,24 +37,63 @@ import Testing
         #expect(StatusFormatter.timestamp("soon") == nil)
     }
 
+    @Test func timestampReadsATimeWithoutAZoneAsUTC() {
+        #expect(StatusFormatter.timestamp("2027-01-15T08:00:00") == StatusFormatter.timestamp("2027-01-15T08:00:00Z"))
+        #expect(StatusFormatter.timestamp("2027-01-15T08:00:00.123") == StatusFormatter.timestamp("2027-01-15T08:00:00.123Z"))
+        #expect(StatusFormatter.timestamp("2027-01-15T08:00:00-05:00")?.timeIntervalSince1970 == 1_800_018_000)
+    }
+
     @Test func budgetLineShowsSpendAgainstTheCap() {
         let team = TeamBudget(id: "team-a", alias: "Team A", spend: 12.4, maxBudget: 50, budgetResetAt: "2026-11-01T00:00:00+00:00")
-        #expect(StatusFormatter.budgetLine(team: team, error: nil) == "$12.40 of $50.00, resets 1 Nov")
+        #expect(StatusFormatter.budgetLine(team: team, error: nil, polled: true, timeZone: .gmt) == "$12.40 of $50.00, resets 1 Nov")
+        let unzoned = TeamBudget(id: "team-a", alias: "Team A", spend: 0, maxBudget: 100, budgetResetAt: "2026-11-01T00:00:00")
+        #expect(StatusFormatter.budgetLine(team: unzoned, error: nil, polled: true, timeZone: .gmt) == "$0.00 of $100.00, resets 1 Nov")
+    }
+
+    @Test func resetDayIsTheDayWhereTheUserIs() throws {
+        let tokyo = try #require(TimeZone(identifier: "Asia/Tokyo"))
+        let losAngeles = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let tokyoMidnight = try #require(StatusFormatter.timestamp("2026-11-01T00:00:00+09:00"))
+        #expect(StatusFormatter.resetDay(tokyoMidnight, timeZone: tokyo) == "1 Nov")
+        #expect(StatusFormatter.resetDay(tokyoMidnight, timeZone: losAngeles) == "31 Oct")
+
+        let previous = NSTimeZone.default
+        defer { NSTimeZone.default = previous }
+        NSTimeZone.default = tokyo
+        #expect(StatusFormatter.resetDay(tokyoMidnight) == "1 Nov")
+        let team = TeamBudget(id: "team-a", alias: nil, spend: 1, maxBudget: 2, budgetResetAt: "2026-11-01T00:00:00+09:00")
+        #expect(StatusFormatter.budgetLine(team: team, error: nil, polled: true) == "$1.00 of $2.00, resets 1 Nov")
     }
 
     @Test func budgetLineWithoutACapOrResetDate() {
         let uncapped = TeamBudget(id: "team-b", alias: nil, spend: 12.4, maxBudget: nil, budgetResetAt: nil)
-        #expect(StatusFormatter.budgetLine(team: uncapped, error: nil) == "$12.40, no budget")
+        #expect(StatusFormatter.budgetLine(team: uncapped, error: nil, polled: true, timeZone: .gmt) == "$12.40, no budget")
         let noReset = TeamBudget(id: "team-b", alias: nil, spend: 0.000062, maxBudget: 20, budgetResetAt: nil)
-        #expect(StatusFormatter.budgetLine(team: noReset, error: nil) == "$0.00 of $20.00")
+        #expect(StatusFormatter.budgetLine(team: noReset, error: nil, polled: true, timeZone: .gmt) == "$0.00 of $20.00")
     }
 
     @Test func budgetLineShowsTheErrorOrTheUnreadState() {
         let team = TeamBudget(id: "team-a", alias: nil, spend: 1, maxBudget: 2, budgetResetAt: nil)
-        #expect(StatusFormatter.budgetLine(team: team, error: "HTTP 403: not authorized") == "HTTP 403: not authorized")
+        #expect(StatusFormatter.budgetLine(team: team, error: "HTTP 403: not authorized", polled: true, timeZone: .gmt) == "HTTP 403: not authorized")
         let unread = TeamBudget(id: "relay-qa", alias: nil, spend: nil, maxBudget: nil, budgetResetAt: nil)
-        #expect(StatusFormatter.budgetLine(team: unread, error: nil) == "Budget not read yet")
-        #expect(StatusFormatter.budgetLine(team: nil, error: nil) == "Budget not read yet")
+        #expect(StatusFormatter.budgetLine(team: unread, error: nil, polled: false, timeZone: .gmt) == "Budget not read yet")
+        #expect(StatusFormatter.budgetLine(team: nil, error: nil, polled: false, timeZone: .gmt) == "Budget not read yet")
+    }
+
+    @Test func budgetLineSaysNoTeamIsPickedOnceTheAccountWasRead() {
+        #expect(StatusFormatter.budgetLine(team: nil, error: nil, polled: true, timeZone: .gmt) == "No team picked")
+    }
+
+    @Test func gatewayStateWaitsForTheFirstProbe() {
+        let never = GatewayProbe(url: "https://gateway.example.com", reachable: false, checkedAt: nil, error: nil)
+        let unprobed = GatewayProbe(url: "https://gateway.example.com", reachable: nil, checkedAt: nil, error: nil)
+        let up = GatewayProbe(url: "https://gateway.example.com", reachable: true, checkedAt: "2027-01-15T08:00:00Z", error: nil)
+        let down = GatewayProbe(url: "https://gateway.example.com", reachable: false, checkedAt: "2027-01-15T08:00:00Z", error: "timed out")
+        #expect(StatusFormatter.gatewayState(never) == .checking)
+        #expect(StatusFormatter.gatewayState(unprobed) == .checking)
+        #expect(StatusFormatter.gatewayState(up) == .reachable)
+        #expect(StatusFormatter.gatewayState(down) == .unreachable)
+        #expect(StatusFormatter.gatewayState(nil) == .unknown)
     }
 
     @Test func displayNameFallsBackFromNameToEmailToId() {
@@ -90,6 +129,14 @@ import Testing
         #expect(StatusFormatter.relayPort(configYAML: "relay:\n  port: many\n") == 4142)
     }
 
+    @Test func relayPortReadsCRLFAByteOrderMarkAndFlowStyle() {
+        #expect(StatusFormatter.relayPort(configYAML: "gateway:\r\n  url: https://g.example.com\r\nrelay:\r\n  port: 4200\r\n") == 4200)
+        #expect(StatusFormatter.relayPort(configYAML: "\u{FEFF}relay:\n  port: 4201\n") == 4201)
+        #expect(StatusFormatter.relayPort(configYAML: "relay: {port: 4202}\n") == 4202)
+        #expect(StatusFormatter.relayPort(configYAML: "gateway: {port: 9999}\nrelay: {host: 127.0.0.1, \"port\": 4203}  # pilot\n") == 4203)
+        #expect(StatusFormatter.relayPort(configYAML: "relay: {host: 127.0.0.1}\n") == 4142)
+    }
+
     @Test func gatewayHost() {
         #expect(StatusFormatter.gatewayHost("https://gateway.example.com/") == "gateway.example.com")
         #expect(StatusFormatter.gatewayHost("http://127.0.0.1:59621") == "127.0.0.1")
@@ -109,12 +156,19 @@ import Testing
         #expect(StatusFormatter.failureMessage(stderr: "", exitCode: 1) == "exited with status 1")
     }
 
+    @Test func commandFailureNamesATimeoutAndIgnoresACancel() {
+        #expect(StatusFormatter.commandFailure(.exited(CommandResult(exitCode: 0, stdout: "{}", stderr: ""))) == nil)
+        #expect(StatusFormatter.commandFailure(.exited(CommandResult(exitCode: 1, stdout: "", stderr: "boom\n"))) == "boom")
+        #expect(StatusFormatter.commandFailure(.timedOut(30)) == "The Relay daemon did not answer within 30 s")
+        #expect(StatusFormatter.commandFailure(.cancelled) == nil)
+    }
+
     @Test func commandArguments() {
         #expect(RelayCommand.signIn.arguments == ["sign-in"])
         #expect(RelayCommand.signOut.arguments == ["sign-out"])
         #expect(RelayCommand.recheck.arguments == ["recheck"])
-        #expect(RelayCommand.switchTeam("team-b").arguments == ["switch-team", "team-b"])
-        #expect(RelayCommand.switchEnvironment("uat").arguments == ["switch-environment", "uat"])
+        #expect(RelayCommand.switchTeam("-dev").arguments == ["switch-team", "--", "-dev"])
+        #expect(RelayCommand.switchEnvironment("--help").arguments == ["switch-environment", "--", "--help"])
         #expect(RelayCommand.switchTeam("x").kind == RelayCommand.switchTeam("y").kind)
     }
 
