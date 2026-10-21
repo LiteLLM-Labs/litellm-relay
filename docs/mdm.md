@@ -26,7 +26,7 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 | `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
 | Managed `config.yaml` | Gateway URL, IdP issuer and client id, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
-| `RelayBarGlass.app` (optional) | Menu bar app: sign-in state, key countdown, team and environment pickers, budget, MCP servers | Built into the `.pkg` by `scripts/build-macos-pkg.sh --relaybar`, installed at `/usr/local/litellm-relay/RelayBarGlass.app` |
+| `RelayBarGlass.app` (optional) | Menu bar app: sign-in state, key countdown, team and environment pickers, budget, MCP servers | Built into the `.pkg` by `scripts/build-macos-pkg.sh --relaybar` (or `--relaybar-app`), installed at `/usr/local/litellm-relay/RelayBarGlass.app` |
 
 The managed config can be baked into the `.pkg` at build time
 (`--config-file`) so no separate config delivery is needed:
@@ -57,20 +57,27 @@ entry has to be readable by other users. The builder stages the payload in a
 world-readable root and then runs
 [`scripts/macos-pkg/check-payload.sh`](../scripts/macos-pkg/check-payload.sh)
 on the built package, which fails the build and lists any entry other users
-could not read; run it by hand on any `.pkg` before uploading it to your MDM.
+could not read. Run it by hand on any `.pkg` before uploading it to your MDM.
+It checks every component package, including each one inside a
+`productbuild` distribution package, and it fails on a component that has no
+Bom, since that component's payload modes cannot be read.
 
 Add `--relaybar` (or set `RELAY_PKG_RELAYBAR=1`) to ship the RelayBar menu
 bar app in the same package. The build host needs `swift` on PATH, since the
 flag runs `macos/RelayBarGlass/build.sh` and copies the resulting
 `RelayBarGlass.app` into the payload at
-`/usr/local/litellm-relay/RelayBarGlass.app`; without `swift` the script
-prints a one-line skip and builds the package without the app. When the app is
-present, `install.sh` writes a second per-user LaunchAgent,
-`~/Library/LaunchAgents/ai.litellm.relaybar.plist` (label
-`ai.litellm.relaybar`), so the tray starts at login next to the daemon. The
-tray reads `relay.port` from the managed `config.yaml` (default 4142) and
-polls `http://127.0.0.1:<port>/api/status`; it holds no credential and
-persists nothing of its own.
+`/usr/local/litellm-relay/RelayBarGlass.app`. Without `swift` the build fails
+before it starts, so a package never ships without the app it was asked for.
+To package an app built elsewhere, pass `--relaybar-app path/to/RelayBarGlass.app`
+instead, which needs no `swift`. The package marks the app as not relocatable,
+so macOS installs it at that path even when another copy of the same bundle id
+is already on the Mac. When the app is present, `install.sh` writes a second
+per-user LaunchAgent, `~/Library/LaunchAgents/ai.litellm.relaybar.plist` (label
+`ai.litellm.relaybar`), so the tray starts at login next to the daemon. When
+it is missing, the install log warns that no menu bar app starts at login and
+names the path it looked at. The tray reads `relay.port` from the managed
+`config.yaml` (default 4142) and polls `http://127.0.0.1:<port>/api/status`.
+It holds no credential and persists nothing of its own.
 
 ## Manual pilot (one Mac, no MDM)
 
@@ -121,21 +128,24 @@ curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
    `http://127.0.0.1:4142/` and the Gateway on a pilot Mac.
 5. **Broaden.** Change the assignment to the full device group.
 
-An Intune trusted-certificate profile cannot pre-trust Relay's CA, because the
-daemon generates that CA per device; see
+By default the daemon generates Relay's CA on each device, so an Intune
+trusted-certificate profile cannot pre-trust it. With payload capture on, a
+fleet CA can go in that profile instead; see
 [CA trust on managed devices](#ca-trust-on-managed-devices).
 
 ## Kandji
 
 1. Upload the `.pkg` as a **Custom App**, audit-and-enforce or install-once.
 2. Add a **Custom Profile** with the PAC payload above.
-3. Skip Certificate Library Items: the Relay CA is per device (see
+3. Skip Certificate Library Items unless payload capture is on and you use a
+   fleet CA, since the Relay CA is otherwise per device (see
    [CA trust on managed devices](#ca-trust-on-managed-devices)).
 
 ## CA trust on managed devices
 
 Relay's CA ("LiteLLM Relay Local Root CA") is generated on each device by the
-daemon, so no fleet-wide trust profile can carry it, and only payload capture
+daemon unless you supply a fleet CA (below), so by default no fleet-wide trust
+profile can carry it, and only payload capture
 (`capture.payloads: true`) ever needs it: the Claude Code, Codex, and Claude
 Desktop flows go to the Gateway through the credential broker, and with
 payload capture off the proxy tunnels TLS without decrypting it. The `.pkg`
@@ -143,11 +153,40 @@ install therefore trusts the CA in the user's login keychain only when the
 managed config sets `capture.payloads: true`. That step raises the macOS
 "Certificate Trust Settings" password sheet on the device, and the install log
 (`/var/log/install.log`) says so before it appears; a cancelled sheet logs a
-warning with the command to run later, and the install carries on. With the
-default `capture.payloads: false` the install logs that it skipped CA trust and
-why, no sheet appears, and nothing is left for `--remove-ca-trust` to remove.
+warning with the command to run later, and the install carries on. A CA that
+macOS already trusts, such as the fleet CA below, is logged as already trusted
+and raises no sheet. With the default `capture.payloads: false` the install
+logs that it skipped CA trust and why, and no sheet appears. When an earlier
+install trusted a Relay CA in the login keychain, that trust is still there,
+so the log says so and prints one `security delete-certificate -Z <SHA-1> -t`
+command per certificate to run from the user's session. An install outside
+the user's GUI session cannot read that trust and logs that instead.
 `install.sh` run by hand (no `--config-file` or `--skip-setup`) keeps trusting
 the CA by default, since a person is there to answer the sheet.
+
+With payload capture on, a fleet CA avoids the sheet on every device. Generate
+one CA on a secure host with the settings Relay itself uses:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 825 \
+  -subj "/CN=LiteLLM Relay Local Root CA" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -keyout litellm-relay-ca-key.pem -out litellm-relay-ca.pem
+```
+
+Push `litellm-relay-ca.pem` as a certificate payload in a configuration
+profile (a Jamf Certificate payload, an Intune trusted certificate profile, or
+a Kandji Certificate Library Item), which macOS trusts without a sheet. Before
+the package installs, have an MDM script write both files to each user's
+`~/.litellm-relay/mitm` (or the `relay.mitm_ca_dir` the managed config sets),
+owned by that user and with the key at mode 0600. Never put the key in the
+package, since every account on the Mac can read its payload. The daemon uses
+the CA it finds there instead of generating one, and the install sees it is
+already trusted. The tradeoff is that one key signs for every Mac in the
+fleet, so whoever copies it from one Mac can intercept TLS on all of them.
+Keep the per-device CA when that risk is not acceptable. Removing the profile
+removes its trust, while `--remove-ca-trust` only touches the login keychain.
 
 ## Offboarding / uninstall
 
@@ -167,9 +206,11 @@ the menu bar app.
 from the login keychain, including one a reinstall left behind, and its trust
 setting. A trusted one needs the account password in the Certificate Trust
 Settings sheet, which macOS shows only in the user's GUI session, so run that
-flag from a Terminal in that session; over ssh or from an MDM script the trust
-change is denied and the uninstaller prints which certificate stayed, its
-trust state, why, and the command to finish from the session.
+flag from a Terminal in that session. Over ssh or from an MDM script the trust
+change is denied, and the uninstaller prints the SHA-1 and trust state of each
+certificate that stayed, why, and one `security delete-certificate -Z <SHA-1>
+-t` command per certificate to finish from the session. Run as root, it looks
+in the console user's login keychain rather than root's.
 
 ## Credential broker
 
@@ -324,7 +365,9 @@ Gateway refuses writes the previous values back and answers `switch_failed`
 with the Gateway's reason; a name missing from the list answers
 `unknown_environment` with the configured names. Without an `environments`
 list the daemon serves the one `gateway.url`, and `relay switch-team` still
-works against it
+works against it. The root Claude Desktop LaunchDaemon watches `config.yaml`,
+so it rewrites Claude Desktop's managed settings within seconds of a switch,
+and Claude Desktop picks up the switch after it restarts
 
 ## Local inference proxy
 
