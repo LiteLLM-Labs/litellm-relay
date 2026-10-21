@@ -214,19 +214,21 @@ impl AccountService {
     pub fn status(&self) -> Value {
         let broker = self.broker.status();
         let state = self.lock_state();
-        let teams = state.teams.as_ref().map(|teams| {
+        let session = (state.identity == identity_of(&broker)).then_some(&*state);
+        let known_teams = session.and_then(|session| session.teams.as_ref());
+        let teams = known_teams.map(|teams| {
             teams
                 .iter()
                 .map(|team| json!({ "id": team.id, "alias": team.alias }))
                 .collect::<Vec<Value>>()
         });
         let team = broker.team.as_ref().map(|id| {
-            let alias = state
-                .teams
-                .as_ref()
+            let alias = known_teams
                 .and_then(|teams| teams.iter().find(|team| &team.id == id))
                 .and_then(|team| team.alias.clone());
-            let budget = state.budget.as_ref().filter(|budget| &budget.team == id);
+            let budget = session
+                .and_then(|session| session.budget.as_ref())
+                .filter(|budget| &budget.team == id);
             json!({
                 "id": id,
                 "alias": alias,
@@ -236,18 +238,21 @@ impl AccountService {
             })
         });
         json!({
-            "user": { "id": broker.user_id, "email": state.user_email },
+            "user": {
+                "id": broker.user_id,
+                "email": session.and_then(|session| session.user_email.as_ref()),
+            },
             "teams": teams,
-            "teams_error": state.teams_error,
+            "teams_error": session.and_then(|session| session.teams_error.as_ref()),
             "team": team,
-            "budget_error": state.budget_error,
+            "budget_error": session.and_then(|session| session.budget_error.as_ref()),
             "gateway": {
                 "url": state.gateway.url,
                 "reachable": state.gateway.reachable,
                 "checked_at": state.gateway.checked_at.map(rfc3339),
                 "error": state.gateway.error,
             },
-            "polled_at": state.polled_at.map(rfc3339),
+            "polled_at": session.and_then(|session| session.polled_at).map(rfc3339),
         })
     }
 

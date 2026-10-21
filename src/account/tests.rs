@@ -277,6 +277,35 @@ fn should_clear_the_account_when_signed_out_and_still_probe_the_gateway() {
 }
 
 #[test]
+fn should_drop_the_previous_session_account_from_status_before_the_next_poll() {
+    let (rig, _http, account) = signed_in();
+    rig.settings.set(environments_settings());
+    account.poll();
+    assert_eq!(account.status()["user"]["email"], "dev@example.com");
+
+    rig.broker.sign_out();
+    let signed_out = account.status();
+    assert_eq!(signed_out["user"], json!({"id": null, "email": null}));
+    assert_eq!(signed_out["teams"], Value::Null);
+    assert_eq!(
+        signed_out["team"],
+        json!({"id": "team-a", "alias": null, "spend": null, "max_budget": null, "budget_reset_at": null})
+    );
+    assert_eq!(signed_out["polled_at"], Value::Null);
+
+    assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
+    account.poll();
+    assert_eq!(account.status()["teams"].as_array().map(Vec::len), Some(2));
+    assert!(matches!(
+        rig.broker.switch_environment("uat"),
+        Reply::Switched(_)
+    ));
+    let moved = account.status();
+    assert_eq!(moved["teams"], Value::Null);
+    assert_eq!(moved["user"]["email"], Value::Null);
+}
+
+#[test]
 fn should_fetch_at_once_after_a_team_switch_and_after_an_environment_switch() {
     let (rig, http, account) = signed_in();
     rig.settings.set(environments_settings());
