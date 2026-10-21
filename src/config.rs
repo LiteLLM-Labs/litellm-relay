@@ -1,12 +1,15 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     fs,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_saphyr::granit_parser::{Event, Marker, Parser, ScalarStyle, Span, Tag};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
 use crate::{broker::caller::AllowedCaller, system::home_dir};
@@ -222,9 +225,12 @@ impl RelaySettings {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RelaySection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub host: String,
     pub port: u16,
+    #[serde(deserialize_with = "null_as_empty")]
     pub log_path: PathBuf,
+    #[serde(deserialize_with = "null_as_empty")]
     pub mitm_ca_dir: PathBuf,
 }
 
@@ -243,6 +249,7 @@ impl Default for RelaySection {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GatewaySection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -288,6 +295,7 @@ impl GatewaySection {
 #[serde(default)]
 pub struct ShadowSection {
     pub enabled: bool,
+    #[serde(deserialize_with = "null_as_empty")]
     pub model: String,
     pub min_interval_seconds: u64,
 }
@@ -313,7 +321,9 @@ pub struct CaptureSection {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DomainSection {
+    #[serde(deserialize_with = "null_items_as_empty")]
     pub notion: Vec<String>,
+    #[serde(deserialize_with = "null_items_as_empty")]
     pub ai: Vec<String>,
 }
 
@@ -343,13 +353,15 @@ impl Default for TimeoutSection {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IdpSection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub issuer: String,
+    #[serde(deserialize_with = "null_as_empty")]
     pub client_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, deserialize_with = "null_as_empty")]
     pub authorize_url: String,
 }
 
@@ -398,6 +410,7 @@ pub struct IdpOverrides {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ClaudeSection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -419,7 +432,9 @@ impl Default for ClaudeSection {
 /// autoconfigure reruns can rebuild the same single sign-on document.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct DesktopSso {
+    #[serde(deserialize_with = "null_as_empty")]
     pub client_id: String,
+    #[serde(deserialize_with = "null_as_empty")]
     pub issuer: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<String>,
@@ -430,7 +445,9 @@ pub struct DesktopSso {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CodexSection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub model: String,
+    #[serde(deserialize_with = "null_as_empty")]
     pub provider_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -461,7 +478,10 @@ pub const DEFAULT_MCP_TOOL_PREFIX_SEPARATOR: &str = "-";
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct McpSection {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_null_items_as_empty"
+    )]
     pub allow: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_calls: Option<usize>,
@@ -502,7 +522,7 @@ pub fn load_settings() -> Result<RelaySettings> {
     if path.exists() {
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        return serde_yaml::from_str(&contents)
+        return parse_settings(&contents)
             .with_context(|| format!("failed to parse {}", path.display()));
     }
 
@@ -517,7 +537,7 @@ pub fn load_settings() -> Result<RelaySettings> {
 pub fn carry_selection(previous: &Path) -> Result<String> {
     let contents = fs::read_to_string(previous)
         .with_context(|| format!("failed to read {}", previous.display()))?;
-    let previous: RelaySettings = serde_yaml::from_str(&contents)
+    let previous = parse_settings(&contents)
         .with_context(|| format!("failed to parse {}", previous.display()))?;
     match load_settings()?.carrying_selection_from(&previous) {
         CarriedSelection::Carried { settings, summary } => {
@@ -535,7 +555,7 @@ pub fn save_settings(settings: &RelaySettings) -> Result<PathBuf> {
 }
 
 fn save_settings_to(path: &Path, settings: &RelaySettings) -> Result<()> {
-    let contents = serde_yaml::to_string(settings).context("failed to serialize Relay config")?;
+    let contents = settings_yaml(settings).context("failed to serialize Relay config")?;
     if is_saved_owner_only(path, &contents) {
         return Ok(());
     }
@@ -566,6 +586,235 @@ fn is_saved_owner_only(path: &Path, contents: &str) -> bool {
     {
         true
     }
+}
+
+fn parse_settings(contents: &str) -> Result<RelaySettings, serde_saphyr::Error> {
+    serde_saphyr::from_str_with_options(
+        &as_serde_yaml_0_9_read(contents),
+        serde_saphyr::options! {
+            merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+            duplicate_keys: serde_saphyr::DuplicateKeyPolicy::LastWins,
+            with_snippet: false,
+        },
+    )
+}
+
+pub(crate) fn null_as_empty<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_items_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(empty_for_null_items(Vec::deserialize(deserializer)?))
+}
+
+fn optional_null_items_as_empty<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.map(empty_for_null_items))
+}
+
+fn empty_for_null_items(items: Vec<Option<String>>) -> Vec<String> {
+    items.into_iter().map(Option::unwrap_or_default).collect()
+}
+
+enum OpenNode {
+    Mapping { next_is_key: bool },
+    Sequence,
+}
+
+fn as_serde_yaml_0_9_read(contents: &str) -> Cow<'_, str> {
+    let edits = serde_yaml_0_9_edits(contents);
+    if edits.is_empty() {
+        return Cow::Borrowed(contents);
+    }
+    let mut rewritten = String::with_capacity(contents.len() + 2 * edits.len());
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        rewritten.push_str(&contents[copied..range.start]);
+        rewritten.push_str(&replacement);
+        copied = range.end;
+    }
+    rewritten.push_str(&contents[copied..]);
+    Cow::Owned(rewritten)
+}
+
+fn serde_yaml_0_9_edits(contents: &str) -> Vec<(Range<usize>, String)> {
+    let mut parser = Parser::new_from_str(contents);
+    let mut open = Vec::new();
+    let mut edits = Vec::new();
+    let mut previous_end = 0;
+    while let Some(parsed) = parser.next_event() {
+        let Ok((event, span)) = parsed else {
+            return Vec::new();
+        };
+        let is_key = matches!(open.last(), Some(OpenNode::Mapping { next_is_key: true }));
+        let since_previous = previous_end;
+        previous_end = span.end.byte_offset().unwrap_or(previous_end);
+        match event {
+            Event::Scalar(value, style, anchor_id, tag) => {
+                let scalar = ScalarAt {
+                    value: &value,
+                    is_null_word: style == ScalarStyle::Plain && is_null_like(&value),
+                    anchored: anchor_id != 0,
+                    tag: tag.as_deref(),
+                    span,
+                };
+                let key_after = is_key.then_some(since_previous);
+                edits.extend(scalar_edits(contents, scalar, key_after));
+                finish_node(&mut open);
+            }
+            Event::Alias(_) => finish_node(&mut open),
+            Event::MappingStart(..) => open.push(OpenNode::Mapping { next_is_key: true }),
+            Event::SequenceStart(..) => open.push(OpenNode::Sequence),
+            Event::MappingEnd | Event::SequenceEnd => {
+                open.pop();
+                finish_node(&mut open);
+            }
+            _ => {}
+        }
+    }
+    edits
+}
+
+#[derive(Clone, Copy)]
+struct ScalarAt<'a> {
+    value: &'a str,
+    is_null_word: bool,
+    anchored: bool,
+    tag: Option<&'a Tag>,
+    span: Span,
+}
+
+fn scalar_edits(
+    contents: &str,
+    scalar: ScalarAt,
+    key_after: Option<usize>,
+) -> Vec<(Range<usize>, String)> {
+    let ScalarAt {
+        value,
+        is_null_word,
+        anchored,
+        tag,
+        span,
+    } = scalar;
+    let has_value = span.start.index() < span.end.index();
+    let tagged_null = tag.is_some_and(|tag| tag.core_suffix() == Some("null"));
+    match (span.tag_start, has_value) {
+        (None, true) => key_after
+            .filter(|_| is_null_word)
+            .and_then(|_| quoted_null_word(value, span))
+            .into_iter()
+            .collect(),
+        (None, false) => key_after
+            .and_then(|key_after| quoted_empty_key(contents, key_after, span, anchored))
+            .into_iter()
+            .collect(),
+        (Some(tag_start), true) => {
+            let reads_as_text = is_null_word && (key_after.is_some() || !tagged_null);
+            tag_token(contents, tag_start)
+                .map(|range| (range, String::new()))
+                .into_iter()
+                .chain(
+                    reads_as_text
+                        .then(|| quoted_null_word(value, span))
+                        .flatten(),
+                )
+                .collect()
+        }
+        (Some(tag_start), false) => {
+            let empty = if key_after.is_some() { "''" } else { "~" };
+            untagged_empty_node(contents, tag_start, span, empty)
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+fn untagged_empty_node(
+    contents: &str,
+    tag_start: Marker,
+    span: Span,
+    empty: &str,
+) -> Option<(Range<usize>, String)> {
+    let properties = tag_start.byte_offset()?..span.start.byte_offset()?;
+    let other_properties = contents.get(tag_end(contents, properties.start)?..properties.end)?;
+    let node = match other_properties {
+        "" => empty.to_string(),
+        anchor => format!("{anchor} {empty}"),
+    };
+    Some((properties, node))
+}
+
+fn quoted_null_word(value: &str, span: Span) -> Option<(Range<usize>, String)> {
+    let word = span.start.byte_offset()?..span.end.byte_offset()?;
+    Some((word, format!("'{value}'")))
+}
+
+fn quoted_empty_key(
+    contents: &str,
+    key_after: usize,
+    span: Span,
+    anchored: bool,
+) -> Option<(Range<usize>, String)> {
+    let key_start = span.start.byte_offset()?;
+    let gap = contents.get(key_after..key_start)?;
+    let in_comment = |at: usize| {
+        gap[..at]
+            .rsplit('\n')
+            .next()
+            .is_some_and(|line| line.contains('#'))
+    };
+    let (at, _) = gap.match_indices('?').find(|&(at, _)| !in_comment(at))?;
+    let key_end = if anchored {
+        key_start
+    } else {
+        key_after + at + 1
+    };
+    Some((key_end..key_end, " ''".to_string()))
+}
+
+fn finish_node(open: &mut [OpenNode]) {
+    if let Some(OpenNode::Mapping { next_is_key }) = open.last_mut() {
+        *next_is_key = !*next_is_key;
+    }
+}
+
+fn is_null_like(value: &str) -> bool {
+    value == "~" || value.eq_ignore_ascii_case("null")
+}
+
+fn tag_token(contents: &str, start: Marker) -> Option<Range<usize>> {
+    let start = start.byte_offset()?;
+    let end = tag_end(contents, start)?;
+    let separator_len =
+        contents[end..].len() - contents[end..].trim_start_matches([' ', '\t']).len();
+    Some(start..end + separator_len)
+}
+
+fn tag_end(contents: &str, start: usize) -> Option<usize> {
+    let tag = contents.get(start..).filter(|rest| rest.starts_with('!'))?;
+    let tag_len = match tag.strip_prefix("!<") {
+        Some(verbatim) => verbatim.find('>')? + 3,
+        None => tag
+            .find(|c: char| c.is_whitespace() || ",[]{}".contains(c))
+            .unwrap_or(tag.len()),
+    };
+    Some(start + tag_len)
+}
+
+fn settings_yaml(settings: &RelaySettings) -> Result<String, serde_saphyr::SerializeError> {
+    serde_saphyr::to_string_with_options(
+        settings,
+        serde_saphyr::ser_options! { prefer_block_scalars: false },
+    )
 }
 
 pub fn normalize_host(host: &str) -> String {
@@ -691,7 +940,7 @@ mod tests {
 
     #[test]
     fn should_load_partial_yaml_with_defaults() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             r#"
 gateway:
   url: https://gateway.example.com
@@ -715,7 +964,7 @@ capture:
 
     #[test]
     fn should_read_the_mcp_allow_list_call_cap_and_separator_from_yaml() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             "mcp:\n  allow:\n    - github-get_issue\n    - Jira-searchIssues\n  max_concurrent_calls: 4\n  tool_prefix_separator: \"__\"\n",
         )
         .expect("settings");
@@ -733,11 +982,10 @@ capture:
     #[test]
     fn should_default_the_mcp_call_cap_and_separator_when_missing_zero_or_empty() {
         let missing: RelaySettings =
-            serde_yaml::from_str("gateway:\n  url: https://g\n").expect("settings");
-        let zero: RelaySettings = serde_yaml::from_str(
-            "mcp:\n  max_concurrent_calls: 0\n  tool_prefix_separator: \"\"\n",
-        )
-        .expect("settings");
+            parse_settings("gateway:\n  url: https://g\n").expect("settings");
+        let zero: RelaySettings =
+            parse_settings("mcp:\n  max_concurrent_calls: 0\n  tool_prefix_separator: \"\"\n")
+                .expect("settings");
         assert!(missing.mcp.allowed_tools().is_empty());
         assert_eq!(missing.mcp.concurrent_call_cap(), 16);
         assert_eq!(missing.mcp.tool_prefix_separator(), "-");
@@ -747,7 +995,7 @@ capture:
 
     #[test]
     fn should_load_gateway_section_without_credential_timestamps() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             r#"
 gateway:
   url: https://gateway.example.com
@@ -782,8 +1030,8 @@ gateway:
             ..RelaySettings::default()
         };
 
-        let yaml = serde_yaml::to_string(&settings).unwrap();
-        let reloaded: RelaySettings = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = settings_yaml(&settings).unwrap();
+        let reloaded: RelaySettings = parse_settings(&yaml).unwrap();
 
         assert_eq!(reloaded.gateway.enrolled_at, Some(enrolled_at));
         assert_eq!(reloaded.gateway.expires_at, Some(expires_at));
@@ -839,7 +1087,7 @@ gateway:
 
     #[test]
     fn should_omit_unset_credential_timestamps_from_yaml() {
-        let yaml = serde_yaml::to_string(&RelaySettings::default()).unwrap();
+        let yaml = settings_yaml(&RelaySettings::default()).unwrap();
 
         assert!(!yaml.contains("enrolled_at"), "{yaml}");
         assert!(!yaml.contains("expires_at"), "{yaml}");
@@ -856,7 +1104,7 @@ gateway:
 
     #[test]
     fn should_preserve_explicit_capture_limits() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             r#"
 capture:
   payloads: true
@@ -952,7 +1200,7 @@ capture:
     #[test]
     fn should_point_a_legacy_authorize_url_config_at_the_oidc_flags() {
         let legacy: RelaySettings =
-            serde_yaml::from_str("idp:\n  authorize_url: https://login.example.com/authorize\n")
+            parse_settings("idp:\n  authorize_url: https://login.example.com/authorize\n")
                 .expect("legacy settings yaml should parse");
 
         assert!(!legacy.idp.is_configured());
@@ -985,7 +1233,7 @@ codex:
 
     #[test]
     fn should_parse_the_environments_list_and_the_selected_team() {
-        let settings: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
 
         assert_eq!(settings.gateway.team.as_deref(), Some("picked"));
         assert_eq!(
@@ -1021,8 +1269,7 @@ codex:
 
     #[test]
     fn should_match_the_current_environment_by_url_ignoring_one_trailing_slash() {
-        let mut settings: RelaySettings =
-            serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        let mut settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
         assert_eq!(settings.current_environment().unwrap().name, "uat");
 
         settings.gateway.url = "https://uat.example.com".into();
@@ -1042,8 +1289,7 @@ codex:
 
     #[test]
     fn should_pick_the_managed_team_from_gateway_then_environment_then_claude_then_codex() {
-        let mut settings: RelaySettings =
-            serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        let mut settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
         settings.gateway.url = "https://prod.example.com".into();
         assert_eq!(settings.managed_team().as_deref(), Some("picked"));
 
@@ -1064,40 +1310,33 @@ codex:
     }
 
     #[test]
-    fn should_save_a_config_without_environments_or_a_picked_team_exactly_as_before() {
-        let mut settings: RelaySettings =
-            serde_yaml::from_str(include_str!("../mdm/config.yaml.example")).expect("settings");
-        settings.relay.log_path = PathBuf::from("/managed/relay.log.jsonl");
-        settings.relay.mitm_ca_dir = PathBuf::from("/managed/mitm");
-        settings.domains.notion = vec!["notion.so".into()];
-        settings.domains.ai = vec!["api.anthropic.com".into()];
+    fn should_save_a_config_without_environments_or_a_picked_team_with_none_of_their_keys() {
+        let settings: RelaySettings =
+            parse_settings(include_str!("../mdm/config.yaml.example")).expect("settings");
 
-        let saved = serde_yaml::to_string(&settings).expect("settings should serialize");
+        let saved = settings_yaml(&settings).expect("settings should serialize");
 
+        let keys: Vec<&str> = saved
+            .lines()
+            .filter_map(|line| line.trim_start().split(':').next())
+            .collect();
+        for absent in ["environments", "team", "team_by_environment"] {
+            assert!(!keys.contains(&absent), "{absent} saved in {saved}");
+        }
+        let reloaded = parse_settings(&saved).expect("saved settings parse");
         assert_eq!(
-            saved,
-            "relay:\n  host: 127.0.0.1\n  port: 4142\n  log_path: /managed/relay.log.jsonl\n  mitm_ca_dir: /managed/mitm\n\
-             gateway:\n  url: https://litellm-gateway.your-company.com\n\
-             shadow:\n  enabled: true\n  model: gpt-4o-mini\n  min_interval_seconds: 60\n\
-             capture:\n  payloads: false\n  payload_preview_bytes: 0\n  payload_body_bytes: 0\n\
-             domains:\n  notion:\n  - notion.so\n  ai:\n  - api.anthropic.com\n\
-             timeouts:\n  request_seconds: 10.0\n\
-             idp:\n  issuer: https://login.microsoftonline.com/<tenant-id>/v2.0\n  client_id: <app-client-id>\n\
-             claude:\n  model: claude-sonnet-4-5\n\
-             codex:\n  model: gpt-5-codex\n  provider_id: litellm\n\
-             credential: {}\nmcp: {}\n"
+            format!("{reloaded:#?}"),
+            format!("{settings:#?}"),
+            "{saved}"
         );
-        let reloaded: RelaySettings = serde_yaml::from_str(&saved).expect("saved settings parse");
-        assert!(reloaded.environments.is_empty());
-        assert_eq!(reloaded.gateway.team, None);
     }
 
     #[test]
     fn should_round_trip_environments_and_the_picked_team_through_yaml() {
-        let settings: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
 
-        let saved = serde_yaml::to_string(&settings).expect("settings should serialize");
-        let reloaded: RelaySettings = serde_yaml::from_str(&saved).expect("saved settings parse");
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+        let reloaded: RelaySettings = parse_settings(&saved).expect("saved settings parse");
 
         assert_eq!(reloaded.environments, settings.environments);
         assert_eq!(reloaded.gateway.team.as_deref(), Some("picked"));
@@ -1122,7 +1361,7 @@ codex:
     fn should_leave_config_yaml_untouched_when_a_save_changes_nothing() {
         let dir = std::env::temp_dir().join(format!("relay-config-save-{}", uuid::Uuid::new_v4()));
         let path = dir.join("config.yaml");
-        let settings: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
         save_settings_to(&path, &settings).expect("first save");
         let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
         fs::File::options()
@@ -1140,7 +1379,7 @@ codex:
         moved.gateway.team = Some("another-team".into());
         save_settings_to(&path, &moved).expect("changed save");
         let reread: RelaySettings =
-            serde_yaml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+            parse_settings(&fs::read_to_string(&path).expect("read")).expect("parse");
         fs::remove_dir_all(&dir).expect("cleanup");
 
         assert_eq!(after_unchanged, long_ago);
@@ -1149,13 +1388,12 @@ codex:
 
     #[test]
     fn should_carry_the_picked_environment_and_teams_into_a_new_managed_config_by_name() {
-        let mut previous: RelaySettings =
-            serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        let mut previous: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
         previous.gateway.team_by_environment = BTreeMap::from([
             ("prod".into(), "prod-pick".into()),
             ("gone".into(), "x".into()),
         ]);
-        let managed: RelaySettings = serde_yaml::from_str(
+        let managed: RelaySettings = parse_settings(
             "gateway:\n  url: https://prod.example.com\nenvironments:\n  - name: prod\n    url: https://prod.example.com\n  - name: uat\n    url: https://uat-v2.example.com\nclaude:\n  model: new-model\n",
         )
         .expect("settings");
@@ -1178,8 +1416,8 @@ codex:
 
     #[test]
     fn should_carry_nothing_when_the_new_config_drops_the_picked_environment() {
-        let previous: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
-        let managed: RelaySettings = serde_yaml::from_str(
+        let previous: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        let managed: RelaySettings = parse_settings(
             "gateway:\n  url: https://prod.example.com\nenvironments:\n  - name: prod\n    url: https://prod.example.com\n",
         )
         .expect("settings");
@@ -1193,12 +1431,12 @@ codex:
     #[test]
     fn should_carry_the_team_only_while_a_single_gateway_config_keeps_the_same_url() {
         let previous: RelaySettings =
-            serde_yaml::from_str("gateway:\n  url: https://gw.example.com/\n  team: eng\n")
+            parse_settings("gateway:\n  url: https://gw.example.com/\n  team: eng\n")
                 .expect("settings");
         let same: RelaySettings =
-            serde_yaml::from_str("gateway:\n  url: https://gw.example.com\n").expect("settings");
+            parse_settings("gateway:\n  url: https://gw.example.com\n").expect("settings");
         let moved: RelaySettings =
-            serde_yaml::from_str("gateway:\n  url: https://gw2.example.com\n").expect("settings");
+            parse_settings("gateway:\n  url: https://gw2.example.com\n").expect("settings");
 
         let (settings, summary) = carried(same.carrying_selection_from(&previous));
         assert_eq!(settings.gateway.team.as_deref(), Some("eng"));
@@ -1213,12 +1451,12 @@ codex:
 
     #[test]
     fn should_drop_the_legacy_authorize_url_when_saving() {
-        let legacy: RelaySettings = serde_yaml::from_str(
+        let legacy: RelaySettings = parse_settings(
             "idp:\n  authorize_url: https://login.example.com/authorize\n  issuer: https://login.example.com\n  client_id: client-1\n",
         )
         .expect("settings yaml should parse");
 
-        let saved = serde_yaml::to_string(&legacy).expect("settings should serialize");
+        let saved = settings_yaml(&legacy).expect("settings should serialize");
 
         assert!(!saved.contains("authorize_url"), "{saved}");
         assert!(
@@ -1226,5 +1464,440 @@ codex:
             "{saved}"
         );
         assert!(saved.contains("client_id: client-1"), "{saved}");
+    }
+
+    const SERDE_YAML_0_9_SAVED_CONFIG: &str = r#"relay:
+  host: 127.0.0.1
+  port: 4143
+  log_path: /Users/dev/.litellm-relay/relay.log.jsonl
+  mitm_ca_dir: /Users/dev/.litellm-relay/mitm
+gateway:
+  url: https://gateway.example.com
+  api_key: sk-1234abcd
+  enrolled_at: 2026-09-21T21:27:58Z
+  expires_at: 2026-09-22T21:27:58.096Z
+shadow:
+  enabled: true
+  model: gpt-4o-mini
+  min_interval_seconds: 90
+capture:
+  payloads: true
+  payload_preview_bytes: 8192
+  payload_body_bytes: 262144
+domains:
+  notion: []
+  ai:
+  - api.openai.com
+  - api.anthropic.com
+timeouts:
+  request_seconds: 2.5
+idp:
+  issuer: https://login.microsoftonline.com/tenant-id/v2.0
+  client_id: client-1
+  scopes: openid profile email offline_access
+  redirect_port: 8765
+claude:
+  model: claude-sonnet-4-5
+  team: team-claude
+  desktop_sso:
+    client_id: desktop-client
+    issuer: https://login.microsoftonline.com/tenant-id/v2.0
+    scopes: openid profile email
+    redirect_port: 53180
+codex:
+  model: gpt-5-codex
+  provider_id: litellm
+  team: team-codex
+credential:
+  allowed_callers:
+  - identifier: com.anthropic.claude-code
+    team_id: Q6L2SF6YDW
+  - identifier: codex
+mcp:
+  allow:
+  - github-get_issue
+  - Jira-searchIssues
+  max_concurrent_calls: 4
+  tool_prefix_separator: '-'
+"#;
+
+    #[test]
+    fn should_load_every_field_of_a_config_saved_by_serde_yaml_0_9() {
+        let settings =
+            parse_settings(SERDE_YAML_0_9_SAVED_CONFIG).expect("settings yaml should parse");
+        let issuer = "https://login.microsoftonline.com/tenant-id/v2.0";
+
+        assert_eq!(settings.relay.host, "127.0.0.1");
+        assert_eq!(settings.relay.port, 4143);
+        assert_eq!(
+            settings.relay.log_path,
+            PathBuf::from("/Users/dev/.litellm-relay/relay.log.jsonl")
+        );
+        assert_eq!(
+            settings.relay.mitm_ca_dir,
+            PathBuf::from("/Users/dev/.litellm-relay/mitm")
+        );
+        assert_eq!(settings.gateway.url, "https://gateway.example.com");
+        assert_eq!(settings.gateway.api_key.as_deref(), Some("sk-1234abcd"));
+        assert_eq!(
+            settings.gateway.enrolled_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert_eq!(
+            settings.gateway.expires_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-22T21:27:58.096Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert!(settings.shadow.enabled);
+        assert_eq!(settings.shadow.model, "gpt-4o-mini");
+        assert_eq!(settings.shadow.min_interval_seconds, 90);
+        assert!(settings.capture.payloads);
+        assert_eq!(settings.capture.payload_preview_bytes, 8192);
+        assert_eq!(settings.capture.payload_body_bytes, 262_144);
+        assert!(settings.domains.notion.is_empty());
+        assert_eq!(settings.domains.ai, ["api.openai.com", "api.anthropic.com"]);
+        assert_eq!(settings.timeouts.request_seconds, 2.5);
+        assert_eq!(
+            settings.idp,
+            IdpSection {
+                issuer: issuer.into(),
+                client_id: "client-1".into(),
+                scopes: Some("openid profile email offline_access".into()),
+                redirect_port: Some(8765),
+                authorize_url: String::new(),
+            }
+        );
+        assert_eq!(settings.claude.model, "claude-sonnet-4-5");
+        assert_eq!(settings.claude.team.as_deref(), Some("team-claude"));
+        assert_eq!(
+            settings.claude.desktop_sso,
+            Some(DesktopSso {
+                client_id: "desktop-client".into(),
+                issuer: issuer.into(),
+                scopes: Some("openid profile email".into()),
+                redirect_port: Some(53180),
+            })
+        );
+        assert_eq!(settings.codex.model, "gpt-5-codex");
+        assert_eq!(settings.codex.provider_id, "litellm");
+        assert_eq!(settings.codex.team.as_deref(), Some("team-codex"));
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![
+                AllowedCaller::new("com.anthropic.claude-code", Some("Q6L2SF6YDW")),
+                AllowedCaller::new("codex", None),
+            ])
+        );
+        assert_eq!(
+            settings.mcp,
+            McpSection {
+                allow: Some(vec!["github-get_issue".into(), "Jira-searchIssues".into()]),
+                max_concurrent_calls: Some(4),
+                tool_prefix_separator: Some("-".into()),
+            }
+        );
+    }
+
+    fn relaybar_field<'a>(saved: &'a str, section: &str, field: &str) -> Option<&'a str> {
+        let mut in_section = false;
+        for line in saved.lines().filter(|line| !line.is_empty()) {
+            if !line.starts_with([' ', '\t']) {
+                in_section = line.starts_with(&format!("{section}:"));
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            if let Some(value) = line.trim().strip_prefix(&format!("{field}:")) {
+                return Some(value.trim().trim_matches(['"', '\'']));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn should_reload_a_saved_config_into_the_settings_it_came_from() {
+        let settings =
+            parse_settings(SERDE_YAML_0_9_SAVED_CONFIG).expect("settings yaml should parse");
+
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+        let reloaded = parse_settings(&saved).expect("saved settings should parse");
+
+        assert_eq!(
+            format!("{reloaded:#?}"),
+            format!("{settings:#?}"),
+            "{saved}"
+        );
+        assert!(reloaded.credential.allowed_callers.is_some(), "{saved}");
+    }
+
+    #[test]
+    fn should_save_gateway_values_on_the_lines_relaybar_reads() {
+        let api_key = format!(
+            "eyJhbGciOiJSUzI1NiJ9.{}.{}",
+            "eyJzdWIiOiJyZWxheSJ9".repeat(6),
+            "c2lnbmF0dXJl".repeat(8)
+        );
+        let url = "https://litellm-gateway.internal.example-company.com/teams/platform/environments/production";
+        let settings = RelaySettings {
+            gateway: GatewaySection {
+                url: url.into(),
+                api_key: Some(api_key.clone()),
+                ..GatewaySection::default()
+            },
+            ..RelaySettings::default()
+        };
+
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+
+        assert_eq!(
+            relaybar_field(&saved, "gateway", "url"),
+            Some(url),
+            "{saved}"
+        );
+        assert_eq!(
+            relaybar_field(&saved, "gateway", "api_key"),
+            Some(api_key.as_str()),
+            "{saved}"
+        );
+    }
+
+    #[test]
+    fn should_report_a_config_parse_error_without_echoing_the_api_key() {
+        let error = parse_settings(
+            "gateway:\n  url: https://g\n  api_key: sk-do-not-print\n  enrolled_at: [\n",
+        )
+        .expect_err("an unclosed sequence should not parse");
+
+        let reported = format!("{error} {error:?}");
+        assert!(!reported.contains("sk-do-not-print"), "{reported}");
+    }
+
+    #[test]
+    fn should_ignore_a_yaml_merge_key_as_relay_always_has() {
+        let settings =
+            parse_settings("defaults: &defaults\n  payloads: true\ncapture:\n  <<: *defaults\n")
+                .expect("settings yaml should parse");
+
+        assert!(!settings.capture.payloads);
+    }
+
+    #[test]
+    fn should_load_blank_tilde_and_null_text_fields_as_empty() {
+        let settings = parse_settings(
+            "relay:\n  host:\n  log_path: ~\n  mitm_ca_dir: null\n\
+             gateway:\n  url:\n\
+             shadow:\n  model: ~\n\
+             idp:\n  issuer:\n  client_id: ~\n  authorize_url: null\n\
+             claude:\n  model:\n  desktop_sso:\n    client_id: ~\n    issuer:\n\
+             codex:\n  model: null\n  provider_id:\n\
+             credential:\n  allowed_callers:\n  - identifier:\n",
+        )
+        .expect("blank, ~ and null text fields should load");
+
+        assert_eq!(settings.relay.host, "");
+        assert_eq!(settings.relay.log_path, PathBuf::new());
+        assert_eq!(settings.relay.mitm_ca_dir, PathBuf::new());
+        assert_eq!(settings.gateway.url, "");
+        assert_eq!(settings.shadow.model, "");
+        assert_eq!(settings.idp, IdpSection::default());
+        assert!(!settings.idp.is_configured());
+        assert_eq!(settings.claude.model, "");
+        assert_eq!(
+            settings.claude.desktop_sso,
+            Some(DesktopSso {
+                client_id: String::new(),
+                issuer: String::new(),
+                scopes: None,
+                redirect_port: None,
+            })
+        );
+        assert_eq!(settings.codex.model, "");
+        assert_eq!(settings.codex.provider_id, "");
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![AllowedCaller::new("", None)])
+        );
+    }
+
+    #[test]
+    fn should_load_blank_tilde_and_null_list_items_as_empty() {
+        let settings = parse_settings(
+            "domains:\n  ai:\n  -\n  - ~\n  notion:\n  - null\n  - notion.so\n\
+             mcp:\n  allow:\n  - ~\n  - github-get_issue\n",
+        )
+        .expect("blank, ~ and null list items should load");
+
+        assert_eq!(settings.domains.ai, vec![String::new(), String::new()]);
+        assert_eq!(
+            settings.domains.notion,
+            vec![String::new(), "notion.so".to_string()]
+        );
+        assert_eq!(
+            settings.mcp.allow,
+            Some(vec![String::new(), "github-get_issue".to_string()])
+        );
+    }
+
+    #[test]
+    fn should_load_core_tagged_values_by_field_type_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "relay:\n  port: !!str 4142\n  host: !!int 127\n\
+             gateway:\n  url: !!float 1.5\n  enrolled_at: !!timestamp 2026-09-21T21:27:58Z\n\
+             shadow:\n  enabled: !!str true\n  model: !str gpt\n\
+             capture:\n  payloads: !!bool yes\n  payload_body_bytes: !!int 10\n\
+             timeouts:\n  request_seconds: !degrees 180\n\
+             idp:\n  issuer: !!bool true\n  client_id: !<tag:yaml.org,2002:int> 5\n  redirect_port: !!float 8765\n\
+             mcp:\n  allow: [!!int 7, !!str x, !!null]\n  max_concurrent_calls: !!str 4\n",
+        )
+        .expect("core-tagged values should load");
+
+        assert_eq!(settings.relay.port, 4142);
+        assert_eq!(settings.relay.host, "127");
+        assert_eq!(settings.gateway.url, "1.5");
+        assert_eq!(
+            settings.gateway.enrolled_at,
+            Some("2026-09-21T21:27:58Z".parse().expect("timestamp"))
+        );
+        assert!(settings.shadow.enabled);
+        assert_eq!(settings.shadow.model, "gpt");
+        assert!(settings.capture.payloads);
+        assert_eq!(settings.capture.payload_body_bytes, 10);
+        assert_eq!(settings.timeouts.request_seconds, 180.0);
+        assert_eq!(settings.idp.issuer, "true");
+        assert_eq!(settings.idp.client_id, "5");
+        assert_eq!(settings.idp.redirect_port, Some(8765));
+        assert_eq!(
+            settings.mcp.allow,
+            Some(vec!["7".into(), "x".into(), String::new()])
+        );
+        assert_eq!(settings.mcp.max_concurrent_calls, Some(4));
+    }
+
+    #[test]
+    fn should_ignore_a_null_mapping_key_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "~: x\nnull: y\n?\n: w\n? !!str\n: u\n? !!null # c\n: t\n!x : s\n!!null ~: r\n\
+             gateway:\n  ~: z\n  url: https://g # why?\n  ?\n  : v\nshadow: {!!null, model: m}\n",
+        )
+        .expect("a null key should be ignored like any unknown key");
+
+        assert_eq!(settings.gateway.url, "https://g");
+        assert_eq!(settings.shadow.model, "m");
+    }
+
+    #[test]
+    fn should_load_tagged_mapping_keys_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "!!str\trelay:\n  !!str port: 4142\n  host: h\n\
+             !!int null: 5\n\
+             credential:\n  allowed_callers:\n  - !!str identifier: com.example.app\n    team_id: T1\n",
+        )
+        .expect("tagged keys with siblings should load");
+
+        assert_eq!(settings.relay.port, 4142);
+        assert_eq!(settings.relay.host, "h");
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![AllowedCaller::new("com.example.app", Some("T1"))])
+        );
+    }
+
+    #[test]
+    fn should_keep_the_last_value_of_a_repeated_key() {
+        let settings = parse_settings(
+            "notes: a\nnotes: b\n~: c\n~: d\n\
+             defaults: &defaults\n  payloads: true\n\
+             capture:\n  <<: *defaults\n  <<: *defaults\n\
+             gateway:\n  url: https://first\n  url: https://last\n\
+             credential:\n  allowed_callers:\n  - identifier: com.example.app\n    notes: x\n    notes: y\n",
+        )
+        .expect("repeated keys should load");
+
+        assert_eq!(settings.gateway.url, "https://last");
+        assert!(!settings.capture.payloads);
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![AllowedCaller::new("com.example.app", None)])
+        );
+    }
+
+    #[test]
+    fn should_keep_a_binary_tagged_text_field_as_written() {
+        let settings = parse_settings("gateway:\n  url: !!binary aHR0cHM6Ly9leGFtcGxlLmNvbQ==\n")
+            .expect("settings yaml should parse");
+
+        assert_eq!(settings.gateway.url, "aHR0cHM6Ly9leGFtcGxlLmNvbQ==");
+    }
+
+    #[test]
+    fn should_load_a_tagged_null_word_as_text_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "gateway:\n  url: https://g\n  api_key: !!str null\n\
+             idp:\n  issuer: !!str ~\n  client_id: !foo NULL\n\
+             claude:\n  team: !!null null\n\
+             codex:\n  team: !!str &t Null\n\
+             domains:\n  ai: [!!str null, !<tag:yaml.org,2002:str> ~, *t]\n  notion:\n  - !!str |-\n    ~\n",
+        )
+        .expect("tagged null words should load");
+
+        assert_eq!(settings.gateway.api_key.as_deref(), Some("null"));
+        assert_eq!(settings.idp.issuer, "~");
+        assert_eq!(settings.idp.client_id, "NULL");
+        assert_eq!(settings.claude.team, None);
+        assert_eq!(settings.codex.team.as_deref(), Some("Null"));
+        assert_eq!(settings.domains.ai, vec!["null", "~", "Null"]);
+        assert_eq!(settings.domains.notion, vec!["~"]);
+    }
+
+    #[test]
+    fn should_read_a_tagged_empty_value_like_an_untagged_one() {
+        let tagged = parse_settings(
+            "relay: !!map\n\
+             gateway:\n  url: https://g\n  api_key: !!str\n\
+             credential: !!map &c # note\n\
+             claude:\n  team: *c\n\
+             domains:\n  ai: !!seq\n  notion: [!!str &n, a, *n]\n\
+             idp: !<tag:yaml.org,2002:map>\n\
+             codex: !foo\n\
+             mcp:\n  allow: [!!str, b]\n",
+        )
+        .expect("tagged empty values should load");
+        let untagged = parse_settings(
+            "relay:\n\
+             gateway:\n  url: https://g\n  api_key:\n\
+             credential: &c # note\n\
+             claude:\n  team: *c\n\
+             domains:\n  ai:\n  notion: [&n ~, a, *n]\n\
+             idp:\n\
+             codex:\n\
+             mcp:\n  allow: [~, b]\n",
+        )
+        .expect("untagged empty values should load");
+
+        assert_eq!(format!("{tagged:?}"), format!("{untagged:?}"));
+        assert_eq!(tagged.domains.notion, vec!["", "a", ""]);
+    }
+
+    #[test]
+    fn should_ignore_an_anchored_empty_key_like_any_unknown_key() {
+        let settings = parse_settings(
+            "? &a # c\n: x\n? &b\t\n: y\n?\t&e\n: v\n?\n  &f\n: w\n\
+             relay:\n  ? &c\n  : z\n  port: 4142\n\
+             shadow: {? &d, model: m}\n\
+             gateway:\n  url: https://g\n",
+        )
+        .expect("an anchored empty key should be ignored like any unknown key");
+
+        assert_eq!(settings.relay.port, 4142);
+        assert_eq!(settings.shadow.model, "m");
+        assert_eq!(settings.gateway.url, "https://g");
     }
 }

@@ -14,6 +14,7 @@ pub const AUDIT_TOKEN_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AllowedCaller {
+    #[serde(deserialize_with = "crate::config::null_as_empty")]
     pub identifier: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
