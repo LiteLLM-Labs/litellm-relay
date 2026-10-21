@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct RelayBarGlassApp: App {
-    @StateObject private var model = AppModel()
+    private let model = AppModel()
 
     var body: some Scene {
         MenuBarExtra {
