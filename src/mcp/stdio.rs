@@ -186,7 +186,7 @@ pub fn meta_tools() -> Vec<Tool> {
         )),
         Tool::new(
             "switch_environment",
-            "Point every client on the device at another configured Gateway environment, keeping the sign-in. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
+            "Point Claude Code, Codex, and the local inference proxy at another configured Gateway environment at once, keeping the sign-in; Claude Desktop follows after it restarts. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
             schema(
                 json!({"environment": {"type": "string", "description": "The environment name to switch to, as listed under environments by a call without an argument"}}),
                 &[],
@@ -195,7 +195,7 @@ pub fn meta_tools() -> Vec<Tool> {
         .annotate(ToolAnnotations::from_raw(
             Some("Switch environment".into()),
             Some(false),
-            Some(false),
+            Some(true),
             Some(true),
             Some(false),
         )),
@@ -909,9 +909,9 @@ mod tests {
             .unwrap()
             .contains("at most five"));
         assert_eq!(search.input_schema["required"], json!(["query"]));
-        for (name, argument) in [
-            ("switch_team", "team"),
-            ("switch_environment", "environment"),
+        for (name, argument, destructive) in [
+            ("switch_team", "team", false),
+            ("switch_environment", "environment", true),
         ] {
             let switch = tools.iter().find(|tool| tool.name == name).unwrap();
             assert_eq!(switch.input_schema["required"], json!([]));
@@ -920,7 +920,7 @@ mod tests {
                 "string"
             );
             let annotations = switch.annotations.as_ref().unwrap();
-            assert_eq!(annotations.destructive_hint, Some(false));
+            assert_eq!(annotations.destructive_hint, Some(destructive));
             assert_eq!(annotations.idempotent_hint, Some(true));
             assert!(switch
                 .description
@@ -928,6 +928,16 @@ mod tests {
                 .unwrap()
                 .contains("without an argument"));
         }
+        let environment = tools
+            .iter()
+            .find(|tool| tool.name == "switch_environment")
+            .and_then(|tool| tool.description.as_deref())
+            .unwrap();
+        assert!(!environment.contains("every client"), "{environment}");
+        assert!(
+            environment.contains("Claude Desktop follows after it restarts"),
+            "{environment}"
+        );
         let _ = client
             .list_tools(Some(PaginatedRequestParams::default()))
             .await;

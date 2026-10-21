@@ -60,7 +60,8 @@ enum HelperCommand {
     /// one JSON line.
     SwitchTeam { team: String },
     /// Point the daemon at a configured environment's Gateway, keeping the IdP
-    /// session; prints one JSON line.
+    /// session. Claude Code, Codex, and the local proxy follow at once, Claude
+    /// Desktop after it restarts; prints one JSON line.
     SwitchEnvironment { environment: String },
     /// Probe the Gateway and fetch the teams and the budget now; prints the
     /// account block of /api/status as one JSON line.
