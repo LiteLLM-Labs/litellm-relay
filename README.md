@@ -94,7 +94,7 @@ and `expires_at`), and the dashboard shows it as the
 
 ## Developers see their own usage, locally
 
-Relay also ships an optional **macOS menu bar app**, RelayBar, that sits on top of the daemon: it shows whether the developer is signed in and as whom, how long the key every coding tool is using stays valid and that the daemon renews it, the selected team's spend against its budget as the Gateway reports it, the MCP servers the daemon serves, and a Team and an Environment picker that move every client at once through `relay switch-team` and `relay switch-environment`. Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`) or ship it in the `.pkg` with `scripts/build-macos-pkg.sh --relaybar`.
+Relay also ships an optional **macOS menu bar app**, RelayBar, that sits on top of the daemon: it shows whether the developer is signed in and as whom, how long the key every coding tool is using stays valid and that the daemon renews it, the selected team's spend against its budget as the Gateway reports it, the MCP servers the daemon serves, and a Team and an Environment picker that move Claude Code, Codex, and the local proxy at once through `relay switch-team` and `relay switch-environment` (Claude Desktop follows after it restarts). Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`) or ship it in the `.pkg` with `scripts/build-macos-pkg.sh --relaybar`.
 
 ## AI Tool Guides
 

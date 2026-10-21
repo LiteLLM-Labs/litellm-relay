@@ -530,19 +530,42 @@ pub fn carry_selection(previous: &Path) -> Result<String> {
 
 pub fn save_settings(settings: &RelaySettings) -> Result<PathBuf> {
     let path = config_path();
+    save_settings_to(&path, settings)?;
+    Ok(path)
+}
+
+fn save_settings_to(path: &Path, settings: &RelaySettings) -> Result<()> {
+    let contents = serde_yaml::to_string(settings).context("failed to serialize Relay config")?;
+    if is_saved_owner_only(path, &contents) {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let contents = serde_yaml::to_string(settings).context("failed to serialize Relay config")?;
-    fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("failed to secure {}", path.display()))?;
     }
-    Ok(path)
+    Ok(())
+}
+
+fn is_saved_owner_only(path: &Path, contents: &str) -> bool {
+    if !fs::read_to_string(path).is_ok_and(|saved| saved == contents) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o777 == 0o600)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 pub fn normalize_host(host: &str) -> String {
@@ -1093,6 +1116,35 @@ codex:
             CarriedSelection::Carried { summary, .. } => panic!("expected nothing, got: {summary}"),
             CarriedSelection::Nothing(reason) => reason,
         }
+    }
+
+    #[test]
+    fn should_leave_config_yaml_untouched_when_a_save_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("relay-config-save-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.yaml");
+        let settings: RelaySettings = serde_yaml::from_str(THREE_ENVIRONMENTS).expect("settings");
+        save_settings_to(&path, &settings).expect("first save");
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("backdate");
+
+        save_settings_to(&path, &settings).expect("unchanged save");
+        let after_unchanged = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+
+        let mut moved = settings.clone();
+        moved.gateway.team = Some("another-team".into());
+        save_settings_to(&path, &moved).expect("changed save");
+        let reread: RelaySettings =
+            serde_yaml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert_eq!(after_unchanged, long_ago);
+        assert_eq!(reread.gateway.team.as_deref(), Some("another-team"));
     }
 
     #[test]

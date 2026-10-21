@@ -305,9 +305,11 @@ Without an IdP, the daemon serves `gateway.api_key` from `config.yaml` to the
 same allowed clients, so a static-key rollout gets the caller check too. The
 daemon re-reads `config.yaml` on the next request or tick after it changes, so
 a re-run of `relay autoconfigure` or `relay onboard` needs no daemon restart,
-and a changed IdP signs the daemon out while a changed Gateway or team keeps
-the IdP session, deletes the key on the Gateway it leaves, and exchanges again
-on the next request without a browser. A changed `credential.allowed_callers`
+and a changed IdP, or a `gateway.url` that moves anywhere but between two
+entries of the `environments` list, signs the daemon out, while a changed team
+or a move between two listed environments keeps the IdP session, deletes the
+key on the Gateway it leaves, and exchanges again on the next request without a
+browser. A changed `credential.allowed_callers`
 list applies from the next request and leaves the key in place, so a client
 taken off the list is refused the next time it runs the helper
 
@@ -315,7 +317,10 @@ Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
 `scheduled-task` when nobody is at the keyboard; those requests never open a
 browser and answer `signed_out` until a developer runs the app interactively or
 `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
-sign-in and `relay sign-out` deletes the key and forgets the session.
+sign-in and `relay sign-out` deletes the key and forgets the session. On a
+device that serves `gateway.api_key`, `relay sign-out` and both switches answer
+`static_key` with exit code 1 and change nothing, and RelayBar hides Sign out
+and the pickers there.
 `relay switch-team <team>` and `relay switch-environment <name>` move the
 daemon to another team or Gateway (see below) and print the outcome as one
 JSON line: `team`, `environment`, `gateway_url`, `key_expires_at`, and
@@ -358,8 +363,9 @@ the current environment's `team`, else `claude.team`, else `codex.team`. A
 switch (`relay switch-team`, `relay switch-environment`, the MCP tools of the
 same names, or RelayBar) writes
 `gateway.url` and `gateway.team` back into `config.yaml`, where an environment
-switch clears `gateway.team` so the new environment's default team applies,
-deletes the key on the Gateway it leaves, keeps the IdP session, and exchanges
+switch keeps the team picked on the environment it leaves under
+`gateway.team_by_environment` and brings back the team picked on the new one,
+else that environment's default team applies, deletes the key on the Gateway it leaves, keeps the IdP session, and exchanges
 and mints again on the new Gateway or team without a browser. A switch the new
 Gateway refuses writes the previous values back and answers `switch_failed`
 with the Gateway's reason; a name missing from the list answers

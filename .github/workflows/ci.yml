@@ -39,8 +39,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
       - name: Validate installer scripts
-        run: bash -n src/install.sh src/uninstall.sh scripts/build-macos-pkg.sh scripts/macos-pkg/postinstall scripts/macos-pkg/check-payload.sh scripts/ci/pkg_payload_smoke.sh scripts/ci/install_ca_trust_smoke.sh scripts/ci/install_profile_smoke.sh scripts/ci/install_upgrade_smoke.sh scripts/ci/uninstall_ca_smoke.sh scripts/ci/install_binary_staging_smoke.sh
+        run: bash -n src/install.sh src/uninstall.sh scripts/build-macos-pkg.sh scripts/macos-pkg/postinstall scripts/macos-pkg/check-payload.sh scripts/ci/pkg_payload_smoke.sh scripts/ci/install_ca_trust_smoke.sh scripts/ci/install_profile_smoke.sh scripts/ci/install_upgrade_smoke.sh scripts/ci/uninstall_ca_smoke.sh scripts/ci/install_binary_staging_smoke.sh scripts/ci/smoke_stubs.sh scripts/ci/stubs/*
       - name: Check installer help path
         run: bash src/install.sh --help
       - name: Check pkg builder help path
