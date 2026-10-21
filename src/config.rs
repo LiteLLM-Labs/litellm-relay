@@ -355,7 +355,7 @@ pub fn load_settings() -> Result<RelaySettings> {
     if path.exists() {
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        return serde_yaml::from_str(&contents)
+        return parse_settings(&contents)
             .with_context(|| format!("failed to parse {}", path.display()));
     }
 
@@ -373,7 +373,7 @@ pub fn save_settings(settings: &RelaySettings) -> Result<PathBuf> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let contents = serde_yaml::to_string(settings).context("failed to serialize Relay config")?;
+    let contents = settings_yaml(settings).context("failed to serialize Relay config")?;
     fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))?;
     #[cfg(unix)]
     {
@@ -382,6 +382,23 @@ pub fn save_settings(settings: &RelaySettings) -> Result<PathBuf> {
             .with_context(|| format!("failed to secure {}", path.display()))?;
     }
     Ok(path)
+}
+
+fn parse_settings(contents: &str) -> Result<RelaySettings, serde_saphyr::Error> {
+    serde_saphyr::from_str_with_options(
+        contents,
+        serde_saphyr::options! {
+            merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+            with_snippet: false,
+        },
+    )
+}
+
+fn settings_yaml(settings: &RelaySettings) -> Result<String, serde_saphyr::SerializeError> {
+    serde_saphyr::to_string_with_options(
+        settings,
+        serde_saphyr::ser_options! { prefer_block_scalars: false },
+    )
 }
 
 pub fn normalize_host(host: &str) -> String {
@@ -507,7 +524,7 @@ mod tests {
 
     #[test]
     fn should_load_partial_yaml_with_defaults() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             r#"
 gateway:
   url: https://gateway.example.com
@@ -531,7 +548,7 @@ capture:
 
     #[test]
     fn should_read_the_mcp_allow_list_call_cap_and_separator_from_yaml() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             "mcp:\n  allow:\n    - github-get_issue\n    - Jira-searchIssues\n  max_concurrent_calls: 4\n  tool_prefix_separator: \"__\"\n",
         )
         .expect("settings");
@@ -549,11 +566,10 @@ capture:
     #[test]
     fn should_default_the_mcp_call_cap_and_separator_when_missing_zero_or_empty() {
         let missing: RelaySettings =
-            serde_yaml::from_str("gateway:\n  url: https://g\n").expect("settings");
-        let zero: RelaySettings = serde_yaml::from_str(
-            "mcp:\n  max_concurrent_calls: 0\n  tool_prefix_separator: \"\"\n",
-        )
-        .expect("settings");
+            parse_settings("gateway:\n  url: https://g\n").expect("settings");
+        let zero: RelaySettings =
+            parse_settings("mcp:\n  max_concurrent_calls: 0\n  tool_prefix_separator: \"\"\n")
+                .expect("settings");
         assert!(missing.mcp.allowed_tools().is_empty());
         assert_eq!(missing.mcp.concurrent_call_cap(), 16);
         assert_eq!(missing.mcp.tool_prefix_separator(), "-");
@@ -563,7 +579,7 @@ capture:
 
     #[test]
     fn should_load_gateway_section_without_credential_timestamps() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             r#"
 gateway:
   url: https://gateway.example.com
@@ -597,8 +613,8 @@ gateway:
             ..RelaySettings::default()
         };
 
-        let yaml = serde_yaml::to_string(&settings).unwrap();
-        let reloaded: RelaySettings = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = settings_yaml(&settings).unwrap();
+        let reloaded: RelaySettings = parse_settings(&yaml).unwrap();
 
         assert_eq!(reloaded.gateway.enrolled_at, Some(enrolled_at));
         assert_eq!(reloaded.gateway.expires_at, Some(expires_at));
@@ -654,7 +670,7 @@ gateway:
 
     #[test]
     fn should_omit_unset_credential_timestamps_from_yaml() {
-        let yaml = serde_yaml::to_string(&RelaySettings::default()).unwrap();
+        let yaml = settings_yaml(&RelaySettings::default()).unwrap();
 
         assert!(!yaml.contains("enrolled_at"), "{yaml}");
         assert!(!yaml.contains("expires_at"), "{yaml}");
@@ -671,7 +687,7 @@ gateway:
 
     #[test]
     fn should_preserve_explicit_capture_limits() {
-        let settings: RelaySettings = serde_yaml::from_str(
+        let settings: RelaySettings = parse_settings(
             r#"
 capture:
   payloads: true
@@ -767,7 +783,7 @@ capture:
     #[test]
     fn should_point_a_legacy_authorize_url_config_at_the_oidc_flags() {
         let legacy: RelaySettings =
-            serde_yaml::from_str("idp:\n  authorize_url: https://login.example.com/authorize\n")
+            parse_settings("idp:\n  authorize_url: https://login.example.com/authorize\n")
                 .expect("legacy settings yaml should parse");
 
         assert!(!legacy.idp.is_configured());
@@ -781,12 +797,12 @@ capture:
 
     #[test]
     fn should_drop_the_legacy_authorize_url_when_saving() {
-        let legacy: RelaySettings = serde_yaml::from_str(
+        let legacy: RelaySettings = parse_settings(
             "idp:\n  authorize_url: https://login.example.com/authorize\n  issuer: https://login.example.com\n  client_id: client-1\n",
         )
         .expect("settings yaml should parse");
 
-        let saved = serde_yaml::to_string(&legacy).expect("settings should serialize");
+        let saved = settings_yaml(&legacy).expect("settings should serialize");
 
         assert!(!saved.contains("authorize_url"), "{saved}");
         assert!(
@@ -794,5 +810,221 @@ capture:
             "{saved}"
         );
         assert!(saved.contains("client_id: client-1"), "{saved}");
+    }
+
+    const SERDE_YAML_0_9_SAVED_CONFIG: &str = r#"relay:
+  host: 127.0.0.1
+  port: 4143
+  log_path: /Users/dev/.litellm-relay/relay.log.jsonl
+  mitm_ca_dir: /Users/dev/.litellm-relay/mitm
+gateway:
+  url: https://gateway.example.com
+  api_key: sk-1234abcd
+  enrolled_at: 2026-09-21T21:27:58Z
+  expires_at: 2026-09-22T21:27:58.096Z
+shadow:
+  enabled: true
+  model: gpt-4o-mini
+  min_interval_seconds: 90
+capture:
+  payloads: true
+  payload_preview_bytes: 8192
+  payload_body_bytes: 262144
+domains:
+  notion: []
+  ai:
+  - api.openai.com
+  - api.anthropic.com
+timeouts:
+  request_seconds: 2.5
+idp:
+  issuer: https://login.microsoftonline.com/tenant-id/v2.0
+  client_id: client-1
+  scopes: openid profile email offline_access
+  redirect_port: 8765
+claude:
+  model: claude-sonnet-4-5
+  team: team-claude
+  desktop_sso:
+    client_id: desktop-client
+    issuer: https://login.microsoftonline.com/tenant-id/v2.0
+    scopes: openid profile email
+    redirect_port: 53180
+codex:
+  model: gpt-5-codex
+  provider_id: litellm
+  team: team-codex
+credential:
+  allowed_callers:
+  - identifier: com.anthropic.claude-code
+    team_id: Q6L2SF6YDW
+  - identifier: codex
+mcp:
+  allow:
+  - github-get_issue
+  - Jira-searchIssues
+  max_concurrent_calls: 4
+  tool_prefix_separator: '-'
+"#;
+
+    #[test]
+    fn should_load_every_field_of_a_config_saved_by_serde_yaml_0_9() {
+        let settings =
+            parse_settings(SERDE_YAML_0_9_SAVED_CONFIG).expect("settings yaml should parse");
+        let issuer = "https://login.microsoftonline.com/tenant-id/v2.0";
+
+        assert_eq!(settings.relay.host, "127.0.0.1");
+        assert_eq!(settings.relay.port, 4143);
+        assert_eq!(
+            settings.relay.log_path,
+            PathBuf::from("/Users/dev/.litellm-relay/relay.log.jsonl")
+        );
+        assert_eq!(
+            settings.relay.mitm_ca_dir,
+            PathBuf::from("/Users/dev/.litellm-relay/mitm")
+        );
+        assert_eq!(settings.gateway.url, "https://gateway.example.com");
+        assert_eq!(settings.gateway.api_key.as_deref(), Some("sk-1234abcd"));
+        assert_eq!(
+            settings.gateway.enrolled_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert_eq!(
+            settings.gateway.expires_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-22T21:27:58.096Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert!(settings.shadow.enabled);
+        assert_eq!(settings.shadow.model, "gpt-4o-mini");
+        assert_eq!(settings.shadow.min_interval_seconds, 90);
+        assert!(settings.capture.payloads);
+        assert_eq!(settings.capture.payload_preview_bytes, 8192);
+        assert_eq!(settings.capture.payload_body_bytes, 262_144);
+        assert!(settings.domains.notion.is_empty());
+        assert_eq!(settings.domains.ai, ["api.openai.com", "api.anthropic.com"]);
+        assert_eq!(settings.timeouts.request_seconds, 2.5);
+        assert_eq!(
+            settings.idp,
+            IdpSection {
+                issuer: issuer.into(),
+                client_id: "client-1".into(),
+                scopes: Some("openid profile email offline_access".into()),
+                redirect_port: Some(8765),
+                authorize_url: String::new(),
+            }
+        );
+        assert_eq!(settings.claude.model, "claude-sonnet-4-5");
+        assert_eq!(settings.claude.team.as_deref(), Some("team-claude"));
+        assert_eq!(
+            settings.claude.desktop_sso,
+            Some(DesktopSso {
+                client_id: "desktop-client".into(),
+                issuer: issuer.into(),
+                scopes: Some("openid profile email".into()),
+                redirect_port: Some(53180),
+            })
+        );
+        assert_eq!(settings.codex.model, "gpt-5-codex");
+        assert_eq!(settings.codex.provider_id, "litellm");
+        assert_eq!(settings.codex.team.as_deref(), Some("team-codex"));
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![
+                AllowedCaller::new("com.anthropic.claude-code", Some("Q6L2SF6YDW")),
+                AllowedCaller::new("codex", None),
+            ])
+        );
+        assert_eq!(
+            settings.mcp,
+            McpSection {
+                allow: Some(vec!["github-get_issue".into(), "Jira-searchIssues".into()]),
+                max_concurrent_calls: Some(4),
+                tool_prefix_separator: Some("-".into()),
+            }
+        );
+    }
+
+    fn relaybar_field<'a>(saved: &'a str, section: &str, field: &str) -> Option<&'a str> {
+        let mut in_section = false;
+        for line in saved.lines().filter(|line| !line.is_empty()) {
+            if !line.starts_with([' ', '\t']) {
+                in_section = line.starts_with(&format!("{section}:"));
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            if let Some(value) = line.trim().strip_prefix(&format!("{field}:")) {
+                return Some(value.trim().trim_matches(['"', '\'']));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn should_save_gateway_and_relay_values_on_the_lines_relaybar_reads() {
+        let api_key = format!(
+            "eyJhbGciOiJSUzI1NiJ9.{}.{}",
+            "eyJzdWIiOiJyZWxheSJ9".repeat(6),
+            "c2lnbmF0dXJl".repeat(8)
+        );
+        let url = "https://litellm-gateway.internal.example-company.com/teams/platform/environments/production";
+        let settings = RelaySettings {
+            relay: RelaySection {
+                port: 4143,
+                ..RelaySection::default()
+            },
+            gateway: GatewaySection {
+                url: url.into(),
+                api_key: Some(api_key.clone()),
+                ..GatewaySection::default()
+            },
+            ..RelaySettings::default()
+        };
+
+        let saved = settings_yaml(&settings).expect("settings should serialize");
+
+        assert_eq!(
+            relaybar_field(&saved, "gateway", "url"),
+            Some(url),
+            "{saved}"
+        );
+        assert_eq!(
+            relaybar_field(&saved, "gateway", "api_key"),
+            Some(api_key.as_str()),
+            "{saved}"
+        );
+        assert_eq!(
+            relaybar_field(&saved, "relay", "port"),
+            Some("4143"),
+            "{saved}"
+        );
+    }
+
+    #[test]
+    fn should_report_a_config_parse_error_without_echoing_the_api_key() {
+        let error = parse_settings(
+            "gateway:\n  url: https://g\n  api_key: sk-do-not-print\n  enrolled_at: [\n",
+        )
+        .expect_err("an unclosed sequence should not parse");
+
+        let reported = format!("{error} {error:?}");
+        assert!(!reported.contains("sk-do-not-print"), "{reported}");
+    }
+
+    #[test]
+    fn should_ignore_a_yaml_merge_key_as_relay_always_has() {
+        let settings =
+            parse_settings("defaults: &defaults\n  payloads: true\ncapture:\n  <<: *defaults\n")
+                .expect("settings yaml should parse");
+
+        assert!(!settings.capture.payloads);
     }
 }
