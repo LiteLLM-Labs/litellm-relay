@@ -601,6 +601,17 @@ async fn should_switch_the_team_only_after_a_confirmation_and_refetch_the_catalo
             }]
         );
     }
+    let mut unasked = FakeAsker::answering(&[Answer::Accept]);
+    let unknown = ask(
+        &rig,
+        &service,
+        json!({"op": "switch_team", "team": "team-z"}),
+        &mut unasked,
+    )
+    .await
+    .expect_err("refused");
+    assert_eq!(unknown.reason(), "unknown_team");
+    assert!(unasked.questions.is_empty());
     assert!(switcher.switches().is_empty());
     service.check_session().await;
     assert_eq!(upstream.lists().len(), 1);
@@ -658,24 +669,37 @@ async fn should_switch_the_environment_after_a_confirmation_and_pass_the_daemon_
     assert_eq!(result["team"], "team-a");
     assert_eq!(result["source"], "minted_key");
 
-    switcher.refusing(Refusal::UnknownEnvironment(
-        "no environment is named prod; the configured names are dev, uat".to_string(),
+    let mut unasked = FakeAsker::answering(&[Answer::Accept]);
+    let unknown = ask(
+        &rig,
+        &service,
+        json!({"op": "switch_environment", "environment": "prod"}),
+        &mut unasked,
+    )
+    .await
+    .expect_err("refused");
+    assert_eq!(unknown.reason(), "unknown_environment");
+    assert!(unknown.message().contains("dev, uat"));
+    assert!(unasked.questions.is_empty());
+
+    switcher.refusing(Refusal::SwitchFailed(
+        "the Gateway refused the exchange".to_string(),
     ));
     let mut accepting = FakeAsker::answering(&[Answer::Accept]);
     let refused = ask(
         &rig,
         &service,
-        json!({"op": "switch_environment", "environment": "prod"}),
+        json!({"op": "switch_environment", "environment": "dev"}),
         &mut accepting,
     )
     .await
     .expect_err("refused");
     assert_eq!(
         accepting.questions[0].message,
-        "Switch the environment to \"prod\"?"
+        format!("Switch the environment to \"dev\" ({GATEWAY})?")
     );
-    assert_eq!(refused.reason(), "unknown_environment");
-    assert!(refused.message().contains("dev, uat"));
+    assert_eq!(refused.reason(), "switch_failed");
+    assert_eq!(refused.message(), "the Gateway refused the exchange");
     assert_eq!(switcher.switches().len(), 1);
 }
 

@@ -240,6 +240,19 @@ fn gateway_of(environment: &str) -> &'static str {
 }
 
 impl Switcher for FakeSwitcher {
+    fn team_refusal(&self, team: &str) -> Option<Refusal> {
+        (!["team-a", "team-b"].contains(&team))
+            .then(|| Refusal::UnknownTeam(format!("no team {team:?}; known: team-a, team-b")))
+    }
+
+    fn environment_refusal(&self, name: &str) -> Option<Refusal> {
+        (!["dev", "uat"].contains(&name)).then(|| {
+            Refusal::UnknownEnvironment(format!(
+                "no environment named {name:?}; configured: dev, uat"
+            ))
+        })
+    }
+
     fn switch_team(&self, team: &str) -> Reply {
         self.switch("team", team)
     }

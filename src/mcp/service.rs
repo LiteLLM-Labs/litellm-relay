@@ -103,6 +103,8 @@ pub trait Asker: Send {
 }
 
 pub trait Switcher: Send + Sync {
+    fn team_refusal(&self, team: &str) -> Option<Refusal>;
+    fn environment_refusal(&self, name: &str) -> Option<Refusal>;
     fn switch_team(&self, team: &str) -> Reply;
     fn switch_environment(&self, name: &str) -> Reply;
     fn selection(&self) -> Value;
@@ -633,6 +635,9 @@ impl McpService {
         let Some(team) = team else {
             return self.selection().await;
         };
+        let checked = team.clone();
+        self.refuse_early(move |switcher| switcher.team_refusal(&checked))
+            .await?;
         let question = Question {
             kind: QuestionKind::SwitchTeam,
             message: format!("Switch the team to {}?", quoted(&team)),
@@ -652,6 +657,9 @@ impl McpService {
         let Some(name) = environment else {
             return self.selection().await;
         };
+        let checked = name.clone();
+        self.refuse_early(move |switcher| switcher.environment_refusal(&checked))
+            .await?;
         let question = Question {
             kind: QuestionKind::SwitchEnvironment,
             message: match environment_url(&self.selection().await?, &name) {
@@ -663,6 +671,17 @@ impl McpService {
         let switcher = Arc::clone(&self.deps.switcher);
         let switched = switched(blocking(move || switcher.switch_environment(&name)).await?)?;
         self.selection_after(switched).await
+    }
+
+    async fn refuse_early(
+        &self,
+        check: impl FnOnce(&dyn Switcher) -> Option<Refusal> + Send + 'static,
+    ) -> Result<(), McpRefusal> {
+        let switcher = Arc::clone(&self.deps.switcher);
+        match blocking(move || check(switcher.as_ref())).await? {
+            Some(refusal) => Err(McpRefusal::Broker(refusal)),
+            None => Ok(()),
+        }
     }
 
     async fn selection(&self) -> Result<Value, McpRefusal> {

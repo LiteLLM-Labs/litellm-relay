@@ -19,24 +19,41 @@ impl Daemon {
     }
 
     fn refreshed(&self, reply: Reply) -> Reply {
-        if matches!(reply, Reply::Switched(_) | Reply::SignedIn { .. }) {
+        if matches!(
+            reply,
+            Reply::Switched(_) | Reply::SignedIn { .. } | Reply::SignedOut
+        ) {
             self.account.recheck();
         }
         reply
     }
+
+    fn unknown_team(&self, team: &str) -> Option<Refusal> {
+        let known = self.account.known_teams()?;
+        (!known.iter().any(|id| id == team)).then(|| {
+            Refusal::UnknownTeam(format!(
+                "no team {team:?} for this user; the known teams are {}",
+                known.join(", ")
+            ))
+        })
+    }
 }
 
 impl Switcher for Daemon {
+    fn team_refusal(&self, team: &str) -> Option<Refusal> {
+        self.unknown_team(team)
+            .or_else(|| self.broker.team_switch_refusal())
+    }
+
+    fn environment_refusal(&self, name: &str) -> Option<Refusal> {
+        self.broker.environment_switch_refusal(name)
+    }
+
     fn switch_team(&self, team: &str) -> Reply {
-        if let Some(known) = self.account.known_teams() {
-            if !known.iter().any(|id| id == team) {
-                return Reply::Refused(Refusal::UnknownTeam(format!(
-                    "no team {team:?} for this user; the known teams are {}",
-                    known.join(", ")
-                )));
-            }
+        match self.unknown_team(team) {
+            Some(refusal) => Reply::Refused(refusal),
+            None => self.refreshed(self.broker.switch_team(team)),
         }
-        self.refreshed(self.broker.switch_team(team))
     }
 
     fn switch_environment(&self, name: &str) -> Reply {
@@ -63,6 +80,7 @@ impl Handler for Daemon {
             Request::SwitchTeam { team } => self.switch_team(&team),
             Request::SwitchEnvironment { environment } => self.switch_environment(&environment),
             Request::SignIn => self.refreshed(self.broker.sign_in()),
+            Request::SignOut => self.refreshed(self.broker.sign_out()),
             Request::Recheck => Reply::Account(self.account.recheck()),
             other => self.broker.handle(other, peer),
         }
@@ -123,6 +141,30 @@ mod tests {
         assert!(rig.keys.deletes().is_empty());
         assert_eq!(rig.broker.status().team.as_deref(), Some("team-a"));
         assert_eq!(count(&http, "/user/info"), 1);
+        assert_eq!(
+            daemon
+                .team_refusal("team-z")
+                .map(|refusal| refusal.reason()),
+            Some("unknown_team")
+        );
+        assert_eq!(daemon.team_refusal("team-b"), None);
+    }
+
+    #[test]
+    fn should_clear_the_account_before_sign_out_answers() {
+        let (rig, _http, account, daemon) = daemon_on(idp_settings(Some("team-a")));
+        daemon.handle(Request::SignIn, rig.peer());
+        assert_eq!(account.status()["teams"].as_array().map(Vec::len), Some(2));
+        assert_eq!(account.status()["user"]["email"], "dev@example.com");
+
+        assert_eq!(
+            daemon.handle(Request::SignOut, rig.peer()),
+            Reply::SignedOut
+        );
+        let status = account.status();
+        assert!(status["teams"].is_null(), "{status}");
+        assert!(status["user"]["email"].is_null(), "{status}");
+        assert!(status["team"]["spend"].is_null(), "{status}");
     }
 
     #[test]
@@ -197,6 +239,11 @@ mod tests {
             matches!(unknown, Reply::Refused(Refusal::UnknownEnvironment(_))),
             "{unknown:?}"
         );
+        assert!(matches!(
+            daemon.environment_refusal("prod"),
+            Some(Refusal::UnknownEnvironment(_))
+        ));
+        assert_eq!(daemon.environment_refusal("uat"), None);
 
         let switched = daemon.handle(
             Request::SwitchEnvironment {

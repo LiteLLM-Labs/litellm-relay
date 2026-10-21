@@ -41,8 +41,8 @@ use crate::{
     },
     auth::open_browser,
     config::{
-        config_path, load_settings, relay_home, save_settings, GatewaySection, IdpSection,
-        RelaySettings,
+        config_path, load_settings, relay_home, save_settings, EnvironmentEntry, GatewaySection,
+        IdpSection, RelaySettings,
     },
     system::hostname,
 };
@@ -685,16 +685,21 @@ impl Broker {
         )
     }
 
+    pub fn team_switch_refusal(&self) -> Option<Refusal> {
+        self.refresh();
+        self.switchable_settings().err()
+    }
+
+    pub fn environment_switch_refusal(&self, name: &str) -> Option<Refusal> {
+        self.refresh();
+        self.environment_destination(name).err()
+    }
+
     pub fn switch_environment(&self, name: &str) -> Reply {
         self.refresh();
-        let settings = match self.switchable_settings() {
-            Ok(settings) => settings,
+        let (settings, entry) = match self.environment_destination(name) {
+            Ok(destination) => destination,
             Err(refusal) => return Reply::Refused(refusal),
-        };
-        let Some(entry) = settings.environment_named(name) else {
-            return Reply::Refused(Refusal::UnknownEnvironment(unknown_environment(
-                name, &settings,
-            )));
         };
         if settings
             .current_environment()
@@ -711,6 +716,19 @@ impl Broker {
             team: settings.gateway.team.clone(),
         };
         self.apply_switch(settings, next, previous)
+    }
+
+    fn environment_destination(
+        &self,
+        name: &str,
+    ) -> Result<(RelaySettings, EnvironmentEntry), Refusal> {
+        let settings = self.switchable_settings()?;
+        match settings.environment_named(name).cloned() {
+            Some(entry) => Ok((settings, entry)),
+            None => Err(Refusal::UnknownEnvironment(unknown_environment(
+                name, &settings,
+            ))),
+        }
     }
 
     fn switchable_settings(&self) -> Result<RelaySettings, Refusal> {
@@ -1317,7 +1335,6 @@ mod tests {
         },
         *,
     };
-    use crate::config::EnvironmentEntry;
 
     const MINUTE: i64 = 60;
     const UAT: &str = "https://uat.example.com";
