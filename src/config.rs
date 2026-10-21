@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashMap, fs, ops::Range, path::PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_saphyr::granit_parser::{Event, Marker, Parser, ScalarStyle, Span, Tag};
+use serde_saphyr::granit_parser::{Event, Marker, Parser, Span};
 
 use crate::apps::{default_ai_domains, default_notion_domains, domain_matches_host};
 use crate::{broker::caller::AllowedCaller, system::home_dir};
@@ -407,8 +407,8 @@ fn parse_settings(contents: &str) -> Result<RelaySettings, serde_saphyr::Error> 
         &as_serde_yaml_0_9_read(contents),
         serde_saphyr::options! {
             merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+            duplicate_keys: serde_saphyr::DuplicateKeyPolicy::LastWins,
             with_snippet: false,
-            ignore_binary_tag_for_string: true,
         },
     )
 }
@@ -439,8 +439,6 @@ fn empty_for_null_items(items: Vec<Option<String>>) -> Vec<String> {
     items.into_iter().map(Option::unwrap_or_default).collect()
 }
 
-const YAML_CORE_SCHEMA: &str = "tag:yaml.org,2002:";
-
 enum OpenNode {
     Mapping { next_is_key: bool },
     Sequence,
@@ -466,21 +464,18 @@ fn serde_yaml_0_9_edits(contents: &str) -> Vec<(Range<usize>, String)> {
     let mut parser = Parser::new_from_str(contents);
     let mut open = Vec::new();
     let mut edits = Vec::new();
+    let mut previous_end = 0;
     while let Some(parsed) = parser.next_event() {
         let Ok((event, span)) = parsed else {
             return Vec::new();
         };
         let is_key = matches!(open.last(), Some(OpenNode::Mapping { next_is_key: true }));
+        let since_previous = previous_end;
+        previous_end = span.end.byte_offset().unwrap_or(previous_end);
         match event {
-            Event::Scalar(value, style, _, tag) => {
-                edits.extend(scalar_edits(
-                    contents,
-                    &value,
-                    style,
-                    tag.as_deref(),
-                    span,
-                    is_key,
-                ));
+            Event::Scalar(value, ..) => {
+                let key_after = is_key.then_some(since_previous);
+                edits.extend(scalar_edits(contents, &value, span, key_after));
                 finish_node(&mut open);
             }
             Event::Alias(_) => finish_node(&mut open),
@@ -499,29 +494,49 @@ fn serde_yaml_0_9_edits(contents: &str) -> Vec<(Range<usize>, String)> {
 fn scalar_edits(
     contents: &str,
     value: &str,
-    style: ScalarStyle,
-    tag: Option<&Tag>,
     span: Span,
-    is_key: bool,
+    key_after: Option<usize>,
 ) -> Vec<(Range<usize>, String)> {
     let has_value = span.start.index() < span.end.index();
-    let ignored_tag = has_value && tag.is_some_and(|tag| serde_yaml_0_9_ignores(tag, value, style));
     let dropped_tag = span
         .tag_start
-        .filter(|_| ignored_tag)
+        .filter(|_| has_value)
         .and_then(|start| tag_token(contents, start))
         .map(|range| (range, String::new()));
-    let null_key = is_key
-        && style == ScalarStyle::Plain
-        && (tag.is_none() || ignored_tag)
-        && is_null_like(value);
-    let quoted_null_key = span
-        .start
-        .byte_offset()
-        .zip(span.end.byte_offset())
-        .filter(|_| null_key)
-        .map(|(start, end)| (start..end, format!("'{value}'")));
-    dropped_tag.into_iter().chain(quoted_null_key).collect()
+    let quoted_key = key_after.and_then(|key_after| match (has_value, span.tag_start) {
+        (true, _) if is_null_like(value) => quoted_null_key(value, span),
+        (true, _) => None,
+        (false, Some(tag_start)) => quoted_tagged_empty_key(tag_start, span),
+        (false, None) => quoted_empty_key(contents, key_after, span),
+    });
+    dropped_tag.into_iter().chain(quoted_key).collect()
+}
+
+fn quoted_tagged_empty_key(tag_start: Marker, span: Span) -> Option<(Range<usize>, String)> {
+    let tag = tag_start.byte_offset()?..span.start.byte_offset()?;
+    Some((tag, "''".to_string()))
+}
+
+fn quoted_null_key(value: &str, span: Span) -> Option<(Range<usize>, String)> {
+    let key = span.start.byte_offset()?..span.end.byte_offset()?;
+    Some((key, format!("'{value}'")))
+}
+
+fn quoted_empty_key(
+    contents: &str,
+    key_after: usize,
+    span: Span,
+) -> Option<(Range<usize>, String)> {
+    let gap = contents.get(key_after..span.start.byte_offset()?)?;
+    let in_comment = |at: usize| {
+        gap[..at]
+            .rsplit('\n')
+            .next()
+            .is_some_and(|line| line.contains('#'))
+    };
+    let (at, _) = gap.match_indices('?').find(|&(at, _)| !in_comment(at))?;
+    let after_indicator = key_after + at + 1;
+    Some((after_indicator..after_indicator, " ''".to_string()))
 }
 
 fn finish_node(open: &mut [OpenNode]) {
@@ -530,29 +545,17 @@ fn finish_node(open: &mut [OpenNode]) {
     }
 }
 
-fn serde_yaml_0_9_ignores(tag: &Tag, value: &str, style: ScalarStyle) -> bool {
-    match core_schema_type(tag) {
-        Some("int" | "float" | "bool" | "null" | "timestamp") => true,
-        Some("str") => style != ScalarStyle::Plain || !is_null_like(value),
-        _ => false,
-    }
-}
-
-fn core_schema_type(tag: &Tag) -> Option<&str> {
-    match tag.handle() {
-        YAML_CORE_SCHEMA => Some(tag.suffix()),
-        _ => tag.suffix().strip_prefix(YAML_CORE_SCHEMA),
-    }
-}
-
 fn is_null_like(value: &str) -> bool {
-    value.is_empty() || value == "~" || value.eq_ignore_ascii_case("null")
+    value == "~" || value.eq_ignore_ascii_case("null")
 }
 
 fn tag_token(contents: &str, start: Marker) -> Option<Range<usize>> {
     let start = start.byte_offset()?;
     let rest = contents.get(start..).filter(|rest| rest.starts_with('!'))?;
-    Some(start..start + rest.find(char::is_whitespace)?)
+    let tag_len = rest.find(char::is_whitespace)?;
+    let after_tag = &rest[tag_len..];
+    let separator_len = after_tag.len() - after_tag.trim_start_matches([' ', '\t']).len();
+    Some(start..start + tag_len + separator_len)
 }
 
 fn settings_yaml(settings: &RelaySettings) -> Result<String, serde_saphyr::SerializeError> {
@@ -1258,9 +1261,9 @@ mcp:
         let settings = parse_settings(
             "relay:\n  port: !!str 4142\n  host: !!int 127\n\
              gateway:\n  url: !!float 1.5\n  enrolled_at: !!timestamp 2026-09-21T21:27:58Z\n\
-             shadow:\n  enabled: !!str true\n  model: !!str ~\n\
-             capture:\n  payloads: !!bool yes\n\
-             timeouts:\n  request_seconds: !!int 10\n\
+             shadow:\n  enabled: !!str true\n  model: !str gpt\n\
+             capture:\n  payloads: !!bool yes\n  payload_body_bytes: !!int 10\n\
+             timeouts:\n  request_seconds: !degrees 180\n\
              idp:\n  issuer: !!bool true\n  client_id: !<tag:yaml.org,2002:int> 5\n  redirect_port: !!float 8765\n\
              mcp:\n  allow: [!!int 7, !!str x, !!null]\n  max_concurrent_calls: !!str 4\n",
         )
@@ -1274,9 +1277,10 @@ mcp:
             Some("2026-09-21T21:27:58Z".parse().expect("timestamp"))
         );
         assert!(settings.shadow.enabled);
-        assert_eq!(settings.shadow.model, "~");
+        assert_eq!(settings.shadow.model, "gpt");
         assert!(settings.capture.payloads);
-        assert_eq!(settings.timeouts.request_seconds, 10.0);
+        assert_eq!(settings.capture.payload_body_bytes, 10);
+        assert_eq!(settings.timeouts.request_seconds, 180.0);
         assert_eq!(settings.idp.issuer, "true");
         assert_eq!(settings.idp.client_id, "5");
         assert_eq!(settings.idp.redirect_port, Some(8765));
@@ -1289,10 +1293,50 @@ mcp:
 
     #[test]
     fn should_ignore_a_null_mapping_key_as_serde_yaml_0_9_did() {
-        let settings = parse_settings("~: x\nnull: y\ngateway:\n  ~: z\n  url: https://g\n")
-            .expect("a null key should be ignored like any unknown key");
+        let settings = parse_settings(
+            "~: x\nnull: y\n?\n: w\n? !!str\n: u\n? !!null # c\n: t\n!x : s\n\
+             gateway:\n  ~: z\n  url: https://g # why?\n  ?\n  : v\nshadow: {!!null, model: m}\n",
+        )
+        .expect("a null key should be ignored like any unknown key");
 
         assert_eq!(settings.gateway.url, "https://g");
+        assert_eq!(settings.shadow.model, "m");
+    }
+
+    #[test]
+    fn should_load_tagged_mapping_keys_as_serde_yaml_0_9_did() {
+        let settings = parse_settings(
+            "!!str\trelay:\n  !!str port: 4142\n  host: h\n\
+             !!int null: 5\n\
+             credential:\n  allowed_callers:\n  - !!str identifier: com.example.app\n    team_id: T1\n",
+        )
+        .expect("tagged keys with siblings should load");
+
+        assert_eq!(settings.relay.port, 4142);
+        assert_eq!(settings.relay.host, "h");
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![AllowedCaller::new("com.example.app", Some("T1"))])
+        );
+    }
+
+    #[test]
+    fn should_keep_the_last_value_of_a_repeated_key() {
+        let settings = parse_settings(
+            "notes: a\nnotes: b\n~: c\n~: d\n\
+             defaults: &defaults\n  payloads: true\n\
+             capture:\n  <<: *defaults\n  <<: *defaults\n\
+             gateway:\n  url: https://first\n  url: https://last\n\
+             credential:\n  allowed_callers:\n  - identifier: com.example.app\n    notes: x\n    notes: y\n",
+        )
+        .expect("repeated keys should load");
+
+        assert_eq!(settings.gateway.url, "https://last");
+        assert!(!settings.capture.payloads);
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![AllowedCaller::new("com.example.app", None)])
+        );
     }
 
     #[test]
