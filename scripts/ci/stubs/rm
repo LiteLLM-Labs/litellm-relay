@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+sandbox="${RELAY_SMOKE_SANDBOX:?the smoke stubs need RELAY_SMOKE_SANDBOX}"
+user_tmp="$(getconf DARWIN_USER_TEMP_DIR)"
+kept=()
+for arg in "$@"; do
+  if [[ "$arg" == /* && "$arg" != "$sandbox"/* && "$arg" != "${user_tmp%/}"/* ]]; then
+    printf 'rm %s\n' "$arg" >> "${RELAY_SMOKE_LOG:?the smoke stubs need RELAY_SMOKE_LOG}"
+    continue
+  fi
+  kept+=("$arg")
+done
+exec /bin/rm ${kept[@]+"${kept[@]}"}
