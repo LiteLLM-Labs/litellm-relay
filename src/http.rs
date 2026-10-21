@@ -115,6 +115,7 @@ where
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         501 => "Not Implemented",
         502 => "Bad Gateway",
         _ => "OK",

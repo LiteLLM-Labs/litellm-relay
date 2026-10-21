@@ -219,6 +219,19 @@ impl RelayProxy {
             .await;
         }
 
+        if route.path.starts_with("/api/")
+            && !is_local_dashboard_request(&header_text, self.config.port)
+        {
+            return write_response(
+                &mut stream,
+                403,
+                "application/json; charset=utf-8",
+                br#"{"error":"the Relay API only answers requests addressed to this machine's loopback address"}"#,
+                true,
+            )
+            .await;
+        }
+
         if method == "GET" && route.path == "/api/status" {
             let proxy = Arc::clone(self);
             let payload = tokio::task::spawn_blocking(move || {
@@ -775,6 +788,28 @@ impl RelayProxy {
     }
 }
 
+fn is_local_dashboard_request(header_text: &str, port: u16) -> bool {
+    let local_hosts = ["127.0.0.1", "localhost", "[::1]"].map(|host| format!("{host}:{port}"));
+    let is_local = |host: &str| {
+        local_hosts
+            .iter()
+            .any(|local| local.eq_ignore_ascii_case(host))
+    };
+    let values = |name: &str| -> Vec<&str> {
+        header_text
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+            .collect()
+    };
+    matches!(values("host").as_slice(), [host] if is_local(host))
+        && values("origin")
+            .iter()
+            .all(|origin| origin.strip_prefix("http://").is_some_and(is_local))
+}
+
 fn metadata_tunnel_decision(
     request: ProtocolCompatibilityDecision,
     response: ProtocolCompatibilityDecision,
@@ -1062,11 +1097,18 @@ mod tests {
     }
 
     fn daemon(gateway_url: &str) -> Daemon {
+        daemon_logging_to(
+            gateway_url,
+            std::env::temp_dir().join("relay-inference-test-missing.log.jsonl"),
+        )
+    }
+
+    fn daemon_logging_to(gateway_url: &str, log_path: std::path::PathBuf) -> Daemon {
         let mut settings = static_key_settings(GATEWAY_KEY);
         settings.gateway.url = gateway_url.to_string();
         let mut config = settings.to_config();
         config.mitm_enabled = false;
-        config.log_path = std::env::temp_dir().join("relay-inference-test-missing.log.jsonl");
+        config.log_path = log_path;
         let rig = Rig::new(settings);
         let token = match rig.broker.handle(
             Request::ProxyCredential {
@@ -1175,6 +1217,89 @@ mod tests {
             assert_eq!(status["broker"]["source"], "static_key");
             assert_eq!(status["account"]["gateway"]["reachable"], Value::Null);
         }
+    }
+
+    #[tokio::test]
+    async fn should_refuse_the_api_unless_host_and_origin_name_this_daemon_on_loopback() {
+        let upstream = Upstream::answering(&[JSON_OK]).await;
+        let log_path =
+            std::env::temp_dir().join(format!("relay-api-guard-{}.log.jsonl", Uuid::new_v4()));
+        let daemon = daemon_logging_to(&upstream.url, log_path.clone());
+        let port = daemon.proxy.config.port;
+        let seed = || {
+            clear_events(&log_path).unwrap();
+            append_event(&log_path, json!({"event": "seeded"})).unwrap();
+        };
+        let seeded = || {
+            read_events(&log_path, 10)
+                .iter()
+                .any(|event| event["event"] == "seeded")
+        };
+        let clear = |headers: String| {
+            format!("POST /api/events/clear HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n")
+        };
+
+        for headers in [
+            "Host: attacker.example\r\n".to_string(),
+            format!("Host: attacker.example:{port}\r\n"),
+            format!("Host: 127.0.0.1:{}\r\n", port + 1),
+            String::new(),
+            format!("Host: 127.0.0.1:{port}\r\nHost: attacker.example:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: http://attacker.example\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: http://attacker.example:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: null\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: https://127.0.0.1:{port}\r\n"),
+        ] {
+            seed();
+            let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
+            assert!(
+                answer.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+                "{headers}: {answer}"
+            );
+            assert!(
+                seeded(),
+                "a refused clear must leave the log alone: {headers}"
+            );
+        }
+
+        for headers in [
+            format!("Host: 127.0.0.1:{port}\r\n"),
+            format!("host: LOCALHOST:{port}\r\n"),
+            format!("Host: [::1]:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n"),
+            format!("Host: localhost:{port}\r\nOrigin: http://localhost:{port}\r\n"),
+        ] {
+            seed();
+            let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
+            assert!(
+                answer.starts_with("HTTP/1.1 200 OK\r\n"),
+                "{headers}: {answer}"
+            );
+            assert!(!seeded(), "an allowed clear must empty the log: {headers}");
+        }
+
+        let refused = exchange(
+            &daemon.proxy,
+            None,
+            "GET /api/events HTTP/1.1\r\nHost: attacker.example\r\n\r\n",
+        )
+        .await;
+        assert!(
+            refused.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "{refused}"
+        );
+
+        let forwarded = exchange(
+            &daemon.proxy,
+            None,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\nHost: attacker.example\r\nOrigin: http://attacker.example\r\nAuthorization: Bearer {}\r\n\r\n",
+                daemon.token
+            ),
+        )
+        .await;
+        assert!(forwarded.ends_with("{\"ok\":true}"), "{forwarded}");
+        let _ = fs::remove_file(&log_path);
     }
 
     #[tokio::test]
