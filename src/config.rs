@@ -81,9 +81,12 @@ impl RelaySettings {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RelaySection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub host: String,
     pub port: u16,
+    #[serde(deserialize_with = "null_as_empty")]
     pub log_path: PathBuf,
+    #[serde(deserialize_with = "null_as_empty")]
     pub mitm_ca_dir: PathBuf,
 }
 
@@ -102,6 +105,7 @@ impl Default for RelaySection {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GatewaySection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -141,6 +145,7 @@ impl GatewaySection {
 #[serde(default)]
 pub struct ShadowSection {
     pub enabled: bool,
+    #[serde(deserialize_with = "null_as_empty")]
     pub model: String,
     pub min_interval_seconds: u64,
 }
@@ -196,13 +201,15 @@ impl Default for TimeoutSection {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IdpSection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub issuer: String,
+    #[serde(deserialize_with = "null_as_empty")]
     pub client_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, deserialize_with = "null_as_empty")]
     pub authorize_url: String,
 }
 
@@ -251,6 +258,7 @@ pub struct IdpOverrides {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ClaudeSection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -272,7 +280,9 @@ impl Default for ClaudeSection {
 /// autoconfigure reruns can rebuild the same single sign-on document.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct DesktopSso {
+    #[serde(deserialize_with = "null_as_empty")]
     pub client_id: String,
+    #[serde(deserialize_with = "null_as_empty")]
     pub issuer: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<String>,
@@ -283,7 +293,9 @@ pub struct DesktopSso {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CodexSection {
+    #[serde(deserialize_with = "null_as_empty")]
     pub model: String,
+    #[serde(deserialize_with = "null_as_empty")]
     pub provider_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -390,8 +402,17 @@ fn parse_settings(contents: &str) -> Result<RelaySettings, serde_saphyr::Error> 
         serde_saphyr::options! {
             merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
             with_snippet: false,
+            ignore_binary_tag_for_string: true,
         },
     )
+}
+
+pub(crate) fn null_as_empty<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn settings_yaml(settings: &RelaySettings) -> Result<String, serde_saphyr::SerializeError> {
@@ -1026,5 +1047,51 @@ mcp:
                 .expect("settings yaml should parse");
 
         assert!(!settings.capture.payloads);
+    }
+
+    #[test]
+    fn should_load_blank_tilde_and_null_text_fields_as_empty() {
+        let settings = parse_settings(
+            "relay:\n  host:\n  log_path: ~\n  mitm_ca_dir: null\n\
+             gateway:\n  url:\n\
+             shadow:\n  model: ~\n\
+             idp:\n  issuer:\n  client_id: ~\n  authorize_url: null\n\
+             claude:\n  model:\n  desktop_sso:\n    client_id: ~\n    issuer:\n\
+             codex:\n  model: null\n  provider_id:\n\
+             credential:\n  allowed_callers:\n  - identifier:\n",
+        )
+        .expect("blank, ~ and null text fields should load");
+
+        assert_eq!(settings.relay.host, "");
+        assert_eq!(settings.relay.log_path, PathBuf::new());
+        assert_eq!(settings.relay.mitm_ca_dir, PathBuf::new());
+        assert_eq!(settings.gateway.url, "");
+        assert_eq!(settings.shadow.model, "");
+        assert_eq!(settings.idp, IdpSection::default());
+        assert!(!settings.idp.is_configured());
+        assert_eq!(settings.claude.model, "");
+        assert_eq!(
+            settings.claude.desktop_sso,
+            Some(DesktopSso {
+                client_id: String::new(),
+                issuer: String::new(),
+                scopes: None,
+                redirect_port: None,
+            })
+        );
+        assert_eq!(settings.codex.model, "");
+        assert_eq!(settings.codex.provider_id, "");
+        assert_eq!(
+            settings.credential.allowed_callers,
+            Some(vec![AllowedCaller::new("", None)])
+        );
+    }
+
+    #[test]
+    fn should_keep_a_binary_tagged_text_field_as_written() {
+        let settings = parse_settings("gateway:\n  url: !!binary aHR0cHM6Ly9leGFtcGxlLmNvbQ==\n")
+            .expect("settings yaml should parse");
+
+        assert_eq!(settings.gateway.url, "aHR0cHM6Ly9leGFtcGxlLmNvbQ==");
     }
 }
