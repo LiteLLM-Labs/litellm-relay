@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp_dir="$(mktemp -d)"
+# shellcheck source=scripts/ci/smoke_stubs.sh
+source "$ROOT/scripts/ci/smoke_stubs.sh"
 
 cleanup() {
   chflags nouchg "$tmp_dir/locked/.zshrc" 2> /dev/null || true
@@ -36,7 +38,7 @@ printf 'capture:\n  payloads: false\n' > "$tmp_dir/metadata.yaml"
 run_install() {
   local name="$1"
   local home="$tmp_dir/$name"
-  SHELL=/bin/zsh HOME="$home" RELAY_HOME="$home/.litellm-relay" \
+  with_stubs SHELL=/bin/zsh HOME="$home" RELAY_HOME="$home/.litellm-relay" \
     bash "$ROOT/src/install.sh" --prebuilt-binary "$tmp_dir/stub-relay" --skip-autoconfigure --skip-setup \
       --config-file "$tmp_dir/metadata.yaml" --bin-dir "$home/bin" > "$tmp_dir/$name.out" 2>&1 \
     || { cat "$tmp_dir/$name.out" >&2; fail "install.sh ($name) exited non-zero"; }

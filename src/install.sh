@@ -15,6 +15,8 @@ RELAY_TRUST_CA="${RELAY_TRUST_CA:-auto}"
 RELAY_RELAYBAR_APP="${RELAY_RELAYBAR_APP:-/usr/local/litellm-relay/RelayBarGlass.app}"
 RELAYBAR_LABEL="ai.litellm.relaybar"
 RELAYBAR_PLIST="$HOME/Library/LaunchAgents/$RELAYBAR_LABEL.plist"
+RELAY_CA_LABEL="LiteLLM Relay Local Root CA"
+REQUIRED_SUBCOMMANDS=(ca-path capture-mode pac launch-agent autoconfigure setup)
 RELAY_PORT="4142"
 NETWORK_SERVICE=""
 BACKGROUND_SERVICE=0
@@ -96,7 +98,7 @@ Environment:
                                 config keeps payload capture off
   RELAY_RELAYBAR_APP            RelayBar menu bar app bundle to register at login
                                 (default /usr/local/litellm-relay/RelayBarGlass.app;
-                                skipped when absent)
+                                skipped with a warning when absent)
 USAGE
 }
 
@@ -108,7 +110,7 @@ autoconfigure_ai_tools() {
     return 0
   fi
   echo "Auto-configuring installed AI tools to route through the Gateway..."
-  "$RELAY_HOME/bin/litellm-relay" autoconfigure || {
+  PATH="$HOME/.local/bin:$PATH" "$RELAY_HOME/bin/litellm-relay" autoconfigure || {
     echo "warning: AI tool auto-configuration did not complete." >&2
   }
 }
@@ -146,6 +148,7 @@ PLIST
 
 install_relaybar_agent() {
   if [[ ! -x "$RELAY_RELAYBAR_APP/Contents/MacOS/RelayBarGlass" ]]; then
+    echo "warning: no RelayBar menu bar app at $RELAY_RELAYBAR_APP, so none starts at login; a pkg built with --relaybar installs it there, or set RELAY_RELAYBAR_APP to the app's path." >&2
     return 0
   fi
   mkdir -p "$(dirname "$RELAYBAR_PLIST")"
@@ -379,6 +382,62 @@ install_relay_binary() {
   mv -f "$staged" "$target"
 }
 
+require_relay_subcommands() {
+  local probe_dir subcommand missing=""
+  probe_dir="$(mktemp -d)"
+  cp "$1" "$probe_dir/litellm-relay"
+  chmod 700 "$probe_dir/litellm-relay"
+  for subcommand in "${REQUIRED_SUBCOMMANDS[@]}"; do
+    if ! "$probe_dir/litellm-relay" "$subcommand" --help >/dev/null 2>&1; then
+      missing="$subcommand"
+      break
+    fi
+  done
+  rm -rf "$probe_dir"
+  if [[ -n "$missing" ]]; then
+    cat >&2 <<ERROR
+prebuilt binary $1 has no '$missing' subcommand, so it is older than this
+installer. Nothing was changed. Use the litellm-relay binary from the same
+release as this install.sh.
+ERROR
+    exit 1
+  fi
+}
+
+trusted_relay_ca_sha1s() {
+  local work pem
+  work="$(mktemp -d)"
+  security find-certificate -a -c "$RELAY_CA_LABEL" -Z -p "$LOGIN_KEYCHAIN" 2>/dev/null \
+    | awk -v dir="$work" '/^SHA-1 hash: / { file = dir "/" $3 ".pem"; next } /^SHA-256 hash: / { next } file { print > file }'
+  for pem in "$work"/*.pem; do
+    [[ -f "$pem" ]] || continue
+    if security verify-cert -c "$pem" >/dev/null 2>&1; then
+      basename "$pem" .pem
+    fi
+  done
+  rm -rf "$work"
+}
+
+report_existing_ca_trust() {
+  local trusted sha1
+  if [[ "$(launchctl managername 2>/dev/null)" != "Aqua" ]]; then
+    CA_TRUST_STATE="not trusted by this install; an earlier install's trust cannot be read outside the user's GUI session"
+    return 0
+  fi
+  trusted="$(trusted_relay_ca_sha1s)"
+  if [[ -z "$trusted" ]]; then
+    return 0
+  fi
+  CA_TRUST_STATE="still trusted in the login keychain from an earlier install"
+  {
+    echo "A Relay CA that an earlier install trusted is still trusted in $LOGIN_KEYCHAIN."
+    echo "To remove it, run this from a Terminal in the user's session:"
+    while IFS= read -r sha1; do
+      echo "  security delete-certificate -Z $sha1 -t \"$LOGIN_KEYCHAIN\""
+    done <<< "$trusted"
+  } >&2
+}
+
 # The macOS network service that owns the default route, for the manual PAC
 # hints; falls back to the first listed service, then to "Wi-Fi".
 detect_network_service() {
@@ -483,6 +542,7 @@ if [[ -n "$RELAY_PREBUILT_BINARY" ]]; then
     echo "prebuilt binary not found: $RELAY_PREBUILT_BINARY" >&2
     exit 1
   fi
+  require_relay_subcommands "$RELAY_PREBUILT_BINARY"
   stop_legacy_python_relay
   echo "Installing prebuilt LiteLLM Relay binary..."
   mkdir -p "$RELAY_HOME/bin"
@@ -559,7 +619,9 @@ if [[ "$TRUST_CA" == "auto" ]]; then
   fi
 fi
 CA_TRUST_STATE="not trusted"
-if [[ "$TRUST_CA" == "1" ]]; then
+if [[ "$TRUST_CA" == "1" ]] && security verify-cert -c "$CA_PATH" >/dev/null 2>&1; then
+  CA_TRUST_STATE="already trusted"
+elif [[ "$TRUST_CA" == "1" ]]; then
   echo "Trusting the Relay CA in the login keychain so payload capture can read AI app traffic; macOS asks for your account password in the Certificate Trust Settings sheet."
   if security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH" >/dev/null 2>&1; then
     CA_TRUST_STATE="trusted in the login keychain"
@@ -579,16 +641,18 @@ Skipping Relay CA trust because RELAY_TRUST_CA=0 or --skip-trust-ca was set.
 Payload capture requires trusting this certificate later:
   security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
 WARN
+  report_existing_ca_trust
 else
   cat <<SKIP
 Skipping Relay CA trust: this managed install keeps payload capture off
-(capture.payloads is not true in the seeded config), so nothing on this device
-needs the CA and no keychain password sheet is shown.
+(capture.payloads is not true in the seeded config), so it does not trust the
+CA and no keychain password sheet is shown.
 To capture payloads later, set capture.payloads: true and trust the CA from a
 Terminal in the user's session:
   security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
 or install with RELAY_TRUST_CA=1.
 SKIP
+  report_existing_ca_trust
 fi
 
 if [[ "$BACKGROUND_SERVICE" != "1" ]]; then
@@ -702,6 +766,7 @@ install_desktop_daemon() {
   <key>WatchPaths</key>
   <array>
     <string>/Library/Managed Preferences</string>
+    <string>$RELAY_HOME/config.yaml</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -743,6 +808,11 @@ if [[ "$RELAY_AUTOCONFIGURE" == "1" ]]; then
     <string>--only</string>
     <string>codex</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>

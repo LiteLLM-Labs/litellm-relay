@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+printf 'sudo %s\n' "$*" >> "${RELAY_SMOKE_LOG:?the smoke stubs need RELAY_SMOKE_LOG}"
+if [[ "${1:-}" == "install" ]]; then
+  mkdir -p "${RELAY_SMOKE_SYSTEM:?the smoke stubs need RELAY_SMOKE_SYSTEM}"
+  cp "${@: -2:1}" "$RELAY_SMOKE_SYSTEM/$(basename "${@: -1}")"
+fi

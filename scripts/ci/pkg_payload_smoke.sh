@@ -16,11 +16,26 @@ bom_mode() {
 
 printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/stub-binary"
 chmod 755 "$tmp_dir/stub-binary"
+app="$tmp_dir/RelayBarGlass.app"
+mkdir -p "$app/Contents/MacOS"
+cp "$ROOT/macos/RelayBarGlass/Info.plist" "$app/Contents/Info.plist"
+install -m 0755 "$tmp_dir/stub-binary" "$app/Contents/MacOS/RelayBarGlass"
+relaybar_id="$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")"
+
+mkdir "$tmp_dir/no-swift"
+ln -s /usr/bin/dirname /usr/bin/uname "$tmp_dir/no-swift/"
+if PATH="$tmp_dir/no-swift" /bin/bash "$ROOT/scripts/build-macos-pkg.sh" --version 0.0.0-ci \
+  --binary "$tmp_dir/stub-binary" --relaybar --output "$tmp_dir/no-swift.pkg" > "$tmp_dir/no-swift.out" 2>&1; then
+  fail "build-macos-pkg.sh --relaybar succeeded with no swift on PATH"
+fi
+grep -q -- '--relaybar needs swift on PATH' "$tmp_dir/no-swift.out" || { cat "$tmp_dir/no-swift.out" >&2; fail "the builder did not say --relaybar needs swift"; }
+[[ ! -e "$tmp_dir/no-swift.pkg" ]] || fail "the builder wrote a package without the RelayBar app"
 
 "$ROOT/scripts/build-macos-pkg.sh" \
   --version 0.0.0-ci \
   --binary "$tmp_dir/stub-binary" \
   --config-file "$ROOT/mdm/config.yaml.example" \
+  --relaybar-app "$app" \
   --output "$tmp_dir/relay.pkg" > "$tmp_dir/build.out" 2>&1 || {
   cat "$tmp_dir/build.out" >&2
   fail "build-macos-pkg.sh exited non-zero"
@@ -35,6 +50,12 @@ config_mode="$(bom_mode "$tmp_dir/expanded/Bom" ./config.yaml)"
 [[ "$config_mode" == "100644" ]] || fail "config.yaml mode is $config_mode, expected 100644"
 [[ -f "$tmp_dir/expanded/Scripts/postinstall" ]] || fail "the package carries no postinstall"
 grep -q 'Payload of .* is readable by every user' "$tmp_dir/build.out" || fail "the builder did not check the payload"
+app_binary_mode="$(bom_mode "$tmp_dir/expanded/Bom" ./RelayBarGlass.app/Contents/MacOS/RelayBarGlass)"
+[[ "$app_binary_mode" == "100755" ]] || fail "the RelayBar app binary mode is '$app_binary_mode', expected 100755"
+[[ "$(xmllint --xpath "count(/pkg-info/bundle[@id='$relaybar_id'])" "$tmp_dir/expanded/PackageInfo")" == "1" ]] \
+  || fail "PackageInfo does not list the $relaybar_id bundle"
+[[ "$(xmllint --xpath "count(/pkg-info/relocate/bundle[@id='$relaybar_id'])" "$tmp_dir/expanded/PackageInfo")" == "0" ]] \
+  || fail "the installer may relocate $relaybar_id away from /usr/local/litellm-relay"
 
 mkdir -m 0700 "$tmp_dir/private-root"
 install -m 0755 "$tmp_dir/stub-binary" "$tmp_dir/private-root/litellm-relay"
@@ -51,5 +72,22 @@ if "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/private.pkg" > "$tmp_dir
 fi
 grep -q '^\. 40700 ' "$tmp_dir/check.out" || fail "check-payload.sh did not name the 0700 payload root"
 grep -q '^\./config\.yaml 100600 ' "$tmp_dir/check.out" || fail "check-payload.sh did not name the 0600 config file"
+
+productbuild --package "$tmp_dir/private.pkg" "$tmp_dir/private-dist.pkg" > /dev/null
+if "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/private-dist.pkg" > "$tmp_dir/check-dist.out" 2>&1; then
+  fail "check-payload.sh accepted a distribution package whose component has a 0700 root"
+fi
+grep -q '^\./config\.yaml 100600 ' "$tmp_dir/check-dist.out" || fail "check-payload.sh did not name the 0600 config file inside the distribution package"
+
+productbuild --package "$tmp_dir/relay.pkg" "$tmp_dir/relay-dist.pkg" > /dev/null
+"$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/relay-dist.pkg" > "$tmp_dir/check-dist-ok.out" 2>&1 \
+  || { cat "$tmp_dir/check-dist-ok.out" >&2; fail "check-payload.sh rejected a distribution package with a readable payload"; }
+
+rm "$tmp_dir/expanded/Bom"
+pkgutil --flatten "$tmp_dir/expanded" "$tmp_dir/no-bom.pkg"
+if "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/no-bom.pkg" > "$tmp_dir/check-no-bom.out" 2>&1; then
+  fail "check-payload.sh accepted a package with no Bom"
+fi
+grep -q 'it has no Bom' "$tmp_dir/check-no-bom.out" || fail "check-payload.sh did not say the Bom is missing"
 
 echo "pkg payload smoke passed"

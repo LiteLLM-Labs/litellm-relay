@@ -107,7 +107,25 @@ fi
 RELAY_RUNNER="$RELAY_HOME/bin/run-relay"
 CA_PATH="$RELAY_HOME/mitm/litellm-relay-ca.pem"
 CA_LABEL="LiteLLM Relay Local Root CA"
-LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+
+keychain_owner_home() {
+  local console_user home
+  if [[ "$(id -u)" -ne 0 ]]; then
+    printf '%s\n' "$HOME"
+    return 0
+  fi
+  console_user="$(stat -f%Su /dev/console 2>/dev/null || true)"
+  case "$console_user" in
+    ""|root|loginwindow|_mbsetupuser)
+      printf '%s\n' "$HOME"
+      return 0
+      ;;
+  esac
+  home="$(dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+  printf '%s\n' "${home:-$HOME}"
+}
+
+LOGIN_KEYCHAIN="$(keychain_owner_home)/Library/Keychains/login.keychain-db"
 PAC_PATH="$RELAY_HOME/relay.pac"
 
 remove_owned_shim() {
@@ -164,21 +182,28 @@ remove_relay_data() {
 }
 
 relay_ca_entries() {
-  local work pem fingerprint state
+  local work pem state
   work="$(mktemp -d)"
-  security find-certificate -a -c "$CA_LABEL" -p "$LOGIN_KEYCHAIN" 2>/dev/null \
-    | awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { n++ } { print > (dir "/" n ".pem") }'
+  security find-certificate -a -c "$CA_LABEL" -Z -p "$LOGIN_KEYCHAIN" 2>/dev/null \
+    | awk -v dir="$work" '/^SHA-1 hash: / { file = dir "/" $3 ".pem"; next } /^SHA-256 hash: / { next } file { print > file }'
   for pem in "$work"/*.pem; do
     [[ -f "$pem" ]] || continue
-    fingerprint="$(openssl x509 -in "$pem" -noout -fingerprint -sha256 | sed 's/^.*=//; s/://g')"
     if security verify-cert -c "$pem" >/dev/null 2>&1; then
       state="trusted"
     else
       state="untrusted"
     fi
-    printf '%s %s\n' "$fingerprint" "$state"
+    printf '%s %s\n' "$(basename "$pem" .pem)" "$state"
   done
   rm -rf "$work"
+}
+
+print_delete_commands() {
+  local sha1 state
+  while read -r sha1 state; do
+    [[ -n "$sha1" ]] || continue
+    echo "  security delete-certificate -Z $sha1 -t \"$LOGIN_KEYCHAIN\""
+  done <<< "$1"
 }
 
 relay_ca_trust_settings() {
@@ -197,10 +222,10 @@ remove_ca_trust() {
   if [[ "$session" != "Aqua" ]]; then
     {
       echo "warning: the Relay CA was left in $LOGIN_KEYCHAIN."
-      echo "This shell is not in the user's GUI session (launchctl managername: $session), the only place macOS reads and changes Certificate Trust Settings, so whether these certificates are trusted cannot be read here, and deleting them here would leave their trust settings behind (SHA-256):"
+      echo "This shell is not in the user's GUI session (launchctl managername: $session), the only place macOS reads and changes Certificate Trust Settings, so whether these certificates are trusted cannot be read here, and deleting them here would leave their trust settings behind (SHA-1):"
       sed 's/ [a-z]*$//; s/^/  /' <<< "$entries"
       echo "From a Terminal in that user's session run this uninstaller again, or:"
-      echo "  security delete-certificate -c \"$CA_LABEL\" -t \"$LOGIN_KEYCHAIN\""
+      print_delete_commands "$entries"
     } >&2
     return 0
   fi
@@ -230,7 +255,7 @@ remove_ca_trust() {
   {
     echo "warning: the Relay CA is not fully removed from this account."
     if [[ -n "$left" ]]; then
-      echo "Still in $LOGIN_KEYCHAIN (SHA-256, trust state):"
+      echo "Still in $LOGIN_KEYCHAIN (SHA-1, trust state):"
       sed 's/^/  /' <<< "$left"
     fi
     if [[ "$trust_left" != "0" ]]; then
@@ -241,8 +266,8 @@ Removing a trusted root changes the Certificate Trust Settings, which macOS only
 allows from the logged-in GUI session after the account password is typed into
 the sheet it shows, so the change is denied over ssh, from an MDM script, or
 when that sheet was cancelled. From a Terminal in that user's session run:
-  security delete-certificate -c "$CA_LABEL" -t "$LOGIN_KEYCHAIN"
 WHY
+    print_delete_commands "$left"
     if [[ "$trust_left" != "0" && -f "$CA_PATH" ]]; then
       echo "and, for a trust setting left without its certificate:"
       echo "  security remove-trusted-cert \"$CA_PATH\""
