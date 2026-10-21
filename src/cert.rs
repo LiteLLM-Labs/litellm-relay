@@ -79,6 +79,40 @@ pub fn ensure_ca(ca_dir: &Path) -> Result<CertificateAuthority> {
     })
 }
 
+pub trait CaTrust: Send + Sync {
+    fn trusts(&self, cert_path: &Path) -> bool;
+}
+
+pub struct UserCaTrust;
+
+impl CaTrust for UserCaTrust {
+    #[cfg(target_os = "macos")]
+    fn trusts(&self, cert_path: &Path) -> bool {
+        run_quiet(
+            Command::new("/usr/bin/security")
+                .arg("verify-cert")
+                .arg("-c")
+                .arg(cert_path)
+                .arg("-l")
+                .arg("-L")
+                .arg("-q"),
+        )
+        .is_ok()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn trusts(&self, _cert_path: &Path) -> bool {
+        true
+    }
+}
+
+pub fn trust_command(cert_path: &Path) -> String {
+    format!(
+        "security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"{}\"",
+        cert_path.display()
+    )
+}
+
 pub fn server_tls_config(host: &str, ca_dir: &Path) -> Result<ServerConfig> {
     let (cert_path, key_path) = ensure_leaf_cert(host, ca_dir)?;
     let cert_file = fs::read(&cert_path)?;
@@ -256,5 +290,38 @@ mod tests {
     #[test]
     fn safe_cert_name_removes_path_characters() {
         assert_eq!(safe_cert_name("www.notion.so:443"), "www.notion.so_443");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn should_trust_a_system_root_but_not_a_fresh_relay_ca_nobody_trusted() {
+        let ca_dir = std::env::temp_dir().join(format!("relay-ca-trust-{}", uuid::Uuid::new_v4()));
+        let ca = ensure_ca(&ca_dir).unwrap();
+        let roots = Command::new("/usr/bin/security")
+            .args([
+                "find-certificate",
+                "-a",
+                "-p",
+                "/System/Library/Keychains/SystemRootCertificates.keychain",
+            ])
+            .output()
+            .unwrap()
+            .stdout;
+
+        let fresh_ca_trusted = UserCaTrust.trusts(&ca.cert_path);
+        let some_root_trusted = decode_pem_blocks(&roots, "CERTIFICATE")
+            .unwrap()
+            .into_iter()
+            .take(5)
+            .enumerate()
+            .any(|(index, der)| {
+                let path = ca_dir.join(format!("root-{index}.der"));
+                fs::write(&path, der).unwrap();
+                UserCaTrust.trusts(&path)
+            });
+        fs::remove_dir_all(&ca_dir).unwrap();
+
+        assert!(!fresh_ca_trusted);
+        assert!(some_root_trusted);
     }
 }

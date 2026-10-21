@@ -1,4 +1,10 @@
-use std::{fs, io::ErrorKind, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    fs,
+    io::ErrorKind,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -7,6 +13,7 @@ use serde_json::{json, Value};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
+    sync::Mutex as AsyncMutex,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
@@ -15,7 +22,7 @@ use crate::{
     account::AccountService,
     apps::{classify_app_attribution, known_apps, AppAttribution},
     broker::Broker,
-    cert::{client_tls_config, ensure_ca, server_tls_config},
+    cert::{client_tls_config, ensure_ca, server_tls_config, trust_command, CaTrust, UserCaTrust},
     config::{is_ai_host, is_notion_host, RelayConfig},
     events::{append_event, clear_events, read_events},
     gateway::{CaptureIngest, GatewayClient, IngestResult},
@@ -39,6 +46,8 @@ const DASHBOARD_JS: &[u8] = include_bytes!("static/dashboard/assets/dashboard.js
 const DASHBOARD_FAVICON: &[u8] =
     br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#171717"/><text x="16" y="21" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#fafafa">LR</text></svg>"##;
 
+const CA_TRUST_RECHECK: Duration = Duration::from_secs(60);
+
 pub struct RelayProxy {
     config: Arc<RelayConfig>,
     gateway: GatewayClient,
@@ -46,6 +55,13 @@ pub struct RelayProxy {
     mcp: Option<Arc<McpService>>,
     account: Option<Arc<AccountService>>,
     inference: reqwest::Client,
+    ca_trust: Arc<dyn CaTrust>,
+    ca_verdict: AsyncMutex<Option<CaVerdict>>,
+}
+
+struct CaVerdict {
+    trusted: bool,
+    checked_at: Instant,
 }
 
 impl RelayProxy {
@@ -59,6 +75,8 @@ impl RelayProxy {
             mcp: None,
             account: None,
             inference: gateway_client(),
+            ca_trust: Arc::new(UserCaTrust),
+            ca_verdict: AsyncMutex::new(None),
         }
     }
 
@@ -83,6 +101,11 @@ impl RelayProxy {
             account: Some(account),
             ..self
         }
+    }
+
+    #[cfg(test)]
+    fn with_ca_trust(self, ca_trust: Arc<dyn CaTrust>) -> Self {
+        Self { ca_trust, ..self }
     }
 
     #[cfg(test)]
@@ -127,6 +150,9 @@ impl RelayProxy {
             "runtime": "rust",
         }))?;
         print_runtime_panel(&self.config);
+        if self.config.mitm_enabled {
+            self.capture_ca_trusted().await;
+        }
 
         let proxy = Arc::new(self);
         loop {
@@ -321,7 +347,7 @@ impl RelayProxy {
         }
         self.log_event(event)?;
 
-        if self.config.mitm_enabled && ai_match {
+        if self.config.mitm_enabled && ai_match && self.capture_ca_trusted().await {
             return self
                 .handle_mitm_connect(target.host, target.port, event_id, started_at, client)
                 .await;
@@ -366,6 +392,40 @@ impl RelayProxy {
             &attribution,
         ))?;
         Ok(())
+    }
+
+    async fn capture_ca_trusted(&self) -> bool {
+        let mut verdict = self.ca_verdict.lock().await;
+        if let Some(fresh) = verdict
+            .as_ref()
+            .filter(|verdict| verdict.checked_at.elapsed() < CA_TRUST_RECHECK)
+        {
+            return fresh.trusted;
+        }
+        let ca = ensure_ca(&self.config.mitm_ca_dir);
+        let trusted = match &ca {
+            Ok(ca) => {
+                let (ca_trust, cert_path) = (Arc::clone(&self.ca_trust), ca.cert_path.clone());
+                tokio::task::spawn_blocking(move || ca_trust.trusts(&cert_path))
+                    .await
+                    .unwrap_or(false)
+            }
+            Err(_) => false,
+        };
+        if !trusted && verdict.as_ref().is_none_or(|previous| previous.trusted) {
+            let _ = self.log_event(json!({
+                "event": "capture_ca_untrusted",
+                "detail": "Payload capture is on, but this user does not trust the Relay CA, so Relay tunnels AI hosts without capturing payloads instead of breaking their TLS. Run trust_command in a Terminal in this user's session; capture resumes within a minute.",
+                "ca_path": ca.as_ref().ok().map(|ca| ca.cert_path.display().to_string()),
+                "trust_command": ca.as_ref().ok().map(|ca| trust_command(&ca.cert_path)),
+                "error": ca.as_ref().err().map(|error| format!("{error:#}")),
+            }));
+        }
+        *verdict = Some(CaVerdict {
+            trusted,
+            checked_at: Instant::now(),
+        });
+        trusted
     }
 
     async fn handle_mitm_connect(
@@ -1300,6 +1360,131 @@ mod tests {
         .await;
         assert!(forwarded.ends_with("{\"ok\":true}"), "{forwarded}");
         let _ = fs::remove_file(&log_path);
+    }
+
+    struct FakeCaTrust {
+        trusted: bool,
+        checks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CaTrust for FakeCaTrust {
+        fn trusts(&self, _cert_path: &std::path::Path) -> bool {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.trusted
+        }
+    }
+
+    fn capturing_proxy(trusted: bool) -> (Arc<RelayProxy>, Arc<FakeCaTrust>, std::path::PathBuf) {
+        let scratch = std::env::temp_dir().join(format!("relay-capture-{}", Uuid::new_v4()));
+        let ca_dir = scratch.join("ca");
+        fs::create_dir_all(ca_dir.join("certs")).unwrap();
+        for file in [
+            "litellm-relay-ca.pem",
+            "litellm-relay-ca-key.pem",
+            "certs/127.0.0.1.pem",
+            "certs/127.0.0.1-key.pem",
+        ] {
+            fs::write(ca_dir.join(file), "not a certificate").unwrap();
+        }
+        let mut config = RelaySettings::default().to_config();
+        config.mitm_enabled = true;
+        config.shadow_enabled = false;
+        config.ai_domains = vec!["127.0.0.1".to_string()];
+        config.mitm_ca_dir = ca_dir;
+        config.log_path = scratch.join("events.jsonl");
+        let trust = Arc::new(FakeCaTrust {
+            trusted,
+            checks: Default::default(),
+        });
+        let proxy = Arc::new(RelayProxy::new(config).with_ca_trust(trust.clone()));
+        (proxy, trust, scratch)
+    }
+
+    const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+    async fn open_tunnel(proxy: &Arc<RelayProxy>, upstream: &TcpListener) -> TcpStream {
+        let port = upstream.local_addr().unwrap().port();
+        let mut client = connect(proxy, None).await;
+        client
+            .write_all(
+                format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut established = vec![0u8; ESTABLISHED.len()];
+        timeout(PATIENCE, client.read_exact(&mut established))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(established, ESTABLISHED);
+        client
+    }
+
+    #[tokio::test]
+    async fn should_tunnel_ai_hosts_untouched_while_capture_is_on_and_the_ca_is_untrusted() {
+        let (proxy, trust, scratch) = capturing_proxy(false);
+        let hello = b"\x16\x03\x01\x00\x05hello";
+
+        for _ in 0..2 {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = open_tunnel(&proxy, &upstream).await;
+            let (mut upstream_side, _) =
+                timeout(PATIENCE, upstream.accept()).await.unwrap().unwrap();
+            client.write_all(hello).await.unwrap();
+            let mut seen = vec![0u8; hello.len()];
+            timeout(PATIENCE, upstream_side.read_exact(&mut seen))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(seen, hello);
+        }
+
+        let events = read_events(&proxy.config.log_path, 100);
+        let untrusted: Vec<&Value> = events
+            .iter()
+            .filter(|event| event["event"] == "capture_ca_untrusted")
+            .collect();
+        assert_eq!(untrusted.len(), 1, "{events:?}");
+        let ca_path = proxy.config.mitm_ca_dir.join("litellm-relay-ca.pem");
+        assert_eq!(
+            untrusted[0]["trust_command"],
+            format!(
+                "security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"{}\"",
+                ca_path.display()
+            )
+        );
+        assert!(events
+            .iter()
+            .all(|event| event["event"] != "payload_capture_failed"));
+        assert_eq!(trust.checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_still_intercept_ai_hosts_once_the_ca_is_trusted() {
+        let (proxy, _trust, scratch) = capturing_proxy(true);
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let mut client = open_tunnel(&proxy, &upstream).await;
+        let mut rest = Vec::new();
+        timeout(PATIENCE, client.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(timeout(Duration::from_millis(200), upstream.accept())
+            .await
+            .is_err());
+        let events = read_events(&proxy.config.log_path, 100);
+        assert!(events
+            .iter()
+            .any(|event| event["event"] == "payload_capture_failed"));
+        assert!(events
+            .iter()
+            .all(|event| event["event"] != "capture_ca_untrusted"));
+        fs::remove_dir_all(scratch).unwrap();
     }
 
     #[tokio::test]
