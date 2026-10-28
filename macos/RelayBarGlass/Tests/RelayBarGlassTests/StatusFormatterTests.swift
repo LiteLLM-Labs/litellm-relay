@@ -37,6 +37,21 @@ import Testing
         #expect(StatusFormatter.timestamp("soon") == nil)
     }
 
+    @Test func timestampReadsASpaceBetweenTheDateAndTheTime() {
+        let midnight = StatusFormatter.timestamp("2026-11-01T00:00:00Z")
+        #expect(midnight != nil)
+        #expect(StatusFormatter.timestamp("2026-11-01 00:00:00+00:00") == midnight)
+        #expect(StatusFormatter.timestamp("2026-11-01 00:00:00Z") == midnight)
+        #expect(StatusFormatter.timestamp("2026-11-01 00:00:00") == midnight)
+        #expect(StatusFormatter.timestamp("2026-11-01 09:00:00+09:00") == midnight)
+        #expect(StatusFormatter.timestamp("2026-11-01 00:00:00.250+00:00") == midnight.map { $0.addingTimeInterval(0.25) })
+        #expect(StatusFormatter.timestamp("2026-11-01T00:00:00.250Z") == midnight.map { $0.addingTimeInterval(0.25) })
+        #expect(StatusFormatter.timestamp("2026-11-01 00:00:00.250000+00:00") == midnight.map { $0.addingTimeInterval(0.25) })
+        #expect(StatusFormatter.timestamp("2026-11-01 soon") == nil)
+        let team = TeamBudget(id: "team-a", alias: nil, spend: 1, maxBudget: 2, budgetResetAt: "2026-11-01 00:00:00+00:00")
+        #expect(StatusFormatter.budgetLine(team: team, error: nil, polled: true, timeZone: .gmt) == "$1.00 of $2.00, resets 1 Nov")
+    }
+
     @Test func timestampReadsATimeWithoutAZoneAsUTC() {
         #expect(StatusFormatter.timestamp("2027-01-15T08:00:00") == StatusFormatter.timestamp("2027-01-15T08:00:00Z"))
         #expect(StatusFormatter.timestamp("2027-01-15T08:00:00.123") == StatusFormatter.timestamp("2027-01-15T08:00:00.123Z"))
@@ -72,9 +87,24 @@ import Testing
         #expect(StatusFormatter.budgetLine(team: noReset, error: nil, polled: true, timeZone: .gmt) == "$0.00 of $20.00")
     }
 
-    @Test func budgetLineShowsTheErrorOrTheUnreadState() {
-        let team = TeamBudget(id: "team-a", alias: nil, spend: 1, maxBudget: 2, budgetResetAt: nil)
-        #expect(StatusFormatter.budgetLine(team: team, error: "HTTP 403: not authorized", polled: true, timeZone: .gmt) == "HTTP 403: not authorized")
+    @Test func budgetLineShowsTheFallbackBudgetNextToTheError() {
+        let fallback = TeamBudget(id: "team-a", alias: nil, spend: 1, maxBudget: 2, budgetResetAt: "2026-11-01T00:00:00Z")
+        #expect(
+            StatusFormatter.budgetLine(team: fallback, error: "HTTP 403: not authorized", polled: true, timeZone: .gmt)
+                == "$1.00 of $2.00, resets 1 Nov\nHTTP 403: not authorized"
+        )
+        let uncapped = TeamBudget(id: "team-a", alias: nil, spend: 3, maxBudget: nil, budgetResetAt: nil)
+        #expect(StatusFormatter.budgetLine(team: uncapped, error: "timed out", polled: true, timeZone: .gmt) == "$3.00, no budget\ntimed out")
+        #expect(StatusFormatter.budgetLine(team: fallback, error: "", polled: true, timeZone: .gmt) == "$1.00 of $2.00, resets 1 Nov")
+    }
+
+    @Test func budgetLineShowsTheErrorAloneWhenNoBudgetWasRead() {
+        let unread = TeamBudget(id: "team-a", alias: nil, spend: nil, maxBudget: nil, budgetResetAt: nil)
+        #expect(StatusFormatter.budgetLine(team: unread, error: "HTTP 403: not authorized", polled: true, timeZone: .gmt) == "HTTP 403: not authorized")
+        #expect(StatusFormatter.budgetLine(team: nil, error: "HTTP 403: not authorized", polled: true, timeZone: .gmt) == "HTTP 403: not authorized")
+    }
+
+    @Test func budgetLineShowsTheUnreadState() {
         let unread = TeamBudget(id: "relay-qa", alias: nil, spend: nil, maxBudget: nil, budgetResetAt: nil)
         #expect(StatusFormatter.budgetLine(team: unread, error: nil, polled: false, timeZone: .gmt) == "Budget not read yet")
         #expect(StatusFormatter.budgetLine(team: nil, error: nil, polled: false, timeZone: .gmt) == "Budget not read yet")

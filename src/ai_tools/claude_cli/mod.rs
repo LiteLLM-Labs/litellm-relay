@@ -94,6 +94,7 @@ fn onboard_with(
     }
     if params.team.is_some() {
         settings.claude.team = params.team;
+        settings.gateway.team = None;
     }
 
     let host = Host::current();
@@ -799,6 +800,45 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn should_mint_the_onboarded_team_after_a_switch_picked_another() {
+        use crate::ai_tools::launch_agent::test_support::{FakeHost, HOME_LOCK};
+
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = env::temp_dir().join(format!("relay-cc-team-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let mut switched = settings_with_team(Some("first-onboard"));
+        switched.idp.issuer = "https://login.example.com".into();
+        switched.idp.client_id = "relay-client".into();
+        switched.gateway.team = Some("switched".into());
+
+        let seeded = save_settings(&switched);
+        let onboarded = onboard_with(
+            OnboardParams {
+                team: Some("eng".into()),
+                quiet: true,
+                ..OnboardParams::default()
+            },
+            &FakeHost::answering(),
+            None,
+        );
+        let saved = load_settings();
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).unwrap();
+        seeded.unwrap();
+        onboarded.unwrap();
+        assert_eq!(saved.unwrap().managed_team().as_deref(), Some("eng"));
+    }
+
     #[test]
     fn should_tell_a_node_script_claude_code_from_a_native_binary() {
         let root = env::temp_dir().join(format!("relay-cc-channel-{}", std::process::id()));

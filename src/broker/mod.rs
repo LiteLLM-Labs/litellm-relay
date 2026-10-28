@@ -518,6 +518,7 @@ struct State {
     last_source: Option<Source>,
     refused_callers: u64,
     proxy_token: Option<String>,
+    completed_sign_ins: u64,
 }
 
 enum Bearer {
@@ -662,6 +663,7 @@ impl Broker {
 
     pub fn sign_in(&self) -> Reply {
         self.refresh();
+        let sign_ins_at_start = self.lock_state().completed_sign_ins;
         let _renewal = self.lock_renewal();
         let target = self.lock_target().clone();
         if !matches!(target.mode, Mode::Idp(_)) {
@@ -669,17 +671,34 @@ impl Broker {
                 "sign-in needs an IdP; this device serves the configured Gateway key".to_string(),
             ));
         }
+        if let Some(reply) = self.signed_in_since(sign_ins_at_start) {
+            return reply;
+        }
         self.forget(&target.gateway_url, true);
         match self.issue_under_renewal_lock(&target, Context::Interactive) {
-            Reply::Credential(_) => Reply::SignedIn {
-                user_id: self
-                    .lock_state()
-                    .credential
-                    .as_ref()
-                    .and_then(|credential| credential.user_id.clone()),
-            },
+            Reply::Credential(_) => {
+                let mut state = self.lock_state();
+                state.completed_sign_ins += 1;
+                Reply::SignedIn {
+                    user_id: state
+                        .credential
+                        .as_ref()
+                        .and_then(|credential| credential.user_id.clone()),
+                }
+            }
             other => other,
         }
+    }
+
+    fn signed_in_since(&self, completed_sign_ins: u64) -> Option<Reply> {
+        let state = self.lock_state();
+        let another_sign_in_finished = state.completed_sign_ins != completed_sign_ins;
+        (another_sign_in_finished && state.session.is_some()).then(|| Reply::SignedIn {
+            user_id: state
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_id.clone()),
+        })
     }
 
     pub fn sign_out(&self) -> Reply {
@@ -796,7 +815,7 @@ impl Broker {
         }
         self.refresh();
         let target = self.lock_target().clone();
-        let refusal = match self.issue(&target, Context::Interactive) {
+        let refusal = match self.issue(&target, Context::NonInteractive) {
             Reply::Refused(refusal) => refusal,
             _ => return Reply::Switched(self.switched()),
         };
@@ -809,7 +828,13 @@ impl Broker {
             eprintln!("broker: the previous config could not be restored: {error:#}");
         }
         self.refresh();
-        Reply::Refused(Refusal::SwitchFailed(refusal.message().to_string()))
+        Reply::Refused(match refusal {
+            Refusal::SignedOut(_) => Refusal::SignedOut(
+                "not signed in on this device; sign in first with `relay sign-in` or RelayBar's Sign in, then switch again"
+                    .to_string(),
+            ),
+            other => Refusal::SwitchFailed(other.message().to_string()),
+        })
     }
 
     fn switched(&self) -> Switched {
@@ -1875,6 +1900,46 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_the_key_a_sign_in_finished_while_a_second_sign_in_waited() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let gate = rig.auth.gate_next_exchange();
+        let first = {
+            let broker = Arc::clone(&rig.broker);
+            thread::spawn(move || broker.sign_in())
+        };
+        gate.wait();
+        let second = {
+            let broker = Arc::clone(&rig.broker);
+            thread::spawn(move || broker.sign_in())
+        };
+        thread::sleep(Duration::from_millis(200));
+        gate.wait();
+        let signed_in = Reply::SignedIn {
+            user_id: Some("user-1".to_string()),
+        };
+        assert_eq!(first.join().expect("first sign-in"), signed_in);
+        assert_eq!(second.join().expect("second sign-in"), signed_in);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.keys.deletes().len(), 0);
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(
+            rig.broker.sign_in(),
+            Reply::SignedIn {
+                user_id: Some("user-1".to_string())
+            }
+        );
+        assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+    }
+
+    #[test]
     fn should_mint_for_a_team_added_to_the_config_after_start_without_a_browser() {
         let rig = Rig::new(idp_settings(None));
         let first = issued(credential(&rig, Context::Interactive));
@@ -2257,6 +2322,32 @@ mod tests {
         assert_eq!(rig.identity.sign_ins(), 1);
         assert_eq!(rig.browser_opens(), 1);
         assert_eq!(rig.broker.status().team.as_deref(), Some("team-a"));
+    }
+
+    #[test]
+    fn should_refuse_a_signed_out_switch_without_a_browser_and_keep_the_previous_team() {
+        let rig = Rig::new(environments_settings());
+        for refusal in [
+            refused(switch_team(&rig, "team-b")),
+            refused(switch_environment(&rig, "uat")),
+        ] {
+            assert_eq!(refusal.reason(), "signed_out");
+            assert!(
+                refusal.message().contains("sign in first"),
+                "{}",
+                refusal.message()
+            );
+        }
+        assert_eq!(rig.browser_opens(), 0);
+        assert_eq!(rig.identity.sign_ins(), 0);
+        assert_eq!(rig.keys.mints().len(), 0);
+        let stored = rig.settings.load().expect("settings");
+        assert_eq!(stored.gateway.url, GATEWAY);
+        assert_eq!(stored.gateway.team, None);
+        assert!(stored.gateway.team_by_environment.is_empty());
+        let status = rig.broker.status();
+        assert_eq!(status.team.as_deref(), Some("team-a"));
+        assert_eq!(status.environment.as_deref(), Some("prod"));
     }
 
     #[test]

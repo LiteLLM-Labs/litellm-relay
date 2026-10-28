@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::{
     ai_tools::idp::SIGN_IN_CEILING,
     broker::{Context as HelperContext, Request},
-    config::RelaySettings,
+    config::{config_path, RelaySettings},
 };
 
 pub const LAUNCH_AGENT_LABEL: &str = "ai.litellm.relay";
@@ -235,6 +235,12 @@ pub(crate) fn interpret(request: &Request, reply: &Value) -> Outcome {
         let message = reply["message"]
             .as_str()
             .unwrap_or("the daemon answered with an error");
+        if matches!(request, Request::SignOut) && reason == "static_key" {
+            return Outcome::Done(format!(
+                "Nothing to sign out; this device uses the static Gateway key from gateway.api_key in {}.",
+                config_path().display()
+            ));
+        }
         return match answers_json(request) {
             true => Outcome::Refused(json!({ "refused": reason, "message": message })),
             false => Outcome::Failed(format!("relay credential: {reason}: {message}")),

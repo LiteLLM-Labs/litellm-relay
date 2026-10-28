@@ -89,6 +89,7 @@ fn onboard_desktop_with(params: OnboardDesktopParams, daemon: &dyn DaemonHost) -
     }
     if params.team.is_some() {
         settings.claude.team = params.team;
+        settings.gateway.team = None;
     }
     if let Some(model) = params.model {
         settings.claude.model = model;
@@ -1561,6 +1562,9 @@ mod tests {
         let old_override = env::var_os(MANAGED_SETTINGS_PATH_ENV);
         env::set_var("HOME", &home);
         env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
+        let mut switched = RelaySettings::default();
+        switched.gateway.team = Some("switched".into());
+        save_settings(&switched).unwrap();
 
         onboard_desktop_with(
             OnboardDesktopParams {
@@ -1574,6 +1578,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_settings().unwrap().claude.team.as_deref(), Some("eng"));
+        assert_eq!(
+            load_settings().unwrap().managed_team().as_deref(),
+            Some("eng"),
+            "--team must win over a team an earlier switch picked"
+        );
 
         onboard_desktop_with(
             OnboardDesktopParams {

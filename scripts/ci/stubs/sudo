@@ -1,6 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 printf 'sudo %s\n' "$*" >> "${RELAY_SMOKE_LOG:?the smoke stubs need RELAY_SMOKE_LOG}"
+if [[ -n "${RELAY_SMOKE_SUDO_FAILS:-}" ]]; then
+  exit 1
+fi
+if [[ "${1:-}" == "-H" && "${2:-}" == "-u" ]]; then
+  shift 3
+  exec env -u RELAY_SMOKE_UID "$@"
+fi
+if [[ "${1:-}" == "install" && " $* " == *" -d "* ]]; then
+  mkdir -p "${RELAY_SMOKE_SYSTEM:?the smoke stubs need RELAY_SMOKE_SYSTEM}/$(basename "${@: -1}")"
+  exit 0
+fi
 if [[ "${1:-}" == "install" ]]; then
   mkdir -p "${RELAY_SMOKE_SYSTEM:?the smoke stubs need RELAY_SMOKE_SYSTEM}"
   cp "${@: -2:1}" "$RELAY_SMOKE_SYSTEM/$(basename "${@: -1}")"

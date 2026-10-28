@@ -731,6 +731,8 @@ install_relaybar_agent
 AUTOCONFIGURE_PLIST="$HOME/Library/LaunchAgents/ai.litellm.relay.autoconfigure.plist"
 DESKTOP_DAEMON_LABEL="ai.litellm.relay.autoconfigure-desktop"
 DESKTOP_DAEMON_PLIST="/Library/LaunchDaemons/$DESKTOP_DAEMON_LABEL.plist"
+DESKTOP_DAEMON_BINARY="/Library/PrivilegedHelperTools/$DESKTOP_DAEMON_LABEL"
+DESKTOP_DAEMON_LOG="/Library/Logs/$DESKTOP_DAEMON_LABEL"
 
 if [[ "$(id -u)" -eq 0 ]]; then
   SUDO=""
@@ -742,7 +744,12 @@ fi
 # is pinned to the installing user's home so Relay reads that user's config and
 # detects user-scoped evidence, while running as root to write the managed file.
 install_desktop_daemon() {
-  local tmp_plist
+  local tmp_plist helper_dir
+  helper_dir="$(dirname "$DESKTOP_DAEMON_BINARY")"
+  if [[ ! -d "$helper_dir" ]]; then
+    $SUDO install -d -m 0755 -o root -g wheel "$helper_dir" || return 1
+  fi
+  $SUDO install -m 0755 -o root -g wheel "$RELAY_HOME/bin/litellm-relay" "$DESKTOP_DAEMON_BINARY" || return 1
   tmp_plist="$(mktemp)"
   cat > "$tmp_plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -753,7 +760,7 @@ install_desktop_daemon() {
   <string>$DESKTOP_DAEMON_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$RELAY_HOME/bin/litellm-relay</string>
+    <string>$DESKTOP_DAEMON_BINARY</string>
     <string>autoconfigure</string>
     <string>--only</string>
     <string>claude-desktop</string>
@@ -773,9 +780,9 @@ install_desktop_daemon() {
   <key>StartInterval</key>
   <integer>$RELAY_AUTOCONFIGURE_INTERVAL</integer>
   <key>StandardOutPath</key>
-  <string>$RELAY_HOME/autoconfigure-desktop.out.log</string>
+  <string>$DESKTOP_DAEMON_LOG.out.log</string>
   <key>StandardErrorPath</key>
-  <string>$RELAY_HOME/autoconfigure-desktop.err.log</string>
+  <string>$DESKTOP_DAEMON_LOG.err.log</string>
 </dict>
 </plist>
 PLIST
@@ -788,7 +795,7 @@ PLIST
 
 remove_desktop_daemon() {
   $SUDO launchctl bootout system "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
-  $SUDO rm -f "$DESKTOP_DAEMON_PLIST" >/dev/null 2>&1 || true
+  $SUDO rm -f "$DESKTOP_DAEMON_PLIST" "$DESKTOP_DAEMON_BINARY" "$DESKTOP_DAEMON_LOG.out.log" "$DESKTOP_DAEMON_LOG.err.log" >/dev/null 2>&1 || true
 }
 
 if [[ "$RELAY_AUTOCONFIGURE" == "1" ]]; then

@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     private let binary: URL
     private let session: URLSession
     private let commandTimeout: TimeInterval
+    private let quitIntent: QuitIntent
+    private let terminate: @MainActor () -> Void
     private var pollTimer: Timer?
     private var tickTimer: Timer?
     private var signInTask: Task<Void, Never>?
@@ -40,8 +42,12 @@ final class AppModel: ObservableObject {
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         home: URL = RelayHome.locate(environment: ProcessInfo.processInfo.environment),
-        timing: AppTiming = .standard
+        timing: AppTiming = .standard,
+        quitIntent: QuitIntent = .shared,
+        terminate: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
+        self.quitIntent = quitIntent
+        self.terminate = terminate
         configPath = home.appendingPathComponent(".litellm-relay/config.yaml")
         relayPort = Self.configuredPort(configPath)
         binary = RelayBinary.locate(environment: environment, home: home)
@@ -158,7 +164,8 @@ final class AppModel: ObservableObject {
     }
 
     func quit() {
-        NSApplication.shared.terminate(nil)
+        quitIntent.record(.userQuit)
+        terminate()
     }
 
     private func signIn() {

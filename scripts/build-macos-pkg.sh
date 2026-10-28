@@ -121,7 +121,7 @@ install -m 0755 "$BINARY" "$STAGE_DIR/litellm-relay"
 install -m 0755 "$REPO_ROOT/src/install.sh" "$STAGE_DIR/install.sh"
 install -m 0755 "$REPO_ROOT/src/uninstall.sh" "$STAGE_DIR/uninstall.sh"
 if [[ -n "$CONFIG_FILE" ]]; then
-  install -m 0644 "$CONFIG_FILE" "$STAGE_DIR/config.yaml"
+  install -m 0600 "$CONFIG_FILE" "$STAGE_DIR/config.yaml"
 fi
 if [[ -n "$RELAYBAR_APP" ]]; then
   ditto "$RELAYBAR_APP" "$STAGE_DIR/RelayBarGlass.app"

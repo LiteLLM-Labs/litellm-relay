@@ -14,6 +14,23 @@ bom_mode() {
   lsbom -p fm "$1" | awk -F '\t' -v entry="$2" '$1 == entry { print $2 }'
 }
 
+bom_uid() {
+  lsbom -p fu "$1" | awk -F '\t' -v entry="$2" '$1 == entry { print $2 }'
+}
+
+build_component() {
+  local name="$1" root_mode="$2" config_mode="$3"
+  mkdir -m "$root_mode" "$tmp_dir/$name-root"
+  install -m 0755 "$tmp_dir/stub-binary" "$tmp_dir/$name-root/litellm-relay"
+  install -m "$config_mode" "$ROOT/mdm/config.yaml.example" "$tmp_dir/$name-root/config.yaml"
+  pkgbuild \
+    --root "$tmp_dir/$name-root" \
+    --identifier ai.litellm.relay.ci \
+    --version 0.0.0-ci \
+    --install-location /usr/local/litellm-relay \
+    "$tmp_dir/$name.pkg" > /dev/null
+}
+
 printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/stub-binary"
 chmod 755 "$tmp_dir/stub-binary"
 app="$tmp_dir/RelayBarGlass.app"
@@ -47,7 +64,9 @@ root_mode="$(bom_mode "$tmp_dir/expanded/Bom" .)"
 installer_mode="$(bom_mode "$tmp_dir/expanded/Bom" ./install.sh)"
 [[ "$installer_mode" == "100755" ]] || fail "install.sh mode is $installer_mode, expected 100755"
 config_mode="$(bom_mode "$tmp_dir/expanded/Bom" ./config.yaml)"
-[[ "$config_mode" == "100644" ]] || fail "config.yaml mode is $config_mode, expected 100644"
+[[ "$config_mode" == "100600" ]] || fail "config.yaml mode is $config_mode, expected 100600"
+config_uid="$(bom_uid "$tmp_dir/expanded/Bom" ./config.yaml)"
+[[ "$config_uid" == "0" ]] || fail "config.yaml is owned by uid $config_uid, expected root"
 [[ -f "$tmp_dir/expanded/Scripts/postinstall" ]] || fail "the package carries no postinstall"
 grep -q 'Payload of .* is readable by every user' "$tmp_dir/build.out" || fail "the builder did not check the payload"
 app_binary_mode="$(bom_mode "$tmp_dir/expanded/Bom" ./RelayBarGlass.app/Contents/MacOS/RelayBarGlass)"
@@ -57,27 +76,27 @@ app_binary_mode="$(bom_mode "$tmp_dir/expanded/Bom" ./RelayBarGlass.app/Contents
 [[ "$(xmllint --xpath "count(/pkg-info/relocate/bundle[@id='$relaybar_id'])" "$tmp_dir/expanded/PackageInfo")" == "0" ]] \
   || fail "the installer may relocate $relaybar_id away from /usr/local/litellm-relay"
 
-mkdir -m 0700 "$tmp_dir/private-root"
-install -m 0755 "$tmp_dir/stub-binary" "$tmp_dir/private-root/litellm-relay"
-install -m 0600 "$ROOT/mdm/config.yaml.example" "$tmp_dir/private-root/config.yaml"
-pkgbuild \
-  --root "$tmp_dir/private-root" \
-  --identifier ai.litellm.relay.ci \
-  --version 0.0.0-ci \
-  --install-location /usr/local/litellm-relay \
-  "$tmp_dir/private.pkg" > /dev/null
-
+build_component private 0700 0600
 if "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/private.pkg" > "$tmp_dir/check.out" 2>&1; then
   fail "check-payload.sh accepted a payload staged in a 0700 root"
 fi
 grep -q '^\. 40700 ' "$tmp_dir/check.out" || fail "check-payload.sh did not name the 0700 payload root"
-grep -q '^\./config\.yaml 100600 ' "$tmp_dir/check.out" || fail "check-payload.sh did not name the 0600 config file"
+if grep -q '^\./config\.yaml ' "$tmp_dir/check.out"; then
+  cat "$tmp_dir/check.out" >&2
+  fail "check-payload.sh flagged a root-only 0600 config file"
+fi
+
+build_component readable-config 0755 0644
+if "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/readable-config.pkg" > "$tmp_dir/check-readable.out" 2>&1; then
+  fail "check-payload.sh accepted a config.yaml every user can read"
+fi
+grep -q '^\./config\.yaml 100644 ' "$tmp_dir/check-readable.out" || fail "check-payload.sh did not name the world-readable config file"
 
 productbuild --package "$tmp_dir/private.pkg" "$tmp_dir/private-dist.pkg" > /dev/null
 if "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/private-dist.pkg" > "$tmp_dir/check-dist.out" 2>&1; then
   fail "check-payload.sh accepted a distribution package whose component has a 0700 root"
 fi
-grep -q '^\./config\.yaml 100600 ' "$tmp_dir/check-dist.out" || fail "check-payload.sh did not name the 0600 config file inside the distribution package"
+grep -q '^\. 40700 ' "$tmp_dir/check-dist.out" || fail "check-payload.sh did not name the 0700 payload root inside the distribution package"
 
 productbuild --package "$tmp_dir/relay.pkg" "$tmp_dir/relay-dist.pkg" > /dev/null
 "$ROOT/scripts/macos-pkg/check-payload.sh" "$tmp_dir/relay-dist.pkg" > "$tmp_dir/check-dist-ok.out" 2>&1 \

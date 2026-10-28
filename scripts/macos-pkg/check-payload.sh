@@ -3,10 +3,13 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Check that every entry in a macOS .pkg payload is readable by every user, so
-the postinstall can run install.sh as the console user once the payload lands
-under /usr/local owned by root. A distribution package (productbuild) is
-checked component by component.
+Check that every entry in a macOS .pkg payload except ./config.yaml is
+readable by every user, so the postinstall can run install.sh as the console
+user once the payload lands under /usr/local owned by root, and that
+./config.yaml, when present, is owned by root and closed to everyone else,
+since it may carry gateway.api_key and the postinstall hands the console user
+a private copy instead. A distribution package (productbuild) is checked
+component by component.
 
 Usage:
   scripts/macos-pkg/check-payload.sh PKG
@@ -54,11 +57,18 @@ done
 private_entries() {
   local component
   for component in "${COMPONENTS[@]}"; do
-    lsbom -p fm "$component/Bom" | awk -F '\t' '
+    lsbom -p fmu "$component/Bom" | awk -F '\t' '
       {
         mode = $2
         kind = substr(mode, 1, length(mode) - 4)
+        group = substr(mode, length(mode) - 1, 1)
         others = substr(mode, length(mode), 1)
+        if ($1 == "./config.yaml" || $1 == "./._config.yaml") {
+          if (kind != "10" || $3 != "0" || group != "0" || others != "0") {
+            print $1 " " mode " uid " $3 " (config file other users can reach; it must be owned by root and closed to group and others)"
+          }
+          next
+        }
         if (kind == "4" && others != "5" && others != "7") {
           print $1 " " mode " (directory other users cannot read and enter)"
         }
@@ -74,10 +84,11 @@ PRIVATE_ENTRIES="$(private_entries)"
 if [[ -n "$PRIVATE_ENTRIES" ]]; then
   cat >&2 <<PRIVATE
 The payload of $PKG has entries other users cannot read, so the postinstall's
-install.sh run as the console user would be denied:
+install.sh run as the console user would be denied, or a config.yaml other
+users can reach:
 $PRIVATE_ENTRIES
 PRIVATE
   exit 1
 fi
 
-echo "Payload of $PKG is readable by every user."
+echo "Payload of $PKG is readable by every user, apart from a root-only config.yaml."

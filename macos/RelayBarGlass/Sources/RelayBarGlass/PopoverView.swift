@@ -118,7 +118,7 @@ struct PopoverView: View {
         return VStack(alignment: .leading, spacing: 6) {
             iconLine("person.crop.circle", StatusFormatter.displayName(broker: broker, account: account), font: GlassTheme.label, color: GlassTheme.ink)
             iconLine("key", keyLine, font: GlassTheme.body, color: GlassTheme.muted)
-            iconLine("dollarsign.circle", budgetLine, font: GlassTheme.body, color: GlassTheme.muted)
+            iconLine("dollarsign.circle", budgetLine, font: GlassTheme.body, color: GlassTheme.muted, lines: 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
@@ -243,10 +243,10 @@ struct PopoverView: View {
         }
     }
 
-    private func iconLine(_ icon: String, _ text: String, font: Font, color: Color) -> some View {
-        HStack(spacing: 8) {
+    private func iconLine(_ icon: String, _ text: String, font: Font, color: Color, lines: Int = 2) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(GlassTheme.muted).frame(width: 14)
-            Text(text).font(font).foregroundStyle(color).lineLimit(2)
+            Text(text).font(font).foregroundStyle(color).lineLimit(lines)
         }
     }
 

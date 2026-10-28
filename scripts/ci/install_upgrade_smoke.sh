@@ -93,6 +93,7 @@ chmod 755 "$tmp_dir/RelayBarGlass.app/Contents/MacOS/RelayBarGlass"
 home="$tmp_dir/home"
 relay_home="$home/.litellm-relay"
 installed="$relay_home/bin/litellm-relay"
+desktop_binary="/Library/PrivilegedHelperTools/ai.litellm.relay.autoconfigure-desktop"
 uid="$(id -u)"
 
 run_install() {
@@ -119,6 +120,14 @@ expect_postinstall_shape() {
     == "$home/.local/bin:"* ]] || fail "the auto-configure agent ($name) does not put ~/.local/bin on PATH"
   plutil -extract WatchPaths xml1 -o - "$tmp_dir/system/ai.litellm.relay.autoconfigure-desktop.plist" \
     | grep -qF "<string>$relay_home/config.yaml</string>" || fail "the Claude Desktop daemon ($name) does not watch $relay_home/config.yaml"
+  [[ "$(plutil -extract ProgramArguments.0 raw -o - "$tmp_dir/system/ai.litellm.relay.autoconfigure-desktop.plist")" \
+    == "$desktop_binary" ]] || fail "the Claude Desktop daemon ($name) does not run the root-owned copy at $desktop_binary"
+  for stream in StandardOutPath StandardErrorPath; do
+    [[ "$(plutil -extract "$stream" raw -o - "$tmp_dir/system/ai.litellm.relay.autoconfigure-desktop.plist")" \
+      == /Library/Logs/ai.litellm.relay.autoconfigure-desktop.* ]] || fail "the Claude Desktop daemon ($name) writes $stream outside /Library/Logs"
+  done
+  expect_line "$tmp_dir/$name.calls" "^sudo install -m 0755 -o root -g wheel $installed $desktop_binary$"
+  cmp -s "$installed" "$tmp_dir/system/$(basename "$desktop_binary")" || fail "the root-owned copy ($name) is not the installed binary"
 }
 
 run_install fresh "$tmp_dir/stub-relay" || { cat "$tmp_dir/fresh.out" >&2; fail "install.sh (fresh) exited non-zero"; }

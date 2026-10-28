@@ -75,6 +75,68 @@ import Testing
     }
     """
 
+    static let teamInfoDenied = """
+    {
+      "listen": "127.0.0.1:4142",
+      "log_path": "/Users/dev/.litellm-relay/events.jsonl",
+      "ai_domains": ["api.anthropic.com", "api.openai.com"],
+      "notion_domains": [],
+      "capture_payloads": false,
+      "mitm_ca_path": null,
+      "shadow_enabled": false,
+      "gateway_url": "https://gateway.example.com",
+      "events_loaded": 12,
+      "known_apps": [],
+      "attribution": {"destination_field": "destination_app", "compatibility_field": "app", "sources": ["known_app_catalog"], "confidences": ["high"]},
+      "runtime": "rust",
+      "credential": {"configured": true, "state": "valid"},
+      "broker": {
+        "signed_in": true,
+        "user_id": "user-1",
+        "display_name": "Dev Eloper",
+        "team": "team-a",
+        "environment": "uat",
+        "gateway_url": "https://uat.example.com",
+        "key_expires_at": "2027-01-15T08:00:00Z",
+        "key_extended_at": "2027-01-15T07:30:00Z",
+        "source": "minted_key",
+        "refused_callers": 2
+      },
+      "mcp": {"catalog_tools": 4, "servers": {"github": {"tools": 4, "active": true}}},
+      "account": {
+        "user": {"id": "user-1", "email": "dev@example.com"},
+        "teams": [{"id": "team-a", "alias": "Team A"}, {"id": "team-b", "alias": "Team B"}],
+        "teams_error": null,
+        "team": {"id": "team-a", "alias": "Team A", "spend": 7.25, "max_budget": 20.0, "budget_reset_at": "2027-02-01T00:00:00+00:00"},
+        "budget_error": "team_id=team-a is not allowed to call /team/info",
+        "gateway": {"url": "https://uat.example.com", "reachable": false, "checked_at": "2027-01-15T07:59:30Z", "error": "connection refused"},
+        "polled_at": "2027-01-15T07:59:00Z"
+      },
+      "environments": {"current": "uat", "available": [{"name": "dev", "url": "https://gateway.example.com"}, {"name": "uat", "url": "https://uat.example.com"}]}
+    }
+    """
+
+    static let noTeamsListed = """
+    {
+      "listen": "127.0.0.1:4142",
+      "gateway_url": "https://gateway.example.com",
+      "runtime": "rust",
+      "credential": {"configured": true, "state": "valid"},
+      "broker": {"signed_in": true, "user_id": "user-2", "display_name": null, "team": "team-c", "environment": null, "gateway_url": "https://gateway.example.com", "key_expires_at": null, "key_extended_at": null, "source": "session_credential", "refused_callers": 0},
+      "mcp": {"catalog_tools": 0, "servers": {}},
+      "account": {
+        "user": {"id": "user-2", "email": null},
+        "teams": [{"id": "team-c", "alias": null}],
+        "teams_error": "the Gateway lists no teams for this user",
+        "team": {"id": "team-c", "alias": null, "spend": 0.5, "max_budget": null, "budget_reset_at": null},
+        "budget_error": null,
+        "gateway": {"url": "https://gateway.example.com", "reachable": true, "checked_at": "2027-01-15T08:00:05Z", "error": "HTTP 503: warming up"},
+        "polled_at": "2027-01-15T08:00:00Z"
+      },
+      "environments": {"current": null, "available": []}
+    }
+    """
+
     static let olderDaemon = """
     {"listen": "127.0.0.1:4142", "runtime": "rust", "broker": null, "account": null, "environments": null, "mcp": null}
     """
@@ -96,6 +158,71 @@ import Testing
         #expect(status.mcp?.catalogTools == 3)
         #expect(status.mcp?.servers?["github"] == McpServer(tools: 2, active: true))
         #expect(status.mcp?.servers?["my_jira"]?.active == false)
+    }
+
+    @Test func decodesEveryFieldTheDaemonSendsWhenTheTeamBudgetFellBack() throws {
+        let expected = RelayStatus(
+            broker: BrokerStatus(
+                signedIn: true,
+                userId: "user-1",
+                displayName: "Dev Eloper",
+                team: "team-a",
+                environment: "uat",
+                gatewayUrl: "https://uat.example.com",
+                keyExpiresAt: "2027-01-15T08:00:00Z",
+                source: "minted_key"
+            ),
+            account: AccountStatus(
+                user: AccountUser(id: "user-1", email: "dev@example.com"),
+                teams: [TeamEntry(id: "team-a", alias: "Team A"), TeamEntry(id: "team-b", alias: "Team B")],
+                teamsError: nil,
+                team: TeamBudget(id: "team-a", alias: "Team A", spend: 7.25, maxBudget: 20, budgetResetAt: "2027-02-01T00:00:00+00:00"),
+                budgetError: "team_id=team-a is not allowed to call /team/info",
+                gateway: GatewayProbe(url: "https://uat.example.com", reachable: false, checkedAt: "2027-01-15T07:59:30Z", error: "connection refused"),
+                polledAt: "2027-01-15T07:59:00Z"
+            ),
+            environments: EnvironmentsStatus(
+                current: "uat",
+                available: [EnvironmentEntry(name: "dev", url: "https://gateway.example.com"), EnvironmentEntry(name: "uat", url: "https://uat.example.com")]
+            ),
+            mcp: McpStatus(catalogTools: 4, servers: ["github": McpServer(tools: 4, active: true)])
+        )
+        #expect(try RelayStatus.decode(Data(Self.teamInfoDenied.utf8)) == expected)
+    }
+
+    @Test func decodesTheTeamsErrorAndAGatewayProbeError() throws {
+        let expected = RelayStatus(
+            broker: BrokerStatus(
+                signedIn: true,
+                userId: "user-2",
+                displayName: nil,
+                team: "team-c",
+                environment: nil,
+                gatewayUrl: "https://gateway.example.com",
+                keyExpiresAt: nil,
+                source: "session_credential"
+            ),
+            account: AccountStatus(
+                user: AccountUser(id: "user-2", email: nil),
+                teams: [TeamEntry(id: "team-c", alias: nil)],
+                teamsError: "the Gateway lists no teams for this user",
+                team: TeamBudget(id: "team-c", alias: nil, spend: 0.5, maxBudget: nil, budgetResetAt: nil),
+                budgetError: nil,
+                gateway: GatewayProbe(url: "https://gateway.example.com", reachable: true, checkedAt: "2027-01-15T08:00:05Z", error: "HTTP 503: warming up"),
+                polledAt: "2027-01-15T08:00:00Z"
+            ),
+            environments: EnvironmentsStatus(current: nil, available: []),
+            mcp: McpStatus(catalogTools: 0, servers: [:])
+        )
+        #expect(try RelayStatus.decode(Data(Self.noTeamsListed.utf8)) == expected)
+    }
+
+    @Test func showsTheFallbackBudgetAndItsErrorFromADaemonStatus() throws {
+        let account = try #require(try RelayStatus.decode(Data(Self.teamInfoDenied.utf8)).account)
+        #expect(
+            StatusFormatter.budgetLine(team: account.team, error: account.budgetError, polled: account.polledAt != nil, timeZone: .gmt)
+                == "$7.25 of $20.00, resets 1 Feb\nteam_id=team-a is not allowed to call /team/info"
+        )
     }
 
     @Test func decodesASignedOutDaemonWithNullBudgetFields() throws {

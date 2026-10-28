@@ -2,7 +2,14 @@ import SwiftUI
 
 @main
 struct RelayBarGlassApp: App {
+    @NSApplicationDelegateAdaptor(RelayBarDelegate.self) private var delegate
     private let model = AppModel()
+
+    init() {
+        guard let older = SingleInstance.olderCopy(bundleIdentifier: Bundle.main.bundleIdentifier) else { return }
+        FileHandle.standardError.write(Data("relaybar: another copy (pid \(older.pid)) is already running; quitting\n".utf8))
+        exit(EXIT_SUCCESS)
+    }
 
     var body: some Scene {
         MenuBarExtra {

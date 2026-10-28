@@ -12,6 +12,7 @@ source "$ROOT/scripts/ci/smoke_stubs.sh"
 
 cleanup() {
   /usr/bin/security delete-keychain "$keychain" > /dev/null 2>&1 || true
+  chmod -R u+w "$tmp_dir" 2> /dev/null || true
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
@@ -100,5 +101,73 @@ grep -q "Package payload: $payload" "$tmp_dir/uninstall.out" || fail "the uninst
 grep -q "Relay data: $relay_home" "$tmp_dir/uninstall.out" || fail "an uninstall run as root did not target the console user's Relay data"
 grep -q "warning: the Relay CA was left in $keychain" "$tmp_dir/uninstall.out" || fail "an uninstall run as root did not look in the console user's keychain"
 grep -q "^  $(sha1_of "$current")\$" "$tmp_dir/uninstall.out" || fail "an uninstall run as root did not list the console user's CA"
+
+as_root() {
+  : > "$tmp_dir/calls.log"
+  with_stubs HOME="$tmp_dir/root-home" RELAY_SMOKE_UID=0 RELAY_PKG_PAYLOAD="$payload" "$@"
+}
+
+as_root_with_console_user() {
+  as_root RELAY_SMOKE_CONSOLE_USER=relay-smoke RELAY_SMOKE_CONSOLE_HOME="$home" RELAY_SMOKE_CONSOLE_UID=4242 "$@"
+}
+
+mint_ca "$stale"
+sha1_of "$stale" > "$tmp_dir/trusted"
+as_root_with_console_user bash "$ROOT/src/uninstall.sh" --keep-bin --remove-ca-trust > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "uninstall.sh run as root from the user's GUI session exited non-zero"
+[[ "$(relay_ca_count)" == "0" ]] || fail "a root uninstall in the GUI session left $(relay_ca_count) Relay CA certificate(s)"
+[[ ! -s "$tmp_dir/trusted" ]] || fail "a root uninstall in the GUI session left the console user's trust setting: $(cat "$tmp_dir/trusted")"
+as_user="launchctl asuser 4242 sudo -H -u relay-smoke security"
+grep -qx "$as_user delete-certificate -Z $(sha1_of "$stale") -t $keychain" "$tmp_dir/calls.log" \
+  || fail "a root uninstall did not delete the console user's trusted CA as that user together with its trust setting"
+[[ "$(grep -c '^security ' "$tmp_dir/calls.log")" == "$(grep -c "^$as_user " "$tmp_dir/calls.log")" ]] \
+  || fail "a root uninstall ran security outside the console user's session: $(grep '^security ' "$tmp_dir/calls.log")"
+
+mkdir -p "$payload/RelayBarGlass.app/Contents/MacOS"
+touch "$home/Library/LaunchAgents/ai.litellm.relaybar.plist"
+if as_root RELAY_SMOKE_CONSOLE_USER=loginwindow bash "$ROOT/src/uninstall.sh" --remove-data > "$tmp_dir/uninstall.out" 2>&1; then
+  fail "uninstall.sh run as root at the login window exited 0"
+fi
+grep -q "nobody is logged in at the console" "$tmp_dir/uninstall.out" || fail "the login window refusal did not say why"
+grep -q "RELAY_USER_HOME=/Users/<name>" "$tmp_dir/uninstall.out" || fail "the login window refusal did not say how to name a user"
+[[ ! -s "$tmp_dir/calls.log" ]] || fail "uninstall.sh run as root at the login window changed something: $(cat "$tmp_dir/calls.log")"
+[[ -d "$payload" ]] || fail "uninstall.sh run as root at the login window removed the package payload"
+[[ -e "$home/Library/LaunchAgents/ai.litellm.relaybar.plist" ]] || fail "uninstall.sh run as root at the login window removed a user's plist"
+[[ -d "$relay_home" ]] || fail "uninstall.sh run as root at the login window removed Relay data"
+
+as_root RELAY_SMOKE_CONSOLE_USER=loginwindow RELAY_USER_HOME="$home" bash "$ROOT/src/uninstall.sh" > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "uninstall.sh run as root with RELAY_USER_HOME exited non-zero"
+grep -qx "launchctl bootout gui/$(id -u)/ai.litellm.relaybar" "$tmp_dir/calls.log" \
+  || fail "uninstall.sh run as root with RELAY_USER_HOME did not stop that user's RelayBar agent"
+[[ ! -e "$home/Library/LaunchAgents/ai.litellm.relaybar.plist" ]] || fail "uninstall.sh run as root with RELAY_USER_HOME left that user's RelayBar plist"
+grep -q "Relay data: $relay_home" "$tmp_dir/uninstall.out" || fail "uninstall.sh run as root with RELAY_USER_HOME did not target that user's Relay data"
+
+mkdir -p "$payload/RelayBarGlass.app/Contents/MacOS"
+: > "$tmp_dir/calls.log"
+with_stubs HOME="$home" RELAY_HOME="$relay_home" RELAY_SMOKE_SUDO_FAILS=1 RELAY_PKG_PAYLOAD="$payload" \
+  bash "$ROOT/src/uninstall.sh" --remove-data > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "a user uninstall on a Mac with the package payload exited non-zero"
+[[ -d "$payload" ]] || fail "a user uninstall removed the package payload shared with every account"
+if grep -q "^sudo .*$payload" "$tmp_dir/calls.log" || grep -q '^pkgutil ' "$tmp_dir/calls.log"; then
+  fail "a user uninstall reached for the package payload or its receipt: $(cat "$tmp_dir/calls.log")"
+fi
+grep -q "The shared package payload at $payload stays.*sudo $payload/uninstall.sh" "$tmp_dir/uninstall.out" \
+  || fail "a user uninstall did not say who removes the package payload"
+[[ ! -e "$relay_home" ]] || fail "a user uninstall on a Mac with the package payload did not remove Relay data"
+grep -q "LiteLLM Relay uninstall complete." "$tmp_dir/uninstall.out" || fail "a user uninstall on a Mac with the package payload printed no summary"
+
+mkdir -p "$relay_home/mitm"
+chmod 0555 "$payload"
+as_root_with_console_user bash "$ROOT/src/uninstall.sh" --remove-data > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "a root uninstall whose payload removal failed exited non-zero"
+chmod 0755 "$payload"
+[[ -d "$payload" ]] || fail "the smoke could not make the payload removal fail"
+grep -q "warning: could not remove the package payload at $payload" "$tmp_dir/uninstall.out" \
+  || fail "a root uninstall did not warn that the payload removal failed"
+if grep -q '^pkgutil --forget' "$tmp_dir/calls.log"; then
+  fail "a root uninstall forgot the receipt of a payload it could not remove"
+fi
+[[ ! -e "$relay_home" ]] || fail "a failed payload removal stopped --remove-data"
+grep -q "LiteLLM Relay uninstall complete." "$tmp_dir/uninstall.out" || fail "a failed payload removal stopped the summary"
 
 echo "uninstall CA smoke passed"

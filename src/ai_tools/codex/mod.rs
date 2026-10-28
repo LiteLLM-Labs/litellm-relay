@@ -102,6 +102,7 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
     }
     if params.team.is_some() {
         settings.codex.team = params.team;
+        settings.gateway.team = None;
     }
 
     let explicit_key = params.api_key.filter(|key| !key.trim().is_empty());
@@ -692,6 +693,40 @@ trust_level = \"trusted\" # inline comment
 
         env::remove_var(CODEX_CONFIG_PATH_ENV);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_mint_the_onboarded_team_after_a_switch_picked_another() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = env::temp_dir().join(format!("relay-codex-team-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let mut switched = settings_with_team(Some("first-onboard"));
+        switched.gateway.team = Some("switched".into());
+
+        let seeded = save_settings(&switched);
+        let onboarded = onboard_with(
+            CodexOnboardParams {
+                team: Some("eng".into()),
+                quiet: true,
+                ..CodexOnboardParams::default()
+            },
+            &FakeHost::answering(),
+        );
+        let saved = load_settings();
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).unwrap();
+        seeded.unwrap();
+        onboarded.unwrap();
+        assert_eq!(saved.unwrap().managed_team().as_deref(), Some("eng"));
     }
 
     #[test]

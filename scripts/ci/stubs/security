@@ -2,6 +2,9 @@
 set -euo pipefail
 printf 'security %s\n' "$*" >> "${RELAY_SMOKE_LOG:?the smoke stubs need RELAY_SMOKE_LOG}"
 trusted="${RELAY_SMOKE_TRUSTED:?the smoke stubs need RELAY_SMOKE_TRUSTED}"
+if [[ "${RELAY_SMOKE_UID:-}" == "0" ]]; then
+  trusted="$trusted.root"
+fi
 touch "$trusted"
 
 sha1_of() {

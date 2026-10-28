@@ -172,9 +172,8 @@ impl RelaySettings {
     }
 
     fn carrying_team_on_the_same_gateway(self, previous: &RelaySettings) -> CarriedSelection {
-        let same_gateway = self.current_environment().is_none()
-            && without_trailing_slash(self.gateway.url.trim())
-                == without_trailing_slash(previous.gateway.url.trim());
+        let same_gateway = without_trailing_slash(self.gateway.url.trim())
+            == without_trailing_slash(previous.gateway.url.trim());
         if !same_gateway {
             return CarriedSelection::Nothing(format!(
                 "the new config does not name the previous Gateway {}",
@@ -1429,7 +1428,7 @@ codex:
     }
 
     #[test]
-    fn should_carry_the_team_only_while_a_single_gateway_config_keeps_the_same_url() {
+    fn should_carry_the_team_of_a_single_gateway_config_only_while_the_url_stays() {
         let previous: RelaySettings =
             parse_settings("gateway:\n  url: https://gw.example.com/\n  team: eng\n")
                 .expect("settings");
@@ -1437,11 +1436,19 @@ codex:
             parse_settings("gateway:\n  url: https://gw.example.com\n").expect("settings");
         let moved: RelaySettings =
             parse_settings("gateway:\n  url: https://gw2.example.com\n").expect("settings");
+        let with_environments: RelaySettings = parse_settings(
+            "gateway:\n  url: https://gw.example.com\nenvironments:\n  - name: prod\n    url: https://gw.example.com\n    team: prod-default\n  - name: uat\n    url: https://uat.example.com\n",
+        )
+        .expect("settings");
 
         let (settings, summary) = carried(same.carrying_selection_from(&previous));
         assert_eq!(settings.gateway.team.as_deref(), Some("eng"));
         assert_eq!(settings.gateway.url, "https://gw.example.com");
         assert_eq!(summary, "carried the team eng on https://gw.example.com");
+
+        let (settings, _) = carried(with_environments.carrying_selection_from(&previous));
+        assert_eq!(settings.current_environment().unwrap().name, "prod");
+        assert_eq!(settings.managed_team().as_deref(), Some("eng"));
 
         assert_eq!(
             carried_nothing(moved.carrying_selection_from(&previous)),

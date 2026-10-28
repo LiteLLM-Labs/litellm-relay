@@ -53,11 +53,15 @@ release (`v*`) also builds the `.pkg` per architecture in
 
 The payload lands at `/usr/local/litellm-relay` owned by root, and the
 postinstall runs `install.sh` from there as the console user, so every payload
-entry has to be readable by other users. The builder stages the payload in a
-world-readable root and then runs
+entry except `config.yaml` has to be readable by other users. `config.yaml` is
+installed root-owned with mode 0600, so a seeded `gateway.api_key` is not
+readable by other accounts on the Mac, and the postinstall hands `install.sh` a
+private copy owned by the console user, which it deletes after the install.
+The builder stages the payload in a world-readable root and then runs
 [`scripts/macos-pkg/check-payload.sh`](../scripts/macos-pkg/check-payload.sh)
 on the built package, which fails the build and lists any entry other users
-could not read. Run it by hand on any `.pkg` before uploading it to your MDM.
+could not read, and a `config.yaml` that is not root-only. Run it by hand on
+any `.pkg` before uploading it to your MDM.
 It checks every component package, including each one inside a
 `productbuild` distribution package, and it fails on a component that has no
 Bom, since that component's payload modes cannot be read.
@@ -95,13 +99,25 @@ touching system settings:
 curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
 ```
 
+## Deploy while a user is logged in
+
+The postinstall installs Relay for the user logged in at the console. A
+package that runs at the login window or during Setup Assistant, as an
+enrollment trigger often does, only stages the payload at
+`/usr/local/litellm-relay`, and nothing installs Relay until the package runs
+again while a user is logged in. Deploy it with a login or check-in trigger
+scoped to a logged-in user, or re-run it after enrollment.
+
 ## Jamf Pro
 
 1. **Upload the package.** Settings → Computer Management → Packages → New (or
    upload via Jamf Admin). Upload `litellm-relay-<version>.pkg`.
 2. **Create the deploy policy.** Computers → Policies → New. Add a **Packages**
-   payload with the Relay package, action **Install**. Trigger: Recurring
-   check-in (or Enrollment Complete). Scope to your **pilot Smart Group** first.
+   payload with the Relay package, action **Install**. Trigger: Login, or
+   Recurring check-in; an Enrollment Complete run before anyone logs in only
+   stages the payload (see
+   [Deploy while a user is logged in](#deploy-while-a-user-is-logged-in)).
+   Scope to your **pilot Smart Group** first.
 3. **Deploy the PAC profile.** Computers → Configuration Profiles → New. Add a
    **Proxies** payload → Automatic Proxy Configuration → URL
    `http://127.0.0.1:4142/proxy.pac`. Alternatively upload
@@ -172,8 +188,17 @@ openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 825 \
   -subj "/CN=LiteLLM Relay Local Root CA" \
   -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "nameConstraints=critical,permitted;DNS:anthropic.com,permitted;DNS:claude.ai,permitted;DNS:openai.com,permitted;DNS:chatgpt.com,permitted;DNS:notion.so,permitted;DNS:notion.com" \
   -keyout litellm-relay-ca-key.pem -out litellm-relay-ca.pem
 ```
+
+The name constraints and the server-auth usage limit the CA to TLS server
+certificates for the hosts Relay intercepts by default (those domains and
+their subdomains), so macOS and OpenSSL reject anything it signs for another
+site. When the managed config adds hosts under `domains.ai`, add a
+`permitted;DNS:<domain>` entry for each one, or Relay's certificates for them
+fail to verify.
 
 Push `litellm-relay-ca.pem` as a certificate payload in a configuration
 profile (a Jamf Certificate payload, an Intune trusted certificate profile, or
@@ -181,10 +206,12 @@ a Kandji Certificate Library Item), which macOS trusts without a sheet. Before
 the package installs, have an MDM script write both files to each user's
 `~/.litellm-relay/mitm` (or the `relay.mitm_ca_dir` the managed config sets),
 owned by that user and with the key at mode 0600. Never put the key in the
-package, since every account on the Mac can read its payload. The daemon uses
+package, since every account on the Mac can read its payload apart from
+`config.yaml`. The daemon uses
 the CA it finds there instead of generating one, and the install sees it is
 already trusted. The tradeoff is that one key signs for every Mac in the
-fleet, so whoever copies it from one Mac can intercept TLS on all of them.
+fleet, so whoever copies it from one Mac can intercept TLS to those hosts on
+all of them.
 Keep the per-device CA when that risk is not acceptable. Removing the profile
 removes its trust, while `--remove-ca-trust` only touches the login keychain.
 
@@ -200,9 +227,14 @@ PAC profile so macOS stops using Auto Proxy:
 
 The uninstaller also boots out and removes the RelayBar LaunchAgent
 (`~/Library/LaunchAgents/ai.litellm.relaybar.plist`) when the package shipped
-the menu bar app. Unless `--keep-bin` is set, it removes the package payload at
-`/usr/local/litellm-relay`, RelayBarGlass.app included, and forgets the
-`ai.litellm.relay` receipt.
+the menu bar app, and the Claude Desktop LaunchDaemon with the root-owned copy
+of the binary it runs. The package payload at `/usr/local/litellm-relay`,
+RelayBarGlass.app included, is shared by every account on the Mac, so only a
+run as root (`sudo`, or an MDM script) without `--keep-bin` removes it and
+forgets the `ai.litellm.relay` receipt. A run as a user leaves the payload in
+place and prints one line saying an admin or MDM removes it with `sudo
+/usr/local/litellm-relay/uninstall.sh`. A payload that cannot be removed logs a
+warning, and the rest of the uninstall still runs.
 
 `--remove-ca-trust` removes every "LiteLLM Relay Local Root CA" certificate
 from the login keychain, including one a reinstall left behind, and its trust
@@ -214,7 +246,12 @@ certificate that stayed, why, and one `security delete-certificate -Z <SHA-1>
 -t` command per certificate to finish from the session. Run as root, as an MDM
 script runs it, the uninstaller acts on the console user rather than root: it
 stops their LaunchAgents in their GUI domain and removes their plists, Relay
-data, shims and login keychain certificates.
+data and shims. With `--remove-ca-trust` from a Terminal in their GUI session
+(`sudo` there), it reads and removes their login keychain certificates and
+trust settings as that user; over ssh or from an MDM script it declines as
+above. With nobody logged in at the console, a root run refuses and changes
+nothing, unless `RELAY_USER_HOME` names the home of the user to clean up
+(`sudo RELAY_USER_HOME=/Users/<name> /usr/local/litellm-relay/uninstall.sh`).
 
 ## Credential broker
 
@@ -322,9 +359,10 @@ Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
 browser and answer `signed_out` until a developer runs the app interactively or
 `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
 sign-in and `relay sign-out` deletes the key and forgets the session. On a
-device that serves `gateway.api_key`, `relay sign-out` and both switches answer
-`static_key` with exit code 1 and change nothing, and RelayBar hides Sign out
-and the pickers there.
+device that serves `gateway.api_key`, `relay sign-out` exits 0 and prints that
+the device uses a static Gateway key from `config.yaml` and nothing was signed
+out, both switches answer `static_key` with exit code 1 and change nothing, and
+RelayBar hides Sign out and the pickers there.
 `relay switch-team <team>` and `relay switch-environment <name>` move the
 daemon to another team or Gateway (see below) and print the outcome as one
 JSON line: `team`, `environment`, `gateway_url`, `key_expires_at`, and
@@ -375,9 +413,14 @@ Gateway refuses writes the previous values back and answers `switch_failed`
 with the Gateway's reason; a name missing from the list answers
 `unknown_environment` with the configured names. Without an `environments`
 list the daemon serves the one `gateway.url`, and `relay switch-team` still
-works against it. The root Claude Desktop LaunchDaemon watches `config.yaml`,
-so it rewrites Claude Desktop's managed settings within seconds of a switch,
-and Claude Desktop picks up the switch after it restarts
+works against it. When the root Claude Desktop LaunchDaemon is installed, it
+watches `config.yaml` and rewrites Claude Desktop's managed settings within
+seconds of a switch, and Claude Desktop picks up the switch after it restarts.
+Installing that daemon needs root, so it exists only after an admin ran
+`install.sh` with `sudo`, or after a `.pkg` install whose console user has
+passwordless `sudo`. Without it, nothing rewrites Claude Desktop's managed
+settings after a switch until `install.sh` or `relay onboard-claude-desktop`
+runs again with `sudo`
 
 ## Local inference proxy
 

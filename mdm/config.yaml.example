@@ -5,6 +5,10 @@
 # ~/.litellm-relay/config.yaml with 0600 permissions and Relay reads it
 # when the LaunchAgent starts. Unset sections fall back to Relay defaults.
 #
+# Baked into the .pkg (build-macos-pkg.sh --config-file), this file lands at
+# /usr/local/litellm-relay/config.yaml owned by root with mode 0600, and the
+# postinstall hands the console user's install a private copy.
+#
 # Prefer browser SSO for developer Gateway auth. Only set gateway.api_key
 # here if your rollout uses a shared, non-user Gateway key, since this file
 # lands on every managed device.

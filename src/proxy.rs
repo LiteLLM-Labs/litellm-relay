@@ -928,6 +928,56 @@ mod tests {
     };
 
     #[test]
+    fn should_count_logged_events_up_to_a_thousand_as_they_are_appended_and_cleared() {
+        let mut config = RelaySettings::default().to_config();
+        config.mitm_enabled = false;
+        config.log_path =
+            std::env::temp_dir().join(format!("relay-status-events-{}.log.jsonl", Uuid::new_v4()));
+        let log_path = config.log_path.clone();
+        let proxy = RelayProxy::new(config);
+        let loaded = || {
+            proxy
+                .status_payload(json!({"state": "ok"}))
+                .expect("status payload should build")["events_loaded"]
+                .clone()
+        };
+        let padding = "x".repeat(1024);
+        let append = |count: usize| {
+            for index in 0..count {
+                append_event(
+                    &log_path,
+                    json!({"event": "connect", "index": index, "pad": padding}),
+                )
+                .unwrap();
+            }
+        };
+
+        let missing = loaded();
+        append(3);
+        let three = loaded();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"{\"truncated\": \n"))
+            .unwrap();
+        let after_garbage = loaded();
+        append(996);
+        let nine_hundred_ninety_nine = loaded();
+        append(300);
+        let capped = loaded();
+        clear_events(&log_path).unwrap();
+        let cleared = loaded();
+        fs::remove_file(&log_path).unwrap();
+
+        assert_eq!(missing, json!(0));
+        assert_eq!(three, json!(3));
+        assert_eq!(after_garbage, json!(3));
+        assert_eq!(nine_hundred_ninety_nine, json!(999));
+        assert_eq!(capped, json!(1000));
+        assert_eq!(cleared, json!(0));
+    }
+
+    #[test]
     fn should_add_credential_to_status_payload_and_keep_every_existing_key() {
         let mut config = RelaySettings::default().to_config();
         config.mitm_enabled = false;

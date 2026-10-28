@@ -57,12 +57,19 @@ enum StatusFormatter {
 
     static func timestamp(_ text: String?) -> Date? {
         guard let text else { return nil }
-        let zoned = hasZone(text) ? text : text + "Z"
+        let joined = joiningDateAndTime(text)
+        let zoned = hasZone(joined) ? joined : joined + "Z"
         let plain = ISO8601DateFormatter()
         if let date = plain.date(from: zoned) { return date }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fractional.date(from: zoned)
+    }
+
+    private static func joiningDateAndTime(_ text: String) -> String {
+        let parts = text.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0].count == 10 else { return text }
+        return "\(parts[0])T\(parts[1])"
     }
 
     private static func hasZone(_ text: String) -> Bool {
@@ -95,9 +102,15 @@ enum StatusFormatter {
     }
 
     static func budgetLine(team: TeamBudget?, error: String?, polled: Bool, timeZone: TimeZone = NSTimeZone.default) -> String {
-        if let error, !error.isEmpty { return error }
-        guard let team else { return polled ? "No team picked" : "Budget not read yet" }
-        guard let spend = team.spend else { return "Budget not read yet" }
+        let problem = error?.isEmpty == false ? error : nil
+        guard let team else { return problem ?? (polled ? "No team picked" : "Budget not read yet") }
+        guard let spend = team.spend else { return problem ?? "Budget not read yet" }
+        let amounts = budgetAmounts(spend: spend, team: team, timeZone: timeZone)
+        guard let problem else { return amounts }
+        return "\(amounts)\n\(problem)"
+    }
+
+    private static func budgetAmounts(spend: Double, team: TeamBudget, timeZone: TimeZone) -> String {
         let spent = money(spend)
         guard let cap = team.maxBudget else { return "\(spent), no budget" }
         let reset = timestamp(team.budgetResetAt).map { ", resets \(resetDay($0, timeZone: timeZone))" } ?? ""
