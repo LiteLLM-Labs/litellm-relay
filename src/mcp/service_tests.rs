@@ -662,6 +662,56 @@ async fn should_switch_the_team_only_after_a_confirmation_and_refetch_the_catalo
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_list_and_switch_without_issuing_a_credential_for_the_current_team() {
+    let upstream = FakeUpstream::serving(tools());
+    let switcher = FakeSwitcher::default();
+    let (rig, service) = service_with(idp_settings(Some("team-a")), &upstream, &switcher);
+    let mut silent = FakeAsker::default();
+    let listed = ask(&rig, &service, json!({"op": "switch_team"}), &mut silent)
+        .await
+        .expect("a signed-out device still lists the selection");
+    assert_eq!(listed, switcher.selection());
+    assert_eq!(rig.browser_opens(), 0);
+    assert_eq!(rig.identity.sign_ins(), 0);
+
+    let broker = Arc::clone(&rig.broker);
+    tokio::task::spawn_blocking(move || broker.sign_in())
+        .await
+        .expect("sign in");
+    let mints_after_sign_in = rig.keys.mints().len();
+    let opens_after_sign_in = rig.browser_opens();
+    rig.clock.advance(3601);
+    rig.auth.refuse_team("team-a");
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    let switched = ask(
+        &rig,
+        &service,
+        json!({"op": "switch_team", "team": "team-b"}),
+        &mut accepting,
+    )
+    .await
+    .expect("a refused current team must not stop the switch away from it");
+    assert_eq!(switched["team"], "team-b");
+    assert_eq!(
+        switcher.switches(),
+        vec![("team".to_string(), "team-b".to_string())]
+    );
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    ask(
+        &rig,
+        &service,
+        json!({"op": "switch_environment", "environment": "uat"}),
+        &mut accepting,
+    )
+    .await
+    .expect("switched the environment");
+    assert_eq!(rig.keys.mints().len(), mints_after_sign_in);
+    assert_eq!(rig.identity.sign_ins(), 1);
+    assert_eq!(rig.browser_opens(), opens_after_sign_in);
+    assert_eq!(rig.callers.checks(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_switch_the_environment_after_a_confirmation_and_pass_the_daemon_refusal_through() {
     let upstream = FakeUpstream::serving(tools());
     let switcher = FakeSwitcher::default();

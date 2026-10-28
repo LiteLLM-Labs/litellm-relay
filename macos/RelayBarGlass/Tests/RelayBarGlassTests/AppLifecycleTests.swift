@@ -39,8 +39,21 @@ import Testing
     }
 
     @Test func aRunWithoutABundleIdentifierNeverQuitsItself() {
-        #expect(SingleInstance.olderCopy(bundleIdentifier: nil) == nil)
-        #expect(SingleInstance.olderCopy(bundleIdentifier: "ai.litellm.relaybar.tests.nobody") == nil)
+        #expect(SingleInstance.decision(bundleIdentifier: nil) == .run)
+        #expect(SingleInstance.decision(bundleIdentifier: "ai.litellm.relaybar.tests.nobody") == .run)
+    }
+
+    @Test func theInstalledCopyReplacesAnOlderHandBuiltCopyAndNeverTheReverse() {
+        let handBuilt = earlier
+        let installed = RunningCopy(pid: later.pid, startedAt: later.startedAt, installed: true)
+        #expect(SingleInstance.decision(of: installed, among: [handBuilt, installed]) == .replace([handBuilt]))
+        #expect(SingleInstance.decision(of: handBuilt, among: [handBuilt, installed]) == .yield(to: installed))
+
+        let olderInstalled = RunningCopy(pid: earlier.pid, startedAt: earlier.startedAt, installed: true)
+        #expect(SingleInstance.decision(of: installed, among: [olderInstalled, installed]) == .yield(to: olderInstalled))
+        #expect(SingleInstance.decision(of: olderInstalled, among: [olderInstalled, installed]) == .run)
+        #expect(SingleInstance.decision(of: later, among: [earlier, later]) == .yield(to: earlier))
+        #expect(SingleInstance.decision(of: earlier, among: [earlier, later]) == .run)
     }
 
     @Test func onlyAQuitNobodyAskedForExitsNonZero() {

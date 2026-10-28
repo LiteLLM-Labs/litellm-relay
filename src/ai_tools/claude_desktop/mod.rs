@@ -87,9 +87,9 @@ fn onboard_desktop_with(params: OnboardDesktopParams, daemon: &dyn DaemonHost) -
     if let Some(api_key) = params.api_key {
         settings.gateway.enroll_if_changed(api_key);
     }
-    if params.team.is_some() {
-        settings.claude.team = params.team;
-        settings.gateway.team = None;
+    if let Some(team) = params.team {
+        settings.claude.team = Some(team.clone());
+        settings.gateway.team = Some(team);
     }
     if let Some(model) = params.model {
         settings.claude.model = model;

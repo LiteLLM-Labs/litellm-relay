@@ -23,7 +23,7 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 
 | Artifact | Purpose | Source |
 | --- | --- | --- |
-| `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
+| `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, uploaded as an artifact of the release workflow run |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
 | Managed `config.yaml` | Gateway URL, IdP issuer and client id, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
 | `RelayBarGlass.app` (optional) | Menu bar app: sign-in state, key countdown, team and environment pickers, budget, MCP servers | Built into the `.pkg` by `scripts/build-macos-pkg.sh --relaybar` (or `--relaybar-app`), installed at `/usr/local/litellm-relay/RelayBarGlass.app` |
@@ -34,6 +34,12 @@ The managed config can be baked into the `.pkg` at build time
 ```bash
 scripts/build-macos-pkg.sh --version 0.1.0 --config-file mdm/config.yaml.example
 ```
+
+A later install replaces `config.yaml` with the new managed config and keeps
+only the environment and team the developer picked. A value still equal to the
+one the earlier install seeded (kept in `~/.litellm-relay/.managed-config.yaml`)
+is not a pick, so a re-pushed `gateway.team` reaches every device that never
+switched.
 
 ## Build the package
 
@@ -104,9 +110,10 @@ curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
 The postinstall installs Relay for the user logged in at the console. A
 package that runs at the login window or during Setup Assistant, as an
 enrollment trigger often does, only stages the payload at
-`/usr/local/litellm-relay`, and nothing installs Relay until the package runs
-again while a user is logged in. Deploy it with a login or check-in trigger
-scoped to a logged-in user, or re-run it after enrollment.
+`/usr/local/litellm-relay` and exits 1, so the MDM records a failed install
+and retries it (Intune retries a failed Required app at its next check-in). Relay installs on the first run while a user is logged in.
+Deploy it with a login or check-in trigger scoped to a logged-in user, or
+re-run it after enrollment.
 
 ## Jamf Pro
 
@@ -115,7 +122,7 @@ scoped to a logged-in user, or re-run it after enrollment.
 2. **Create the deploy policy.** Computers → Policies → New. Add a **Packages**
    payload with the Relay package, action **Install**. Trigger: Login, or
    Recurring check-in; an Enrollment Complete run before anyone logs in only
-   stages the payload (see
+   stages the payload and shows as Failed (see
    [Deploy while a user is logged in](#deploy-while-a-user-is-logged-in)).
    Scope to your **pilot Smart Group** first.
 3. **Deploy the PAC profile.** Computers → Configuration Profiles → New. Add a
@@ -136,6 +143,8 @@ scoped to a logged-in user, or re-run it after enrollment.
    `./IntuneAppUtil -c litellm-relay-<version>.pkg -o .`. Then Apps → macOS →
    Add → **macOS app (PKG)** / line-of-business app, upload the `.intunemac`.
 2. **Assign.** Assign the app as **Required** to your pilot Azure AD group.
+   A run before anyone logs in fails on purpose and Intune retries it (see
+   [Deploy while a user is logged in](#deploy-while-a-user-is-logged-in)).
 3. **Deploy the PAC profile.** Devices → Configuration → Create → macOS →
    **Templates → Custom**, upload
    [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example).
@@ -181,7 +190,9 @@ the user's GUI session cannot read that trust and logs that instead.
 the CA by default, since a person is there to answer the sheet.
 
 With payload capture on, a fleet CA avoids the sheet on every device. Generate
-one CA on a secure host with the settings Relay itself uses:
+one CA on a secure host. Relay's own per-device CA uses the same basic
+constraints and key usage but no name constraints or EKU, so this fleet CA is
+the narrower of the two:
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 825 \
@@ -374,11 +385,14 @@ did not. The `broker` block of `/api/status` shows `signed_in`, `user_id`,
 `source` of the last answer (`minted_key`, `session_credential`,
 `identity_token`, or `static_key`), and `refused_callers`, never a token
 
-The daemon also keeps an `account` block there. Every 60 seconds it asks
-`GET <gateway.url>/health/liveliness` without a credential, and every 300
-seconds, plus once after a sign-in and after a switch, it reads
-`GET /user/info` and `GET /team/info?team_id=<team>` with the signed-in user's
-credential. The block shows `user` (`id`, `email`), `teams` (the `id` and
+The daemon also keeps an `account` block there. While something has read
+`/api/status` in the last 10 minutes (RelayBar reads it every few seconds), it
+asks `GET <gateway.url>/health/liveliness` without a credential every 60
+seconds, and every 300 seconds, plus once after a sign-in and after a switch,
+it reads `GET /user/info?user_id=<id>` and `GET /team/info?team_id=<team>` with
+the signed-in user's credential. A daemon nobody reads sends none of these on
+a timer, and one with no Gateway configured sends none at all. A static key saved without a team reads its
+team from `GET /key/info`. The block shows `user` (`id`, `email`), `teams` (the `id` and
 `alias` of every team the user may attribute spend to, null until the first
 read), `teams_error`, `team` (the current team's `id`, `alias`, `spend`,
 `max_budget`, and `budget_reset_at` as the Gateway reports them, null when no
@@ -386,7 +400,8 @@ team is selected), `budget_error`, `gateway` (`url`, `reachable`, `checked_at`,
 `error`), and `polled_at`. When `/user/info` fails or lists nothing, `teams`
 falls back to the current team alone and `teams_error` says why; when
 `/team/info` refuses the team, the budget comes from the `/user/info` entry and
-`budget_error` says why. `relay recheck` runs both reads and the probe now and
+`budget_error` says why. When the Gateway cannot be reached, the last budget
+stays next to `budget_error`. `relay recheck` runs both reads and the probe now and
 prints the block as one JSON line, or `{"refused": "daemon_unavailable",
 "message": "..."}` on stderr with exit code 1 when the daemon is not running.
 The `environments` block of `/api/status` shows the `current` environment name
@@ -401,7 +416,9 @@ between, each with a `name`, a `url`, and an optional `team` that is that
 Gateway's default team. The entry whose `url` equals `gateway.url` is the
 current one, and every entry shares the `idp` section, so one sign-in serves
 them all. The team the daemon mints keys for is `gateway.team` when set, else
-the current environment's `team`, else `claude.team`, else `codex.team`. A
+the current environment's `team`, else, on the first environment or a Gateway
+outside the list, `claude.team`, else `codex.team`, so a team from one Gateway
+never reaches another. A
 switch (`relay switch-team`, `relay switch-environment`, the MCP tools of the
 same names, or RelayBar) writes
 `gateway.url` and `gateway.team` back into `config.yaml`, where an environment
@@ -439,8 +456,8 @@ user exactly as they do with `relay credential`
 
 A request with no proxy token, a wrong one, or two headers that disagree gets a
 401 before anything is sent to the Gateway, and so does every request after
-`relay sign-out`, a daemon restart, or a change to `credential.allowed_callers`,
-since each of those ends the token. Claude Code and Codex answer a 401 by
+`relay sign-out` on a device signed in through the IdP, a daemon restart, or a
+change to `credential.allowed_callers`, since each of those ends the token. Claude Code and Codex answer a 401 by
 running their helper again, which goes back through the caller check and signs
 in if needed. The
 proxy never opens a browser on its own. Connections that do not come from the

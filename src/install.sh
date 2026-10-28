@@ -580,6 +580,7 @@ if [[ -n "$RELAY_MANAGED_CONFIG" ]]; then
     exit 1
   fi
   echo "Seeding managed Relay config from $RELAY_MANAGED_CONFIG"
+  SEEDED_CONFIG="$RELAY_HOME/.managed-config.yaml"
   PREVIOUS_CONFIG=""
   if [[ -f "$RELAY_HOME/config.yaml" ]]; then
     PREVIOUS_CONFIG="$(mktemp "${TMPDIR:-/tmp}/relay-previous-config.XXXXXX")"
@@ -588,11 +589,17 @@ if [[ -n "$RELAY_MANAGED_CONFIG" ]]; then
   cp "$RELAY_MANAGED_CONFIG" "$RELAY_HOME/config.yaml"
   chmod 600 "$RELAY_HOME/config.yaml"
   if [[ -n "$PREVIOUS_CONFIG" ]]; then
-    if ! "$RELAY_HOME/bin/litellm-relay" carry-selection "$PREVIOUS_CONFIG"; then
+    CARRY_ARGS=("$PREVIOUS_CONFIG")
+    if [[ -f "$SEEDED_CONFIG" ]]; then
+      CARRY_ARGS+=(--seeded "$SEEDED_CONFIG")
+    fi
+    if ! "$RELAY_HOME/bin/litellm-relay" carry-selection "${CARRY_ARGS[@]}"; then
       echo "warning: the previous environment and team picks were not carried over; the managed defaults apply" >&2
     fi
     rm -f "$PREVIOUS_CONFIG"
   fi
+  cp "$RELAY_MANAGED_CONFIG" "$SEEDED_CONFIG"
+  chmod 600 "$SEEDED_CONFIG"
 fi
 
 INSTALL_BIN_DIR="$(choose_bin_dir)"

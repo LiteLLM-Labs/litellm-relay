@@ -295,31 +295,55 @@ impl McpService {
         request: McpRequest,
         asker: &mut dyn Asker,
     ) -> Result<Value, McpRefusal> {
-        let service = Arc::clone(self);
         let label = request.label();
-        let bearer = blocking(move || service.admit(peer, label)).await??;
         match request {
             McpRequest::SearchTools { query } => {
+                let bearer = self.admitted_bearer(peer, label).await?;
                 let catalog = self.catalog_for(&bearer).await?;
                 Ok(self.search(&catalog, &bearer, &query))
             }
             McpRequest::DescribeTool { name } => {
+                let bearer = self.admitted_bearer(peer, label).await?;
                 let catalog = self.catalog_for(&bearer).await?;
                 self.describe(&catalog, &bearer, &name)
             }
             McpRequest::CallTool { name, arguments } => {
+                let bearer = self.admitted_bearer(peer, label).await?;
                 let catalog = self.catalog_for(&bearer).await?;
                 self.call(&catalog, &bearer, &name, arguments, asker).await
             }
             McpRequest::ActivateServer { server } => {
+                let bearer = self.admitted_bearer(peer, label).await?;
                 let catalog = self.catalog_for(&bearer).await?;
                 self.activate(&catalog, &bearer, &server, asker).await
             }
-            McpRequest::SwitchTeam { team } => self.switch_team(&bearer, team, asker).await,
+            McpRequest::SwitchTeam { team } => {
+                let identity = self.admitted_caller(peer, label).await?;
+                self.switch_team(identity, team, asker).await
+            }
             McpRequest::SwitchEnvironment { environment } => {
+                self.admitted_caller(peer, label).await?;
                 self.switch_environment(environment, asker).await
             }
         }
+    }
+
+    async fn admitted_bearer(
+        self: &Arc<Self>,
+        peer: Peer,
+        label: &'static str,
+    ) -> Result<SessionBearer, McpRefusal> {
+        let service = Arc::clone(self);
+        blocking(move || service.admit(peer, label)).await?
+    }
+
+    async fn admitted_caller(
+        self: &Arc<Self>,
+        peer: Peer,
+        label: &'static str,
+    ) -> Result<Option<SessionIdentity>, McpRefusal> {
+        let service = Arc::clone(self);
+        blocking(move || service.admit_without_credential(peer, label)).await?
     }
 
     pub async fn check_session(self: &Arc<Self>) {
@@ -340,7 +364,7 @@ impl McpService {
     }
 
     pub fn status(&self) -> Value {
-        self.adopt(self.broker.session_identity().as_ref());
+        self.adopt(self.broker.session_identity_unless_renewing().as_ref());
         let state = self.lock_state();
         let Some(session) = state.session.as_ref() else {
             return json!({ "catalog_tools": Value::Null, "servers": {} });
@@ -357,6 +381,20 @@ impl McpService {
             })
             .collect();
         json!({ "catalog_tools": catalog.len(), "servers": servers })
+    }
+
+    fn admit_without_credential(
+        &self,
+        peer: Peer,
+        label: &str,
+    ) -> Result<Option<SessionIdentity>, McpRefusal> {
+        self.broker
+            .admit_caller(peer, label)
+            .map_err(McpRefusal::Broker)?;
+        self.reload_settings();
+        let identity = self.broker.session_identity();
+        self.adopt(identity.as_ref());
+        Ok(identity)
     }
 
     fn admit(&self, peer: Peer, label: &str) -> Result<SessionBearer, McpRefusal> {
@@ -628,7 +666,7 @@ impl McpService {
 
     async fn switch_team(
         &self,
-        bearer: &SessionBearer,
+        identity: Option<SessionIdentity>,
         team: Option<String>,
         asker: &mut dyn Asker,
     ) -> Result<Value, McpRefusal> {
@@ -645,7 +683,9 @@ impl McpService {
         confirm(question, asker).await?;
         let switcher = Arc::clone(&self.deps.switcher);
         let switched = switched(blocking(move || switcher.switch_team(&team)).await?)?;
-        self.forget_fetch_time(&bearer.identity);
+        if let Some(identity) = identity {
+            self.forget_fetch_time(&identity);
+        }
         self.selection_after(switched).await
     }
 

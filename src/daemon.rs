@@ -129,6 +129,7 @@ mod tests {
         settings: crate::config::RelaySettings,
     ) -> (Rig, FakeHttp, Arc<AccountService>, Daemon) {
         let (rig, http, account) = account_on(settings);
+        http.answer("/user/info?user_id=user-1", 200, USER_INFO);
         http.answer("/user/info", 200, USER_INFO);
         http.answer("/health/liveliness", 200, "\"I'm alive!\"");
         let daemon = Daemon::new(Arc::clone(&rig.broker), Arc::clone(&account));
@@ -165,7 +166,7 @@ mod tests {
         assert_eq!(rig.keys.mints().len(), 1);
         assert!(rig.keys.deletes().is_empty());
         assert_eq!(rig.broker.status().team.as_deref(), Some("team-a"));
-        assert_eq!(count(&http, "/user/info"), 1);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
         assert_eq!(
             daemon
                 .team_refusal("team-z")
@@ -203,7 +204,7 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(rig.settings.version(), version);
-        assert_eq!(count(&http, "/user/info"), 1);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
     }
 
     #[test]
@@ -215,7 +216,7 @@ mod tests {
         };
         daemon.handle(Request::SignIn, rig.peer());
         assert_eq!(account.status()["teams"].as_array().map(Vec::len), Some(2));
-        http.delay("/user/info", Duration::from_millis(800));
+        http.delay("/user/info?user_id=user-1", Duration::from_millis(800));
 
         let started = Instant::now();
         let switched = daemon.handle(
@@ -242,7 +243,7 @@ mod tests {
         let status = account.status();
         assert_eq!(status["teams"].as_array().map(Vec::len), Some(2));
         assert_eq!(status["user"]["email"], "dev@example.com");
-        assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
     }
 
     #[test]
@@ -282,19 +283,19 @@ mod tests {
         };
         assert_eq!(switched.team.as_deref(), Some("team-b"));
         assert_eq!(rig.keys.mints().len(), 2);
-        assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
         assert_eq!(count(&http, "/team/info?team_id=team-b"), 1);
         assert_eq!(count(&http, "/health/liveliness"), 2);
         assert_eq!(account.status()["team"]["id"], "team-b");
         account.poll();
-        assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
         assert_eq!(count(&http, "/health/liveliness"), 2);
     }
 
     #[test]
     fn should_let_the_gateway_decide_a_team_while_the_list_is_unknown() {
         let (rig, http, _account, daemon) = daemon_on(idp_settings(Some("team-a")));
-        http.fail("/user/info", "connection refused");
+        http.fail("/user/info?user_id=user-1", "connection refused");
         assert!(matches!(
             daemon.handle(Request::SignIn, rig.peer()),
             Reply::SignedIn { .. }
@@ -354,7 +355,7 @@ mod tests {
         let probes = http.calls_to("/health/liveliness");
         assert_eq!(probes.len(), 2);
         assert_eq!(probes[1].url, "https://uat.example.com/health/liveliness");
-        assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
         let status = account.status();
         assert_eq!(status["gateway"]["url"], "https://uat.example.com");
         assert_eq!(status["gateway"]["reachable"], true);
@@ -366,12 +367,12 @@ mod tests {
         let (rig, http, account, daemon) = daemon_on(idp_settings(Some("team-a")));
         daemon.handle(Request::SignIn, rig.peer());
         assert_eq!(account.status()["user"]["email"], "dev@example.com");
-        assert_eq!(count(&http, "/user/info"), 1);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
         let reply = daemon.handle(Request::Recheck, rig.peer());
         let Reply::Account(status) = reply else {
             panic!("expected the account status, got {reply:?}");
         };
-        assert_eq!(count(&http, "/user/info"), 2);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
         assert_eq!(count(&http, "/health/liveliness"), 2);
         assert_eq!(status["user"]["email"], "dev@example.com");
         assert_eq!(status["gateway"]["reachable"], true);

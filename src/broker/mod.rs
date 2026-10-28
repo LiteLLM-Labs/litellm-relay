@@ -18,7 +18,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, TryLockError},
     time::Duration,
 };
 
@@ -519,6 +519,7 @@ struct State {
     refused_callers: u64,
     proxy_token: Option<String>,
     completed_sign_ins: u64,
+    pending_sign_in_page: Option<String>,
 }
 
 enum Bearer {
@@ -642,6 +643,10 @@ impl Broker {
         }
     }
 
+    pub fn admit_caller(&self, peer: Peer, what: &str) -> Result<(), Refusal> {
+        self.admit(peer, what).map(|_| ())
+    }
+
     fn admit(&self, peer: Peer, what: &str) -> Result<Target, Refusal> {
         self.refresh();
         let target = self.lock_target().clone();
@@ -662,8 +667,14 @@ impl Broker {
     }
 
     pub fn sign_in(&self) -> Reply {
+        let (sign_ins_at_start, pending_page) = {
+            let state = self.lock_state();
+            (state.completed_sign_ins, state.pending_sign_in_page.clone())
+        };
+        if let Some(page) = pending_page {
+            (self.deps.browser)(&page);
+        }
         self.refresh();
-        let sign_ins_at_start = self.lock_state().completed_sign_ins;
         let _renewal = self.lock_renewal();
         let target = self.lock_target().clone();
         if !matches!(target.mode, Mode::Idp(_)) {
@@ -854,8 +865,12 @@ impl Broker {
         self.forget(&gateway_url, false);
     }
 
+    pub fn configured(&self) -> bool {
+        !matches!(self.lock_target().mode, Mode::Unconfigured(_))
+    }
+
     pub fn status(&self) -> BrokerStatus {
-        self.refresh();
+        self.refresh_unless_renewing();
         let target = self.lock_target().clone();
         let now = self.deps.clock.now();
         let state = self.lock_state();
@@ -918,6 +933,14 @@ impl Broker {
     }
 
     fn refresh(&self) {
+        self.refresh_holding(|broker| Some(broker.lock_renewal()));
+    }
+
+    pub(crate) fn refresh_unless_renewing(&self) {
+        self.refresh_holding(Self::try_lock_renewal);
+    }
+
+    fn refresh_holding<'a>(&'a self, renewal: impl FnOnce(&'a Self) -> Option<MutexGuard<'a, ()>>) {
         let Some(version) = self.deps.settings.version() else {
             return;
         };
@@ -928,7 +951,9 @@ impl Broker {
             return;
         };
         let next = Target::from_settings(&settings, Some(version));
-        let _renewal = self.lock_renewal();
+        let Some(_renewal) = renewal(self) else {
+            return;
+        };
         let current = self.lock_target().clone();
         if current.version == Some(version) {
             return;
@@ -1135,15 +1160,20 @@ impl Broker {
         now: i64,
         sign_in: SignIn,
     ) -> Result<String> {
+        let open_sign_in_page = |page: &str| {
+            self.lock_state().pending_sign_in_page = Some(page.to_string());
+            (self.deps.browser)(page);
+        };
         let advanced = advance(
             self.deps.identity.as_ref(),
             idp,
             session.clone(),
             now,
             sign_in,
-            self.deps.browser.as_ref(),
-        )?;
-        match advanced {
+            &open_sign_in_page,
+        );
+        self.lock_state().pending_sign_in_page = None;
+        match advanced? {
             Advanced::Reused(token) => Ok(token),
             Advanced::Renewed(renewed) => {
                 eprintln!(
@@ -1353,6 +1383,14 @@ impl Broker {
         self.renewal
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn try_lock_renewal(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.renewal.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
     }
 
     fn lock_switching(&self) -> MutexGuard<'_, ()> {
@@ -1699,6 +1737,58 @@ mod tests {
         assert_eq!(rig.identity.sign_ins(), 1);
         assert_eq!(rig.browser_opens(), 1);
         assert_eq!(rig.keys.mints().len(), 1);
+    }
+
+    #[test]
+    fn should_answer_the_status_at_once_while_a_sign_in_holds_a_config_change() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(1500));
+        let broker = Arc::clone(&rig.broker);
+        let signing_in = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        rig.settings.set(idp_settings(Some("team-b")));
+
+        let started = std::time::Instant::now();
+        let status = rig.broker.status();
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(500),
+            "status waited {waited:?}"
+        );
+        assert_eq!(status.team.as_deref(), Some("team-a"));
+
+        signing_in.join().expect("sign in");
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
+    }
+
+    #[test]
+    fn should_open_the_pending_sign_in_page_again_when_sign_in_is_clicked_twice() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(1500));
+        let broker = Arc::clone(&rig.broker);
+        let first = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(rig.browser_opens(), 1);
+
+        let broker = Arc::clone(&rig.broker);
+        let second = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(rig.browser_opens(), 2);
+
+        assert!(matches!(
+            first.join().expect("first"),
+            Reply::SignedIn { .. }
+        ));
+        assert!(matches!(
+            second.join().expect("second"),
+            Reply::SignedIn { .. }
+        ));
+        assert_eq!(rig.identity.sign_ins(), 1);
+
+        rig.identity.set_sign_in_delay(Duration::ZERO);
+        let opens_before_a_later_sign_in = rig.browser_opens();
+        assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
+        assert_eq!(rig.browser_opens(), opens_before_a_later_sign_in + 1);
     }
 
     #[test]

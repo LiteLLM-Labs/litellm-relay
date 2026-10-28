@@ -12,7 +12,7 @@ struct AppTiming: Equatable {
     let requestTimeout: TimeInterval
     let commandTimeout: TimeInterval
 
-    static let standard = AppTiming(pollInterval: 5, requestTimeout: 12, commandTimeout: 30)
+    static let standard = AppTiming(pollInterval: 5, requestTimeout: 12, commandTimeout: 90)
 }
 
 @MainActor

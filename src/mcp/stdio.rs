@@ -186,7 +186,7 @@ pub fn meta_tools() -> Vec<Tool> {
         )),
         Tool::new(
             "switch_environment",
-            "Point Claude Code, Codex, and the local inference proxy at another configured Gateway environment at once, keeping the sign-in; Claude Desktop follows after it restarts. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
+            "Point Claude Code, Codex, and the local inference proxy at another configured Gateway environment at once, keeping the sign-in; Claude Desktop follows after it restarts only where the .pkg or a sudo install added Relay's root Claude Desktop agent, and elsewhere keeps the previous Gateway. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
             schema(
                 json!({"environment": {"type": "string", "description": "The environment name to switch to, as listed under environments by a call without an argument"}}),
                 &[],
@@ -935,7 +935,7 @@ mod tests {
             .unwrap();
         assert!(!environment.contains("every client"), "{environment}");
         assert!(
-            environment.contains("Claude Desktop follows after it restarts"),
+            environment.contains("Claude Desktop follows after it restarts only where"),
             "{environment}"
         );
         let _ = client

@@ -4,15 +4,47 @@ import Darwin
 struct RunningCopy: Equatable {
     let pid: pid_t
     let startedAt: Date
+    var installed = false
+}
+
+enum LaunchDecision: Equatable {
+    case run
+    case yield(to: RunningCopy)
+    case replace([RunningCopy])
 }
 
 enum SingleInstance {
-    static func olderCopy(bundleIdentifier: String?) -> RunningCopy? {
-        guard let bundleIdentifier, let own = runningCopy(getpid()) else { return nil }
+    static let installedApp = URL(fileURLWithPath: "/usr/local/litellm-relay/RelayBarGlass.app")
+
+    static func decision(bundleIdentifier: String?) -> LaunchDecision {
+        guard let bundleIdentifier, let started = runningCopy(getpid()) else { return .run }
+        let own = RunningCopy(pid: started.pid, startedAt: started.startedAt, installed: isInstalled(Bundle.main.bundleURL))
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             .filter { !$0.isTerminated }
-            .compactMap { runningCopy($0.processIdentifier) }
-        return olderCopy(of: own, among: others)
+            .compactMap { app in
+                runningCopy(app.processIdentifier).map {
+                    RunningCopy(pid: $0.pid, startedAt: $0.startedAt, installed: isInstalled(app.bundleURL))
+                }
+            }
+        return decision(of: own, among: others)
+    }
+
+    static func decision(of own: RunningCopy, among others: [RunningCopy]) -> LaunchDecision {
+        let rivals = others.filter { $0.pid != own.pid }
+        let older = rivals.filter { launchOrder($0, before: own) }
+        guard own.installed else {
+            let senior = rivals.filter(\.installed).min { launchOrder($0, before: $1) } ?? olderCopy(of: own, among: rivals)
+            return senior.map { .yield(to: $0) } ?? .run
+        }
+        if let senior = older.filter(\.installed).min(by: { launchOrder($0, before: $1) }) {
+            return .yield(to: senior)
+        }
+        let replaced = older.filter { !$0.installed }
+        return replaced.isEmpty ? .run : .replace(replaced)
+    }
+
+    static func isInstalled(_ bundle: URL?) -> Bool {
+        bundle?.standardizedFileURL.resolvingSymlinksInPath() == installedApp.resolvingSymlinksInPath()
     }
 
     static func olderCopy(of own: RunningCopy, among others: [RunningCopy]) -> RunningCopy? {

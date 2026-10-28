@@ -105,8 +105,13 @@ impl RelaySettings {
             self.current_environment()
                 .and_then(|entry| entry.team.as_deref()),
         );
-        let claude = non_empty(self.claude.team.as_deref());
-        let codex = non_empty(self.codex.team.as_deref());
+        let on_the_default_gateway = self.current_environment().is_none_or(|current| {
+            self.environments
+                .first()
+                .is_some_and(|first| first.name == current.name)
+        });
+        let claude = non_empty(self.claude.team.as_deref()).filter(|_| on_the_default_gateway);
+        let codex = non_empty(self.codex.team.as_deref()).filter(|_| on_the_default_gateway);
         if let (None, None, Some(claude), Some(codex)) = (selected, environment, claude, codex) {
             if claude != codex {
                 eprintln!(
@@ -168,6 +173,102 @@ impl RelaySettings {
         CarriedSelection::Carried {
             settings: Box::new(RelaySettings { gateway, ..self }),
             summary,
+        }
+    }
+
+    pub fn carrying_picks_over(
+        self,
+        previous: &RelaySettings,
+        seeded: &RelaySettings,
+    ) -> CarriedSelection {
+        let picks = previous.without_seeded_picks(seeded);
+        let nothing_picked = picks.gateway.team.is_none()
+            && picks.gateway.team_by_environment.is_empty()
+            && picks.on_the_gateway_of(seeded);
+        if nothing_picked {
+            return CarriedSelection::Nothing(
+                "no environment or team was picked over the earlier managed config".to_string(),
+            );
+        }
+        let default_environment = self.current_environment().map(|entry| entry.name.clone());
+        let managed_team = non_empty(self.gateway.team.as_deref()).map(str::to_string);
+        match self.carrying_selection_from(&picks) {
+            CarriedSelection::Carried { settings, summary } => CarriedSelection::Carried {
+                settings: Box::new(settings.parking_team(default_environment, managed_team)),
+                summary,
+            },
+            nothing => nothing,
+        }
+    }
+
+    fn parking_team(self, environment: Option<String>, team: Option<String>) -> RelaySettings {
+        let Some((environment, team)) = environment.zip(team) else {
+            return self;
+        };
+        let away = self
+            .current_environment()
+            .is_some_and(|current| current.name != environment);
+        if !away || self.gateway.team_by_environment.contains_key(&environment) {
+            return self;
+        }
+        let team_by_environment = self
+            .gateway
+            .team_by_environment
+            .iter()
+            .map(|(name, team)| (name.clone(), team.clone()))
+            .chain([(environment, team)])
+            .collect();
+        RelaySettings {
+            gateway: GatewaySection {
+                team_by_environment,
+                ..self.gateway
+            },
+            ..self
+        }
+    }
+
+    fn on_the_gateway_of(&self, other: &RelaySettings) -> bool {
+        match (self.current_environment(), other.current_environment()) {
+            (Some(mine), Some(theirs)) => mine.name == theirs.name,
+            (None, None) => {
+                without_trailing_slash(self.gateway.url.trim())
+                    == without_trailing_slash(other.gateway.url.trim())
+            }
+            _ => false,
+        }
+    }
+
+    fn without_seeded_picks(&self, seeded: &RelaySettings) -> RelaySettings {
+        let seeded_environment = seeded
+            .current_environment()
+            .map(|entry| entry.name.as_str());
+        let seeded_team = non_empty(seeded.gateway.team.as_deref());
+        let seeded_pick = |environment: Option<&str>, team: &str| {
+            seeded_team.is_some()
+                && seeded_team == non_empty(Some(team))
+                && environment == seeded_environment
+        };
+        let on_the_seeded_gateway = self.on_the_gateway_of(seeded);
+        let current = self.current_environment().map(|entry| entry.name.as_str());
+        let team = self
+            .gateway
+            .team
+            .clone()
+            .filter(|team| !(on_the_seeded_gateway && seeded_pick(current, team)));
+        let team_by_environment = self
+            .gateway
+            .team_by_environment
+            .iter()
+            .filter(|(name, team)| !seeded_pick(Some(name), team))
+            .map(|(name, team)| (name.clone(), team.clone()))
+            .collect();
+        RelaySettings {
+            gateway: GatewaySection {
+                team,
+                team_by_environment,
+                ..self.gateway.clone()
+            },
+            ..self.clone()
         }
     }
 
@@ -533,12 +634,20 @@ pub fn load_settings() -> Result<RelaySettings> {
     Ok(RelaySettings::default())
 }
 
-pub fn carry_selection(previous: &Path) -> Result<String> {
-    let contents = fs::read_to_string(previous)
-        .with_context(|| format!("failed to read {}", previous.display()))?;
-    let previous = parse_settings(&contents)
-        .with_context(|| format!("failed to parse {}", previous.display()))?;
-    match load_settings()?.carrying_selection_from(&previous) {
+fn read_settings_file(path: &Path) -> Result<RelaySettings> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    parse_settings(&contents).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+pub fn carry_selection(previous: &Path, seeded: Option<&Path>) -> Result<String> {
+    let previous = read_settings_file(previous)?;
+    let current = load_settings()?;
+    let carried = match seeded.map(read_settings_file).transpose()? {
+        Some(seeded) => current.carrying_picks_over(&previous, &seeded),
+        None => current.carrying_selection_from(&previous),
+    };
+    match carried {
         CarriedSelection::Carried { settings, summary } => {
             save_settings(&settings)?;
             Ok(summary)
@@ -562,14 +671,62 @@ fn save_settings_to(path: &Path, settings: &RelaySettings) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    let staged = staged_path(path);
+    let written = write_owner_only(&staged, &contents)
+        .and_then(|()| keep_owner(path, &staged))
+        .and_then(|()| {
+            fs::rename(&staged, path)
+                .with_context(|| format!("failed to replace {}", path.display()))
+        });
+    if written.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    written
+}
+
+fn staged_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| "config.yaml".into(), |name| name.to_string_lossy());
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+}
+
+#[cfg(unix)]
+fn keep_owner(path: &Path, staged: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = fs::symlink_metadata(path)
+        .or_else(|_| fs::metadata(path.parent().unwrap_or(Path::new("."))))
+        .with_context(|| format!("failed to read the owner of {}", path.display()))?;
+    let made =
+        fs::metadata(staged).with_context(|| format!("failed to read {}", staged.display()))?;
+    if (made.uid(), made.gid()) == (owner.uid(), owner.gid()) {
+        return Ok(());
+    }
+    std::os::unix::fs::chown(staged, Some(owner.uid()), Some(owner.gid()))
+        .with_context(|| format!("failed to give {} its owner back", path.display()))
+}
+
+#[cfg(not(unix))]
+fn keep_owner(_path: &Path, _staged: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn write_owner_only(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    let _ = fs::remove_file(path);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to secure {}", path.display()))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn is_saved_owner_only(path: &Path, contents: &str) -> bool {
@@ -1287,7 +1444,8 @@ codex:
     }
 
     #[test]
-    fn should_pick_the_managed_team_from_gateway_then_environment_then_claude_then_codex() {
+    fn should_pick_the_managed_team_from_gateway_then_environment_then_tool_teams_on_the_default_gateway(
+    ) {
         let mut settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
         settings.gateway.url = "https://prod.example.com".into();
         assert_eq!(settings.managed_team().as_deref(), Some("picked"));
@@ -1295,7 +1453,13 @@ codex:
         settings.gateway.team = None;
         assert_eq!(settings.managed_team().as_deref(), Some("prod-team"));
 
+        settings.environments[0].team = None;
+        assert_eq!(settings.managed_team().as_deref(), Some("claude-team"));
+
         settings.gateway.url = "https://uat.example.com".into();
+        assert_eq!(settings.managed_team(), None);
+
+        settings.gateway.url = "https://elsewhere.example.com".into();
         assert_eq!(settings.managed_team().as_deref(), Some("claude-team"));
 
         settings.claude.team = Some("  ".into());
@@ -1357,6 +1521,42 @@ codex:
     }
 
     #[test]
+    fn should_never_show_a_reader_a_half_written_config() {
+        let dir = std::env::temp_dir().join(format!("relay-config-race-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.yaml");
+        let first: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        let mut second = first.clone();
+        second.gateway.team = Some("another".to_string());
+        save_settings_to(&path, &first).expect("first save");
+        let expected =
+            [first.clone(), second.clone()].map(|settings| settings_yaml(&settings).unwrap());
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (path, stop) = (path.clone(), std::sync::Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let reads = std::iter::from_fn(|| {
+                    (!stop.load(std::sync::atomic::Ordering::SeqCst))
+                        .then(|| fs::read_to_string(&path).unwrap_or_default())
+                });
+                reads.filter(|read| !expected.contains(read)).count()
+            })
+        };
+        for round in 0..2000 {
+            let settings = if round % 2 == 0 { &second } else { &first };
+            save_settings_to(&path, settings).expect("save");
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reader.join().expect("reader"), 0);
+        let staged: Vec<_> = fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .collect();
+        assert_eq!(staged, vec![std::ffi::OsString::from("config.yaml")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn should_leave_config_yaml_untouched_when_a_save_changes_nothing() {
         let dir = std::env::temp_dir().join(format!("relay-config-save-{}", uuid::Uuid::new_v4()));
         let path = dir.join("config.yaml");
@@ -1410,6 +1610,52 @@ codex:
         assert_eq!(
             summary,
             "carried the environment uat with the team picked and the team picks for prod"
+        );
+    }
+
+    #[test]
+    fn should_let_a_re_pushed_managed_team_win_over_the_team_the_earlier_push_seeded() {
+        let seeded_yaml = "gateway:\n  url: https://prod.example.com\n  team: managed-1\nenvironments:\n  - name: prod\n    url: https://prod.example.com\n  - name: uat\n    url: https://uat.example.com\n";
+        let seeded: RelaySettings = parse_settings(seeded_yaml).expect("settings");
+        let repushed = || -> RelaySettings {
+            parse_settings(&seeded_yaml.replace("managed-1", "managed-2")).expect("settings")
+        };
+
+        assert_eq!(
+            carried_nothing(repushed().carrying_picks_over(&seeded, &seeded)),
+            "no environment or team was picked over the earlier managed config"
+        );
+
+        let mut picked_team = seeded.clone();
+        picked_team.gateway.team = Some("mine".into());
+        let (settings, _) = carried(repushed().carrying_picks_over(&picked_team, &seeded));
+        assert_eq!(settings.gateway.team.as_deref(), Some("mine"));
+
+        let mut moved = seeded.clone();
+        moved.gateway.url = "https://uat.example.com".into();
+        moved.gateway.team = None;
+        moved.gateway.team_by_environment = BTreeMap::from([("prod".into(), "managed-1".into())]);
+        let (settings, summary) = carried(repushed().carrying_picks_over(&moved, &seeded));
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+        assert_eq!(settings.gateway.team, None);
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("prod".into(), "managed-2".into())])
+        );
+        assert_eq!(summary, "carried the environment uat");
+
+        let mut parked_pick = moved.clone();
+        parked_pick.gateway.team_by_environment = BTreeMap::from([("prod".into(), "mine".into())]);
+        let (settings, _) = carried(repushed().carrying_picks_over(&parked_pick, &seeded));
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("prod".into(), "mine".into())])
+        );
+
+        let (settings, _) = carried(repushed().carrying_selection_from(&moved));
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("prod".into(), "managed-1".into())])
         );
     }
 

@@ -206,4 +206,35 @@ config="$tmp_dir/repush/.litellm-relay/config.yaml"
 [[ "$(gateway_value "$config" url)" == "$uat_url" ]] || fail "a re-push of the same managed config reset gateway.url to $(gateway_value "$config" url)"
 [[ "$(gateway_value "$config" team)" == "picked-team" ]] || fail "a re-push of the same managed config dropped gateway.team"
 
+managed_with_team() {
+  cat > "$tmp_dir/managed-team.yaml" <<YAML
+gateway:
+  url: $prod_url
+  team: $1
+environments:
+  - name: prod
+    url: $prod_url
+  - name: uat
+    url: $uat_url
+capture:
+  payloads: false
+YAML
+}
+
+team_install() {
+  : > "$tmp_dir/calls.log"
+  with_stubs HOME="$tmp_dir/team" RELAY_HOME="$tmp_dir/team/.litellm-relay" \
+    bash "$ROOT/src/install.sh" --skip-setup --skip-autoconfigure --prebuilt-binary "$relay_bin" \
+      --config-file "$tmp_dir/managed-team.yaml" --bin-dir "$tmp_dir/team/bin" > "$tmp_dir/$1.out" 2>&1 \
+    || { cat "$tmp_dir/$1.out" >&2; fail "install.sh ($1) exited non-zero"; }
+}
+
+mkdir -p "$tmp_dir/team"
+managed_with_team managed-1
+team_install team-first-push
+managed_with_team managed-2
+team_install team-re-push
+[[ "$(gateway_value "$tmp_dir/team/.litellm-relay/config.yaml" team)" == "managed-2" ]] \
+  || fail "a re-pushed managed gateway.team did not replace the team the earlier push seeded"
+
 echo "install upgrade smoke passed"

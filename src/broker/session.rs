@@ -16,6 +16,15 @@ pub struct SessionBearer {
 impl Broker {
     pub fn session_identity(&self) -> Option<SessionIdentity> {
         self.refresh();
+        self.held_identity()
+    }
+
+    pub fn session_identity_unless_renewing(&self) -> Option<SessionIdentity> {
+        self.refresh_unless_renewing();
+        self.held_identity()
+    }
+
+    fn held_identity(&self) -> Option<SessionIdentity> {
         let target = self.lock_target().clone();
         let state = self.lock_state();
         let held = matches!(target.mode, Mode::StaticKey(_)) || state.credential.is_some();

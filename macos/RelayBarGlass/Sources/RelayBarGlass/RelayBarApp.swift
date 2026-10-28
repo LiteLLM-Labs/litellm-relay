@@ -6,9 +6,18 @@ struct RelayBarGlassApp: App {
     private let model = AppModel()
 
     init() {
-        guard let older = SingleInstance.olderCopy(bundleIdentifier: Bundle.main.bundleIdentifier) else { return }
-        FileHandle.standardError.write(Data("relaybar: another copy (pid \(older.pid)) is already running; quitting\n".utf8))
-        exit(EXIT_SUCCESS)
+        switch SingleInstance.decision(bundleIdentifier: Bundle.main.bundleIdentifier) {
+        case .run:
+            return
+        case .yield(let older):
+            FileHandle.standardError.write(Data("relaybar: another copy (pid \(older.pid)) is already running; quitting\n".utf8))
+            exit(EXIT_SUCCESS)
+        case .replace(let copies):
+            for copy in copies {
+                FileHandle.standardError.write(Data("relaybar: quitting the copy outside \(SingleInstance.installedApp.path) (pid \(copy.pid))\n".utf8))
+                NSRunningApplication(processIdentifier: copy.pid)?.terminate()
+            }
+        }
     }
 
     var body: some Scene {

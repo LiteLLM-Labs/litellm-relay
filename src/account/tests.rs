@@ -6,7 +6,7 @@ use super::{test_support::account_on, test_support::FakeHttp, AccountService};
 use crate::{
     broker::{
         rfc3339,
-        test_support::{idp_settings, Rig, GATEWAY, NOW},
+        test_support::{idp_settings, static_key_settings, Rig, GATEWAY, NOW},
         Reply,
     },
     config::{EnvironmentEntry, RelaySettings},
@@ -21,7 +21,7 @@ const NOT_A_MEMBER: &str = r#"{"error":{"message":"User=user-1 not authorized to
 fn signed_in() -> (Rig, FakeHttp, Arc<AccountService>) {
     let (rig, http, account) = account_on(idp_settings(Some("team-a")));
     assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
-    http.answer("/user/info", 200, USER_INFO);
+    http.answer("/user/info?user_id=user-1", 200, USER_INFO);
     http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
     http.answer("/team/info?team_id=team-b", 200, TEAM_B_INFO);
     http.answer("/health/liveliness", 200, "\"I'm alive!\"");
@@ -80,7 +80,7 @@ fn should_read_teams_email_and_the_team_budget_with_the_daemon_bearer() {
         .session_bearer_for_daemon()
         .expect("signed in")
         .token;
-    for route in ["/user/info", "/team/info?team_id=team-a"] {
+    for route in ["/user/info?user_id=user-1", "/team/info?team_id=team-a"] {
         let calls = http.calls_to(route);
         assert_eq!(calls.len(), 1, "{route}");
         assert_eq!(calls[0].url, format!("{GATEWAY}{route}"));
@@ -117,7 +117,7 @@ fn should_keep_the_user_info_budget_when_team_info_is_refused() {
         r#"{"error":{"message":"Team not found"}}"#,
     );
     http.answer(
-        "/user/info",
+        "/user/info?user_id=user-1",
         200,
         r#"{"user_id":"user-1","user_info":{"user_email":null},"teams":[{"team_id":"team-a","team_alias":"Team A"}]}"#,
     );
@@ -135,7 +135,7 @@ fn should_keep_the_user_info_budget_when_team_info_is_refused() {
 #[test]
 fn should_degrade_to_the_current_team_when_user_info_fails_or_lists_nothing() {
     let (rig, http, account) = signed_in();
-    http.fail("/user/info", "connection refused");
+    http.fail("/user/info?user_id=user-1", "connection refused");
     account.poll();
     let status = account.status();
     assert_eq!(status["teams"], json!([{"id": "team-a", "alias": null}]));
@@ -143,7 +143,7 @@ fn should_degrade_to_the_current_team_when_user_info_fails_or_lists_nothing() {
     assert_eq!(status["team"]["spend"], 1.5);
     assert_eq!(account.known_teams(), None);
 
-    http.answer("/user/info", 500, "upstream exploded");
+    http.answer("/user/info?user_id=user-1", 500, "upstream exploded");
     rig.clock.advance(300);
     account.poll();
     assert_eq!(
@@ -152,7 +152,7 @@ fn should_degrade_to_the_current_team_when_user_info_fails_or_lists_nothing() {
     );
 
     http.answer(
-        "/user/info",
+        "/user/info?user_id=user-1",
         200,
         r#"{"user_id":"user-1","user_info":{},"teams":[]}"#,
     );
@@ -172,7 +172,7 @@ fn should_recheck_everything_at_once_even_when_nothing_is_due() {
     let (_rig, http, account) = signed_in();
     account.poll();
     let rechecked = account.recheck();
-    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
     assert_eq!(count(&http, "/team/info?team_id=team-a"), 2);
     assert_eq!(count(&http, "/health/liveliness"), 2);
     assert_eq!(rechecked, account.status());
@@ -180,7 +180,7 @@ fn should_recheck_everything_at_once_even_when_nothing_is_due() {
     assert_eq!(rechecked["team"]["spend"], 1.5);
 
     account.poll();
-    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
     assert_eq!(count(&http, "/health/liveliness"), 2);
 }
 
@@ -191,21 +191,21 @@ fn should_poll_the_account_every_300_s_and_the_gateway_every_60_s() {
     rig.clock.advance(59);
     account.poll();
     assert_eq!(count(&http, "/health/liveliness"), 1);
-    assert_eq!(count(&http, "/user/info"), 1);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
 
     rig.clock.advance(1);
     account.poll();
     assert_eq!(count(&http, "/health/liveliness"), 2);
-    assert_eq!(count(&http, "/user/info"), 1);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
     assert_eq!(count(&http, "/team/info?team_id=team-a"), 1);
 
     rig.clock.advance(239);
     account.poll();
-    assert_eq!(count(&http, "/user/info"), 1);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
 
     rig.clock.advance(1);
     account.poll();
-    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
     assert_eq!(count(&http, "/team/info?team_id=team-a"), 2);
     assert_eq!(account.status()["polled_at"], rfc3339(NOW + 300));
 }
@@ -291,12 +291,12 @@ fn should_clear_the_account_when_signed_out_and_still_probe_the_gateway() {
     assert_eq!(account.known_teams(), None);
     assert_eq!(status["gateway"]["reachable"], true);
     assert_eq!(status["gateway"]["checked_at"], rfc3339(NOW + 60));
-    assert_eq!(count(&http, "/user/info"), 1);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
     assert_eq!(count(&http, "/health/liveliness"), 2);
 
     rig.broker.sign_in();
     account.poll();
-    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
     assert_eq!(account.status()["teams"].as_array().map(Vec::len), Some(2));
 }
 
@@ -341,7 +341,7 @@ fn should_fetch_at_once_after_a_team_switch_and_after_an_environment_switch() {
         Reply::Switched(_)
     ));
     account.poll();
-    assert_eq!(count(&http, "/user/info"), 2);
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
     assert_eq!(count(&http, "/team/info?team_id=team-b"), 1);
     assert_eq!(
         account.status()["team"],
@@ -354,9 +354,9 @@ fn should_fetch_at_once_after_a_team_switch_and_after_an_environment_switch() {
     ));
     assert_eq!(account.known_teams(), None);
     account.poll();
-    let users = http.calls_to("/user/info");
+    let users = http.calls_to("/user/info?user_id=user-1");
     assert_eq!(users.len(), 3);
-    assert_eq!(users[2].url, format!("{UAT}/user/info"));
+    assert_eq!(users[2].url, format!("{UAT}/user/info?user_id=user-1"));
     let probes = http.calls_to("/health/liveliness");
     assert_eq!(probes.len(), 2);
     assert_eq!(probes[1].url, format!("{UAT}/health/liveliness"));
@@ -392,4 +392,88 @@ fn should_list_the_configured_environments_and_follow_a_settings_change() {
         unmanaged.environments(),
         json!({"current": null, "available": []})
     );
+}
+
+#[test]
+fn should_show_the_team_and_budget_of_a_static_key_saved_without_a_team() {
+    let (_rig, http, account) = account_on(static_key_settings("sk-static"));
+    http.answer(
+        "/key/info",
+        200,
+        r#"{"key":"sk-static","info":{"key_name":"sk-...atic","team_id":"team-a","spend":0.2}}"#,
+    );
+    http.answer("/user/info", 200, USER_INFO);
+    http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
+    http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    account.poll();
+    let status = account.status();
+    assert_eq!(
+        status["team"],
+        json!({
+            "id": "team-a",
+            "alias": "Team A",
+            "spend": 1.5,
+            "max_budget": 50.0,
+            "budget_reset_at": "2027-02-01T00:00:00+00:00",
+        })
+    );
+    let key_reads = http.calls_to("/key/info");
+    assert_eq!(key_reads.len(), 1);
+    assert_eq!(key_reads[0].bearer.as_deref(), Some("sk-static"));
+    assert!(!status.to_string().contains("sk-static"));
+
+    let (_rig, idp_http, idp_account) = signed_in();
+    idp_account.poll();
+    assert!(idp_http.calls_to("/key/info").is_empty());
+}
+
+#[test]
+fn should_keep_the_last_budget_with_the_error_while_the_gateway_is_unreachable() {
+    let (rig, http, account) = signed_in();
+    account.poll();
+    assert_eq!(account.status()["team"]["spend"], 1.5);
+
+    http.fail("/user/info?user_id=user-1", "connection refused");
+    http.fail("/team/info?team_id=team-a", "connection refused");
+    rig.clock.advance(300);
+    account.poll();
+    let status = account.status();
+    assert_eq!(status["team"]["spend"], 1.5);
+    assert_eq!(status["team"]["max_budget"], 50.0);
+    assert_eq!(status["budget_error"], "connection refused");
+
+    http.answer(
+        "/team/info?team_id=team-a",
+        404,
+        r#"{"error":{"message":"Team not found"}}"#,
+    );
+    rig.clock.advance(300);
+    account.poll();
+    let status = account.status();
+    assert_eq!(status["team"]["spend"], Value::Null);
+    assert_eq!(status["budget_error"], "Team not found");
+}
+
+#[test]
+fn should_poll_only_while_someone_reads_the_status_and_never_probe_an_unconfigured_device() {
+    let (rig, http, account) = signed_in();
+    account.poll();
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
+
+    rig.clock.advance(601);
+    account.poll();
+    rig.clock.advance(300);
+    account.poll();
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
+    assert_eq!(count(&http, "/health/liveliness"), 1);
+
+    account.status();
+    account.poll();
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
+    assert_eq!(count(&http, "/health/liveliness"), 2);
+
+    let (_rig, unconfigured_http, unconfigured) = account_on(RelaySettings::default());
+    unconfigured.poll();
+    unconfigured.recheck();
+    assert!(unconfigured_http.calls_to("/health/liveliness").is_empty());
 }

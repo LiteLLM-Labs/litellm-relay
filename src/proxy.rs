@@ -1,8 +1,11 @@
 use std::{
     fs,
     io::ErrorKind,
-    net::SocketAddr,
-    sync::Arc,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -36,6 +39,7 @@ use crate::{
     inference::{forward, gateway_client, is_inference_target, Head},
     mcp::service::McpService,
     pac::build_pac,
+    system::hostname,
     terminal::{print_runtime_panel, print_trace_event},
     traffic::{classify_captured_traffic, CapturedTraffic, TrafficClassification},
 };
@@ -57,6 +61,8 @@ pub struct RelayProxy {
     inference: reqwest::Client,
     ca_trust: Arc<dyn CaTrust>,
     ca_verdict: AsyncMutex<Option<CaVerdict>>,
+    ca_trusted: AtomicBool,
+    dashboard_names: Vec<String>,
 }
 
 struct CaVerdict {
@@ -68,6 +74,7 @@ impl RelayProxy {
     pub fn new(config: RelayConfig) -> Self {
         let config = Arc::new(config);
         let gateway = GatewayClient::new(Arc::clone(&config));
+        let dashboard_names = dashboard_names(&config.host, &hostname());
         Self {
             config,
             gateway,
@@ -77,6 +84,8 @@ impl RelayProxy {
             inference: gateway_client(),
             ca_trust: Arc::new(UserCaTrust),
             ca_verdict: AsyncMutex::new(None),
+            ca_trusted: AtomicBool::new(false),
+            dashboard_names,
         }
     }
 
@@ -246,13 +255,13 @@ impl RelayProxy {
         }
 
         if route.path.starts_with("/api/")
-            && !is_local_dashboard_request(&header_text, self.config.port)
+            && !is_dashboard_request(&header_text, &self.dashboard_names)
         {
             return write_response(
                 &mut stream,
                 403,
                 "application/json; charset=utf-8",
-                br#"{"error":"the Relay API only answers requests addressed to this machine's loopback address"}"#,
+                br#"{"error":"the Relay API only answers the dashboard's own pages, addressed by IP, localhost or this device's name"}"#,
                 true,
             )
             .await;
@@ -425,6 +434,7 @@ impl RelayProxy {
             trusted,
             checked_at: Instant::now(),
         });
+        self.ca_trusted.store(trusted, Ordering::Relaxed);
         trusted
     }
 
@@ -771,7 +781,7 @@ impl RelayProxy {
             "log_path": self.config.log_path.display().to_string(),
             "ai_domains": self.config.ai_domains,
             "notion_domains": self.config.notion_domains,
-            "capture_payloads": self.config.mitm_enabled,
+            "capture_payloads": self.config.mitm_enabled && self.ca_trusted.load(Ordering::Relaxed),
             "mitm_ca_path": ca_path,
             "shadow_enabled": self.config.shadow_enabled,
             "gateway_url": self.config.gateway_url,
@@ -848,13 +858,27 @@ impl RelayProxy {
     }
 }
 
-fn is_local_dashboard_request(header_text: &str, port: u16) -> bool {
-    let local_hosts = ["127.0.0.1", "localhost", "[::1]"].map(|host| format!("{host}:{port}"));
-    let is_local = |host: &str| {
-        local_hosts
-            .iter()
-            .any(|local| local.eq_ignore_ascii_case(host))
-    };
+fn dashboard_names(configured_host: &str, device: &str) -> Vec<String> {
+    let device = device.trim().trim_end_matches(".local");
+    let device_names = (!device.is_empty())
+        .then(|| [device.to_string(), format!("{device}.local")])
+        .into_iter()
+        .flatten();
+    ["localhost".to_string(), configured_host.trim().to_string()]
+        .into_iter()
+        .chain(device_names)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn authority_hostname(authority: &str) -> &str {
+    match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or(bracketed),
+        None => authority.split(':').next().unwrap_or(authority),
+    }
+}
+
+fn is_dashboard_request(header_text: &str, dashboard_names: &[String]) -> bool {
     let values = |name: &str| -> Vec<&str> {
         header_text
             .lines()
@@ -864,10 +888,20 @@ fn is_local_dashboard_request(header_text: &str, port: u16) -> bool {
             .map(|(_, value)| value.trim())
             .collect()
     };
-    matches!(values("host").as_slice(), [host] if is_local(host))
-        && values("origin")
+    let [authority] = values("host").as_slice()[..] else {
+        return false;
+    };
+    let hostname = authority_hostname(authority);
+    let trusted_host = hostname.parse::<IpAddr>().is_ok()
+        || dashboard_names
             .iter()
-            .all(|origin| origin.strip_prefix("http://").is_some_and(is_local))
+            .any(|name| name.eq_ignore_ascii_case(hostname));
+    trusted_host
+        && values("origin").iter().all(|origin| {
+            origin
+                .strip_prefix("http://")
+                .is_some_and(|origin| origin.eq_ignore_ascii_case(authority))
+        })
 }
 
 fn metadata_tunnel_decision(
@@ -1330,7 +1364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_refuse_the_api_unless_host_and_origin_name_this_daemon_on_loopback() {
+    async fn should_refuse_the_api_to_foreign_hosts_and_cross_origin_pages() {
         let upstream = Upstream::answering(&[JSON_OK]).await;
         let log_path =
             std::env::temp_dir().join(format!("relay-api-guard-{}.log.jsonl", Uuid::new_v4()));
@@ -1352,13 +1386,16 @@ mod tests {
         for headers in [
             "Host: attacker.example\r\n".to_string(),
             format!("Host: attacker.example:{port}\r\n"),
-            format!("Host: 127.0.0.1:{}\r\n", port + 1),
             String::new(),
             format!("Host: 127.0.0.1:{port}\r\nHost: attacker.example:{port}\r\n"),
             format!("Host: 127.0.0.1:{port}\r\nOrigin: http://attacker.example\r\n"),
             format!("Host: 127.0.0.1:{port}\r\nOrigin: http://attacker.example:{port}\r\n"),
             format!("Host: 127.0.0.1:{port}\r\nOrigin: null\r\n"),
             format!("Host: 127.0.0.1:{port}\r\nOrigin: https://127.0.0.1:{port}\r\n"),
+            format!(
+                "Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{}\r\n",
+                port + 1
+            ),
         ] {
             seed();
             let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
@@ -1378,6 +1415,9 @@ mod tests {
             format!("Host: [::1]:{port}\r\n"),
             format!("Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n"),
             format!("Host: localhost:{port}\r\nOrigin: http://localhost:{port}\r\n"),
+            format!("Host: 0.0.0.0:{port}\r\nOrigin: http://0.0.0.0:{port}\r\n"),
+            "Host: localhost:8080\r\nOrigin: http://localhost:8080\r\n".to_string(),
+            format!("Host: 192.168.1.148:{port}\r\n"),
         ] {
             seed();
             let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
@@ -1410,6 +1450,36 @@ mod tests {
         .await;
         assert!(forwarded.ends_with("{\"ok\":true}"), "{forwarded}");
         let _ = fs::remove_file(&log_path);
+    }
+
+    #[test]
+    fn should_answer_the_dashboard_at_any_address_or_name_of_this_device() {
+        let names = dashboard_names("relay.internal", "MyMac.local");
+        let request = |headers: &str| format!("GET /api/status HTTP/1.1\r\n{headers}\r\n\r\n");
+
+        for headers in [
+            "Host: mymac.local:4142",
+            "Host: MyMac:4142",
+            "Host: relay.internal:4142\r\nOrigin: http://relay.internal:4142",
+            "Host: 0.0.0.0:4142\r\nOrigin: http://0.0.0.0:4142",
+            "Host: 192.168.1.148:4142",
+            "Host: [fe80::1]:4142",
+            "Host: localhost",
+        ] {
+            assert!(is_dashboard_request(&request(headers), &names), "{headers}");
+        }
+
+        for headers in [
+            "Host: othermac.local:4142",
+            "Host: mymac.local.attacker.example:4142",
+            "Host: relay.internal.attacker.example:4142",
+            "Host: 127.0.0.1:4142\r\nOrigin: http://localhost:4142",
+        ] {
+            assert!(
+                !is_dashboard_request(&request(headers), &names),
+                "{headers}"
+            );
+        }
     }
 
     struct FakeCaTrust {
@@ -1509,6 +1579,8 @@ mod tests {
             .iter()
             .all(|event| event["event"] != "payload_capture_failed"));
         assert_eq!(trust.checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let status = proxy.status_payload(json!({"state": "ok"})).unwrap();
+        assert_eq!(status["capture_payloads"], false);
         fs::remove_dir_all(scratch).unwrap();
     }
 
@@ -1534,6 +1606,8 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| event["event"] != "capture_ca_untrusted"));
+        let status = proxy.status_payload(json!({"state": "ok"})).unwrap();
+        assert_eq!(status["capture_payloads"], true);
         fs::remove_dir_all(scratch).unwrap();
     }
 

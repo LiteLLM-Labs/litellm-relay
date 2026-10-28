@@ -204,6 +204,9 @@ enum CommandKind {
     CarrySelection {
         /// The config.yaml the install replaced.
         previous: PathBuf,
+        /// The managed config the earlier install seeded; a value still equal to it is not a pick.
+        #[arg(long)]
+        seeded: Option<PathBuf>,
     },
 }
 
@@ -319,8 +322,8 @@ async fn run_command(command: CommandKind) -> Result<()> {
             println!("{}", capture_mode_label(config.mitm_enabled));
             Ok(())
         }
-        CommandKind::CarrySelection { previous } => {
-            println!("{}", carry_selection(&previous)?);
+        CommandKind::CarrySelection { previous, seeded } => {
+            println!("{}", carry_selection(&previous, seeded.as_deref())?);
             Ok(())
         }
         CommandKind::Setup {

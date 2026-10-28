@@ -92,9 +92,9 @@ fn onboard_with(
     if let Some(model) = params.model {
         settings.claude.model = model;
     }
-    if params.team.is_some() {
-        settings.claude.team = params.team;
-        settings.gateway.team = None;
+    if let Some(team) = params.team {
+        settings.claude.team = Some(team.clone());
+        settings.gateway.team = Some(team);
     }
 
     let host = Host::current();
@@ -816,6 +816,11 @@ mod tests {
         switched.idp.issuer = "https://login.example.com".into();
         switched.idp.client_id = "relay-client".into();
         switched.gateway.team = Some("switched".into());
+        switched.environments = vec![crate::config::EnvironmentEntry {
+            name: "prod".into(),
+            url: switched.gateway.url.clone(),
+            team: Some("environment-default".into()),
+        }];
 
         let seeded = save_settings(&switched);
         let onboarded = onboard_with(

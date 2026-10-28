@@ -100,9 +100,9 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
     if let Some(model) = params.model {
         settings.codex.model = model;
     }
-    if params.team.is_some() {
-        settings.codex.team = params.team;
-        settings.gateway.team = None;
+    if let Some(team) = params.team {
+        settings.codex.team = Some(team.clone());
+        settings.gateway.team = Some(team);
     }
 
     let explicit_key = params.api_key.filter(|key| !key.trim().is_empty());

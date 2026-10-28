@@ -11,13 +11,14 @@ use crate::{
     ai_tools::blocking::call,
     broker::{
         rfc3339, session::SessionIdentity, Broker, BrokerStatus, Clock, SettingsSource,
-        SettingsVersion,
+        SettingsVersion, Source,
     },
     config::EnvironmentEntry,
 };
 
 pub const BUDGET_INTERVAL_SECONDS: i64 = 300;
 pub const REACHABILITY_INTERVAL_SECONDS: i64 = 60;
+pub const WATCH_SECONDS: i64 = 600;
 pub const POLL_TICK: Duration = Duration::from_secs(10);
 const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 const REACHABILITY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,6 +102,7 @@ struct Reachability {
 struct AccountState {
     identity: Option<SessionIdentity>,
     team: Option<String>,
+    key_team: Option<String>,
     teams: Option<Vec<TeamEntry>>,
     teams_error: Option<String>,
     user_email: Option<String>,
@@ -111,10 +113,12 @@ struct AccountState {
     account_checked_at: Option<i64>,
     settings_version: Option<SettingsVersion>,
     environments: Vec<EnvironmentEntry>,
+    watched_until: i64,
 }
 
 impl AccountState {
     fn clear_account(&mut self) {
+        self.key_team = None;
         self.teams = None;
         self.teams_error = None;
         self.user_email = None;
@@ -133,12 +137,14 @@ pub struct AccountService {
 
 impl AccountService {
     pub fn new(broker: Arc<Broker>, deps: AccountDependencies) -> Self {
+        let watched_until = deps.clock.now() + WATCH_SECONDS;
         Self {
             broker,
             deps,
             state: Mutex::new(AccountState {
                 identity: None,
                 team: None,
+                key_team: None,
                 teams: None,
                 teams_error: None,
                 user_email: None,
@@ -149,6 +155,7 @@ impl AccountService {
                 account_checked_at: None,
                 settings_version: None,
                 environments: Vec::new(),
+                watched_until,
             }),
             pass: Mutex::new(()),
         }
@@ -157,6 +164,9 @@ impl AccountService {
     pub fn poll(&self) {
         let _pass = self.lock_pass();
         let now = self.deps.clock.now();
+        if now > self.lock_state().watched_until {
+            return;
+        }
         let broker = self.broker.status();
         let (account_due, gateway_due) = {
             let state = self.lock_state();
@@ -171,7 +181,7 @@ impl AccountService {
         if account_due {
             self.poll_account(&broker, now);
         }
-        if gateway_due {
+        if gateway_due && self.broker.configured() {
             self.probe_gateway(&broker.gateway_url, now);
         }
     }
@@ -182,7 +192,9 @@ impl AccountService {
             let now = self.deps.clock.now();
             let broker = self.broker.status();
             self.poll_account(&broker, now);
-            self.probe_gateway(&broker.gateway_url, now);
+            if self.broker.configured() {
+                self.probe_gateway(&broker.gateway_url, now);
+            }
         }
         self.status()
     }
@@ -201,7 +213,8 @@ impl AccountService {
 
     pub fn status(&self) -> Value {
         let broker = self.broker.status();
-        let state = self.lock_state();
+        let mut state = self.lock_state();
+        state.watched_until = self.deps.clock.now() + WATCH_SECONDS;
         let session = (state.identity == identity_of(&broker)).then_some(&*state);
         let probed = probed_gateway(&state, &broker.gateway_url);
         let known_teams = session.and_then(|session| session.teams.as_ref());
@@ -211,7 +224,11 @@ impl AccountService {
                 .map(|team| json!({ "id": team.id, "alias": team.alias }))
                 .collect::<Vec<Value>>()
         });
-        let team = broker.team.as_ref().map(|id| {
+        let team_id = broker
+            .team
+            .clone()
+            .or_else(|| session.and_then(|session| session.key_team.clone()));
+        let team = team_id.as_ref().map(|id| {
             let alias = known_teams
                 .and_then(|teams| teams.iter().find(|team| &team.id == id))
                 .and_then(|team| team.alias.clone());
@@ -286,17 +303,30 @@ impl AccountService {
             .gateway_url
             .trim_end_matches('/')
             .to_string();
+        let user_info_route = match bearer.identity.user_id.as_deref() {
+            Some(user_id) => format!("/user/info?user_id={}", query_value(user_id)),
+            None => "/user/info".to_string(),
+        };
         let user = self
-            .fetch(&base, "/user/info", &bearer.token)
+            .fetch(&base, &user_info_route, &bearer.token)
             .and_then(parse_user_info);
-        let (teams, teams_error) = teams_from(&user, broker.team.as_deref());
-        let (budget, budget_error) = match broker.team.as_deref() {
-            Some(team) => self.budget_for(&base, &bearer.token, team, user.as_ref().ok()),
+        let key_team = match (&broker.team, broker.source) {
+            (None, Some(source)) if source == Source::StaticKey.name() => {
+                self.key_team(&base, &bearer.token)
+            }
+            _ => None,
+        };
+        let team = broker.team.as_deref().or(key_team.as_deref());
+        let previous = self.previous_budget(&bearer.identity, team);
+        let (teams, teams_error) = teams_from(&user, team);
+        let (budget, budget_error) = match team {
+            Some(team) => self.budget_for(&base, &bearer.token, team, user.as_ref().ok(), previous),
             None => (None, None),
         };
         let mut state = self.lock_state();
         state.identity = Some(bearer.identity);
         state.team = broker.team.clone();
+        state.key_team = key_team;
         state.teams = Some(teams);
         state.teams_error = teams_error;
         state.user_email = user.ok().and_then(|info| info.email);
@@ -306,20 +336,46 @@ impl AccountService {
         state.account_checked_at = Some(now);
     }
 
+    fn key_team(&self, base: &str, token: &str) -> Option<String> {
+        match self
+            .fetch(base, "/key/info", token)
+            .and_then(parse_key_info)
+        {
+            Ok(team) => team,
+            Err(message) => {
+                eprintln!("account: the key's team could not be read: {message}");
+                None
+            }
+        }
+    }
+
+    fn previous_budget(&self, identity: &SessionIdentity, team: Option<&str>) -> Option<Budget> {
+        let state = self.lock_state();
+        if state.identity.as_ref() != Some(identity) {
+            return None;
+        }
+        state
+            .budget
+            .clone()
+            .filter(|budget| Some(budget.team.as_str()) == team)
+    }
+
     fn budget_for(
         &self,
         base: &str,
         token: &str,
         team: &str,
         user: Option<&UserInfo>,
+        previous: Option<Budget>,
     ) -> (Option<Budget>, Option<String>) {
         let route = format!("/team/info?team_id={}", query_value(team));
-        match self
-            .fetch(base, &route, token)
-            .and_then(|answer| parse_team_info(answer, team))
-        {
-            Ok(budget) => (Some(budget), None),
-            Err(message) => (user.and_then(|info| info.budget_of(team)), Some(message)),
+        let fallback = || user.and_then(|info| info.budget_of(team));
+        match self.fetch(base, &route, token) {
+            Err(message) => (fallback().or(previous), Some(message)),
+            Ok(answer) => match parse_team_info(answer, team) {
+                Ok(budget) => (Some(budget), None),
+                Err(message) => (fallback(), Some(message)),
+            },
         }
     }
 
@@ -405,6 +461,17 @@ struct UserTeam {
 }
 
 #[derive(Deserialize)]
+struct KeyInfoBody {
+    info: KeyInfoFields,
+}
+
+#[derive(Deserialize)]
+struct KeyInfoFields {
+    #[serde(default)]
+    team_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct TeamInfoBody {
     team_info: TeamInfoFields,
 }
@@ -448,6 +515,11 @@ fn parse_user_info(answer: HttpAnswer) -> Result<UserInfo, String> {
             .filter(|email| !email.trim().is_empty()),
         teams: body.teams,
     })
+}
+
+fn parse_key_info(answer: HttpAnswer) -> Result<Option<String>, String> {
+    let body: KeyInfoBody = parse_body(answer, "/key/info")?;
+    Ok(body.info.team_id.filter(|team| !team.trim().is_empty()))
 }
 
 fn parse_team_info(answer: HttpAnswer, team: &str) -> Result<Budget, String> {

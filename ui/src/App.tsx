@@ -544,13 +544,15 @@ function CredentialLine({ credential }: { credential?: RelayCredential }) {
             ? "unverifiable"
             : state === "missing"
               ? "not configured"
-              : "-"
+              : state === "unchecked"
+                ? "checking"
+                : "-"
   const tone =
     state === "rejected"
       ? "text-destructive"
       : state === "restricted" || state === "unverifiable" || credential?.expiry === "expiring_soon"
         ? "text-amber-600 dark:text-amber-400"
-        : state === "missing"
+        : state === "missing" || state === "unchecked"
           ? "text-muted-foreground"
           : ""
   const detail =

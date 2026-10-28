@@ -17,8 +17,8 @@ console_user="$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || echo root)"
 
 if [[ -z "$console_user" || "$console_user" == "root" || "$console_user" == "loginwindow" || "$console_user" == "_mbsetupuser" ]]; then
   echo "No user is logged in at the console, so Relay was not installed for anyone." >&2
-  echo "The payload is staged at $PAYLOAD, and nothing installs it until this package runs again while a user is logged in." >&2
-  exit 0
+  echo "The payload is staged at $PAYLOAD; this install reports a failure so the MDM runs it again once a user is logged in." >&2
+  exit 1
 fi
 
 console_uid="$(/usr/bin/id -u "$console_user")"
