@@ -33,7 +33,7 @@ url = "2.5"
 percent-encoding = "2.3"
 uuid = { version = "1.10", features = ["v4"] }
 webpki-roots = "1"
-zstd = "0.13"
+zstd = "0.14.3"
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

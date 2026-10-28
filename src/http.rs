@@ -683,6 +683,27 @@ mod tests {
     }
 
     #[test]
+    fn build_http_payload_decodes_zstd_encoded_body() {
+        let plain = br#"{"prompt":"hello notion"}"#;
+        let encoded = zstd::stream::encode_all(&plain[..], 0).unwrap();
+        let headers = HashMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("content-encoding".to_string(), "zstd".to_string()),
+        ]);
+        let payload = build_http_payload(
+            &encoded,
+            &headers,
+            100,
+            100,
+            json!({"method": "POST", "path": "/api/v3/runInferenceTranscript"}),
+        );
+
+        assert_ne!(encoded.as_slice(), plain.as_slice());
+        assert_eq!(payload["body"], "{\"prompt\":\"hello notion\"}");
+        assert_eq!(payload["decoded_body_bytes"], plain.len());
+    }
+
+    #[test]
     fn build_http_payload_omits_body_when_body_limit_is_zero() {
         let headers = HashMap::from([("content-type".to_string(), "application/json".to_string())]);
         let payload = build_http_payload(
