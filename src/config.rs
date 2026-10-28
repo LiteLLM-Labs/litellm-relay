@@ -143,9 +143,9 @@ impl RelaySettings {
             .filter(|(name, _)| self.environment_named(name).is_some())
             .map(|(name, team)| (name.clone(), team.clone()))
             .collect();
-        let team = previous.gateway.team.clone();
-        let unchanged =
-            self.current_environment() == Some(&kept) && team.is_none() && parked.is_empty();
+        let picked_team = previous.gateway.team.clone();
+        let on_the_default_environment = self.current_environment() == Some(&kept);
+        let unchanged = on_the_default_environment && picked_team.is_none() && parked.is_empty();
         if unchanged {
             return CarriedSelection::Nothing(format!(
                 "the environment {} is the new config's default and no team was picked",
@@ -156,7 +156,8 @@ impl RelaySettings {
         let summary = format!(
             "carried the environment {}{}{}",
             kept.name,
-            team.as_deref()
+            picked_team
+                .as_deref()
                 .map(|team| format!(" with the team {team}"))
                 .unwrap_or_default(),
             match parked_names.is_empty() {
@@ -164,6 +165,12 @@ impl RelaySettings {
                 false => format!(" and the team picks for {parked_names}"),
             }
         );
+        let team = picked_team.or_else(|| {
+            self.gateway
+                .team
+                .clone()
+                .filter(|_| on_the_default_environment)
+        });
         let gateway = GatewaySection {
             url: kept.url,
             team,
@@ -1657,6 +1664,25 @@ codex:
             settings.gateway.team_by_environment,
             BTreeMap::from([("prod".into(), "managed-1".into())])
         );
+
+        let mut came_back = seeded.clone();
+        came_back.gateway.team_by_environment = BTreeMap::from([("uat".into(), "uat-pick".into())]);
+        let (settings, summary) = carried(repushed().carrying_picks_over(&came_back, &seeded));
+        assert_eq!(settings.current_environment().unwrap().name, "prod");
+        assert_eq!(settings.gateway.team.as_deref(), Some("managed-2"));
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("uat".into(), "uat-pick".into())])
+        );
+        assert_eq!(
+            summary,
+            "carried the environment prod and the team picks for uat"
+        );
+
+        let mut never_seeded = came_back.clone();
+        never_seeded.gateway.team = None;
+        let (settings, _) = carried(repushed().carrying_selection_from(&never_seeded));
+        assert_eq!(settings.gateway.team.as_deref(), Some("managed-2"));
     }
 
     #[test]

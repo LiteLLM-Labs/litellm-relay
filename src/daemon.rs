@@ -204,7 +204,7 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(rig.settings.version(), version);
-        assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
+        assert_eq!(count(&http, "/user/info"), 1);
     }
 
     #[test]
