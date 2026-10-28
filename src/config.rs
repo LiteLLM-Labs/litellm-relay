@@ -208,6 +208,23 @@ impl RelaySettings {
         }
     }
 
+    pub fn carrying_install_picks(
+        self,
+        previous: &RelaySettings,
+        seeded: Option<&RelaySettings>,
+    ) -> CarriedSelection {
+        match seeded {
+            Some(seeded) => self.carrying_picks_over(previous, seeded),
+            None => self.carrying_selection_from(&RelaySettings {
+                gateway: GatewaySection {
+                    team: None,
+                    ..previous.gateway.clone()
+                },
+                ..previous.clone()
+            }),
+        }
+    }
+
     fn parking_team(self, environment: Option<String>, team: Option<String>) -> RelaySettings {
         let Some((environment, team)) = environment.zip(team) else {
             return self;
@@ -650,11 +667,8 @@ fn read_settings_file(path: &Path) -> Result<RelaySettings> {
 pub fn carry_selection(previous: &Path, seeded: Option<&Path>) -> Result<String> {
     let previous = read_settings_file(previous)?;
     let current = load_settings()?;
-    let carried = match seeded.map(read_settings_file).transpose()? {
-        Some(seeded) => current.carrying_picks_over(&previous, &seeded),
-        None => current.carrying_selection_from(&previous),
-    };
-    match carried {
+    let seeded = seeded.map(read_settings_file).transpose()?;
+    match current.carrying_install_picks(&previous, seeded.as_ref()) {
         CarriedSelection::Carried { settings, summary } => {
             save_settings(&settings)?;
             Ok(summary)
@@ -1683,6 +1697,39 @@ codex:
         never_seeded.gateway.team = None;
         let (settings, _) = carried(repushed().carrying_selection_from(&never_seeded));
         assert_eq!(settings.gateway.team.as_deref(), Some("managed-2"));
+    }
+
+    #[test]
+    fn should_let_the_first_managed_team_win_when_an_earlier_install_left_no_seeded_copy() {
+        let earlier_yaml = "gateway:\n  url: https://prod.example.com\n  team: managed-1\nenvironments:\n  - name: prod\n    url: https://prod.example.com\n  - name: uat\n    url: https://uat.example.com\n";
+        let earlier: RelaySettings = parse_settings(earlier_yaml).expect("settings");
+        let pushed = || -> RelaySettings {
+            parse_settings(&earlier_yaml.replace("managed-1", "managed-2")).expect("settings")
+        };
+
+        assert_eq!(
+            carried_nothing(pushed().carrying_install_picks(&earlier, None)),
+            "the environment prod is the new config's default and no team was picked"
+        );
+        assert_eq!(
+            carried_nothing(pushed().carrying_install_picks(&pushed(), Some(&pushed()))),
+            "no environment or team was picked over the earlier managed config"
+        );
+
+        let mut on_uat = earlier.clone();
+        on_uat.gateway.url = "https://uat.example.com".into();
+        on_uat.gateway.team_by_environment = BTreeMap::from([("prod".into(), "mine".into())]);
+        let (settings, summary) = carried(pushed().carrying_install_picks(&on_uat, None));
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+        assert_eq!(settings.gateway.team, None);
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("prod".into(), "mine".into())])
+        );
+        assert_eq!(
+            summary,
+            "carried the environment uat and the team picks for prod"
+        );
     }
 
     #[test]

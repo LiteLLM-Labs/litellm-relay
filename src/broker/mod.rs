@@ -1009,6 +1009,18 @@ impl Broker {
         self.issue_under_renewal_lock(&target, context)
     }
 
+    fn issue_unless_renewing(&self, target: &Target, context: Context) -> Option<Reply> {
+        if !matches!(target.mode, Mode::Idp(_)) {
+            return Some(self.issue(target, context));
+        }
+        if let Some(issued) = self.fresh_key(self.deps.clock.now()) {
+            return Some(self.serve(issued));
+        }
+        let _renewal = self.try_lock_renewal()?;
+        let target = self.lock_target().clone();
+        Some(self.issue_under_renewal_lock(&target, context))
+    }
+
     fn issue_under_renewal_lock(&self, target: &Target, context: Context) -> Reply {
         let Mode::Idp(idp) = &target.mode else {
             return self.issue(target, context);

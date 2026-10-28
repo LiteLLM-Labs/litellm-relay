@@ -237,4 +237,10 @@ team_install team-re-push
 [[ "$(gateway_value "$tmp_dir/team/.litellm-relay/config.yaml" team)" == "managed-2" ]] \
   || fail "a re-pushed managed gateway.team did not replace the team the earlier push seeded"
 
+rm "$tmp_dir/team/.litellm-relay/.managed-config.yaml"
+managed_with_team managed-3
+team_install team-unseeded-push
+[[ "$(gateway_value "$tmp_dir/team/.litellm-relay/config.yaml" team)" == "managed-3" ]] \
+  || fail "a managed push with no seeded copy kept the earlier managed gateway.team"
+
 echo "install upgrade smoke passed"

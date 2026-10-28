@@ -39,7 +39,9 @@ A later install replaces `config.yaml` with the new managed config and keeps
 only the environment and team the developer picked. A value still equal to the
 one the earlier install seeded (kept in `~/.litellm-relay/.managed-config.yaml`)
 is not a pick, so a re-pushed `gateway.team` reaches every device that never
-switched.
+switched. The first managed install on a device that has no seeded copy yet
+(one set up before this version, or by hand) keeps only the picked environment
+and its per-environment team picks, so the new managed `gateway.team` applies.
 
 ## Build the package
 

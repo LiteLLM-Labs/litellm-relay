@@ -287,9 +287,10 @@ impl AccountService {
     }
 
     fn poll_account(&self, broker: &BrokerStatus, now: i64) {
-        let bearer = match self.broker.session_bearer_for_daemon() {
-            Ok(bearer) => bearer,
-            Err(_) => {
+        let bearer = match self.broker.session_bearer_unless_renewing() {
+            None => return,
+            Some(Ok(bearer)) => bearer,
+            Some(Err(_)) => {
                 let mut state = self.lock_state();
                 state.clear_account();
                 state.identity = identity_of(broker);

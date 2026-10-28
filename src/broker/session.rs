@@ -57,8 +57,19 @@ impl Broker {
         self.session_bearer(&target, Context::NonInteractive)
     }
 
+    pub fn session_bearer_unless_renewing(&self) -> Option<Result<SessionBearer, Refusal>> {
+        self.refresh_unless_renewing();
+        let target = self.lock_target().clone();
+        let reply = self.issue_unless_renewing(&target, Context::NonInteractive)?;
+        Some(self.bearer_from(&target, reply))
+    }
+
     fn session_bearer(&self, target: &Target, context: Context) -> Result<SessionBearer, Refusal> {
-        match self.issue(target, context) {
+        self.bearer_from(target, self.issue(target, context))
+    }
+
+    fn bearer_from(&self, target: &Target, reply: Reply) -> Result<SessionBearer, Refusal> {
+        match reply {
             Reply::Credential(issued) => Ok(SessionBearer {
                 token: issued.token,
                 identity: SessionIdentity {

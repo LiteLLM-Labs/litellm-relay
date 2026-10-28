@@ -248,7 +248,7 @@ struct PopoverView: View {
     private func iconLine(_ icon: String, _ text: String, font: Font, color: Color, lines: Int = 2) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(GlassTheme.muted).frame(width: 14)
-            Text(text).font(font).foregroundStyle(color).lineLimit(lines)
+            Text(text).font(font).foregroundStyle(color).lineLimit(lines).fixedSize(horizontal: false, vertical: true)
         }
     }
 

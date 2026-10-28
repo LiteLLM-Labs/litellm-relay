@@ -363,6 +363,35 @@ mod tests {
     }
 
     #[test]
+    fn should_answer_a_recheck_at_once_while_a_sign_in_is_pending() {
+        let (rig, http, account, daemon) = daemon_on(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(1500));
+        let broker = Arc::clone(&rig.broker);
+        let signing_in = std::thread::spawn(move || broker.sign_in());
+        std::thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        let reply = daemon.handle(Request::Recheck, rig.peer());
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(600),
+            "recheck waited {waited:?}"
+        );
+        let Reply::Account(status) = reply else {
+            panic!("expected the account status, got {reply:?}");
+        };
+        assert_eq!(status["gateway"]["reachable"], true);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 0);
+
+        assert!(matches!(
+            signing_in.join().expect("sign in"),
+            Reply::SignedIn { .. }
+        ));
+        account.recheck();
+        assert_eq!(account.status()["user"]["email"], "dev@example.com");
+    }
+
+    #[test]
     fn should_answer_recheck_with_the_account_status_and_forward_the_rest() {
         let (rig, http, account, daemon) = daemon_on(idp_settings(Some("team-a")));
         daemon.handle(Request::SignIn, rig.peer());
