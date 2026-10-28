@@ -295,6 +295,10 @@ mod tests {
     fn should_let_the_gateway_decide_a_team_while_the_list_is_unknown() {
         let (rig, http, _account, daemon) = daemon_on(idp_settings(Some("team-a")));
         http.fail("/user/info", "connection refused");
+        assert!(matches!(
+            daemon.handle(Request::SignIn, rig.peer()),
+            Reply::SignedIn { .. }
+        ));
         let switched = daemon.handle(
             Request::SwitchTeam {
                 team: "team-b".to_string(),
