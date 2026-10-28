@@ -40,7 +40,7 @@ struct ReservedPort {
 final class StubDaemon: @unchecked Sendable {
     let port: Int
     private let descriptor: Int32
-    private let body: Data
+    private var body: Data
     private let delays: [TimeInterval]
     private let lock = NSLock()
     private var served = 0
@@ -62,6 +62,12 @@ final class StubDaemon: @unchecked Sendable {
     func stop() {
         lock.lock()
         stopped = true
+        lock.unlock()
+    }
+
+    func serve(_ body: String) {
+        lock.lock()
+        self.body = Data(body.utf8)
         lock.unlock()
     }
 
@@ -87,7 +93,7 @@ final class StubDaemon: @unchecked Sendable {
     private func answer(_ client: Int32) {
         defer { close(client) }
         guard readHeaders(client) else { return }
-        let delay = nextDelay()
+        let (delay, body) = nextResponse()
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         let response = Data(head.utf8) + body
@@ -105,12 +111,12 @@ final class StubDaemon: @unchecked Sendable {
         return true
     }
 
-    private func nextDelay() -> TimeInterval {
+    private func nextResponse() -> (delay: TimeInterval, body: Data) {
         lock.lock()
         defer { lock.unlock() }
         let index = served
         served += 1
-        return index < delays.count ? delays[index] : 0
+        return (index < delays.count ? delays[index] : 0, body)
     }
 }
 
@@ -190,4 +196,14 @@ func eventually(within seconds: TimeInterval = 5, _ condition: () -> Bool) async
         try? await Task.sleep(nanoseconds: 20_000_000)
     }
     return true
+}
+
+@MainActor
+func throughout(_ seconds: TimeInterval, _ condition: () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if !condition() { return false }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    return condition()
 }

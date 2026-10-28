@@ -57,6 +57,7 @@ run_uninstall RELAY_SMOKE_MANAGERNAME=System
 [[ "$(relay_ca_count)" == "2" ]] || fail "an uninstall outside the GUI session should leave both Relay CA certificates, found $(relay_ca_count)"
 grep -q "warning: the Relay CA was left in $keychain" "$tmp_dir/uninstall.out" || fail "the uninstall outside the GUI session did not warn"
 grep -q "launchctl managername: System" "$tmp_dir/uninstall.out" || fail "the warning did not name the session"
+grep -qF "$ROOT/src/uninstall.sh --remove-data" "$tmp_dir/uninstall.out" || fail "the cleanup hints did not name the uninstall.sh that ran"
 grep -q "^  $(sha1_of "$stale")\$" "$tmp_dir/uninstall.out" || fail "the warning did not list the stale CA"
 grep -q "^  $(sha1_of "$current")\$" "$tmp_dir/uninstall.out" || fail "the warning did not list the current CA"
 grep '^  security delete-certificate ' "$tmp_dir/uninstall.out" | sed 's/^  //' > "$tmp_dir/fallback.sh"

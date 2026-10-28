@@ -424,8 +424,8 @@ Preserved:
   Relay data: $RELAY_HOME
 
 Optional cleanup:
-  Remove the Relay CA:   ./src/uninstall.sh --remove-ca-trust  (from the GUI session)
-  Remove Relay data:     ./src/uninstall.sh --remove-data
-  Disable system PAC:    ./src/uninstall.sh --unset-system-proxy "Wi-Fi"
+  Remove the Relay CA:   $0 --remove-ca-trust  (from the GUI session)
+  Remove Relay data:     $0 --remove-data
+  Disable system PAC:    $0 --unset-system-proxy "Wi-Fi"
 DONE
 fi

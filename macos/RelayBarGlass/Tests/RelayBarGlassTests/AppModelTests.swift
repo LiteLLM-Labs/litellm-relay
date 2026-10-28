@@ -170,6 +170,64 @@ import Testing
         #expect(model.errorMessage(for: .signIn) == nil)
     }
 
+    @MainActor @Test func locksThePickersAndSignOutWhileABrowserSignInIsPending() async throws {
+        let daemon = try StubDaemon(body: RelayStatusTests.signedIn)
+        defer { daemon.stop() }
+        let home = try TemporaryHome()
+        defer { home.remove() }
+        try home.writeRelayPort(daemon.port)
+        let relay = try home.stubRelay("exec sleep 30")
+
+        let model = AppModel(environment: relay.environment, home: home.url, timing: quick)
+        await model.poll()
+        #expect(model.locksAccountChanges == false)
+        model.run(.signIn)
+        #expect(model.locksAccountChanges)
+        model.cancelSignIn()
+        #expect(model.locksAccountChanges == false)
+    }
+
+    @MainActor @Test func keepsTheSignedInViewThroughItsOwnSwitchWhileTheDaemonReadsSignedOut() async throws {
+        let daemon = try StubDaemon(body: RelayStatusTests.signedIn)
+        defer { daemon.stop() }
+        let home = try TemporaryHome()
+        defer { home.remove() }
+        try home.writeRelayPort(daemon.port)
+        let relay = try home.stubRelay("sleep 1.5")
+
+        let model = AppModel(
+            environment: relay.environment,
+            home: home.url,
+            timing: AppTiming(pollInterval: 0.1, requestTimeout: 0.5, commandTimeout: 5)
+        )
+        await model.poll()
+        #expect(model.signedIn)
+        daemon.serve(RelayStatusTests.signedOut)
+        model.run(.switchTeam("team-b"))
+        #expect(await throughout(0.6) { model.signedIn && model.busy })
+        #expect(await eventually(within: 5) { !model.busy })
+    }
+
+    @MainActor @Test func startsASignInClickedDuringASwitchOnceTheSwitchEnds() async throws {
+        let daemon = try StubDaemon(body: RelayStatusTests.signedIn)
+        defer { daemon.stop() }
+        let home = try TemporaryHome()
+        defer { home.remove() }
+        try home.writeRelayPort(daemon.port)
+        let relay = try home.stubRelay("""
+        case "$1" in
+          switch-team) sleep 0.3 ;;
+        esac
+        """)
+
+        let model = AppModel(environment: relay.environment, home: home.url, timing: AppTiming(pollInterval: 60, requestTimeout: 0.5, commandTimeout: 5))
+        model.run(.switchTeam("team-b"))
+        model.run(.signIn)
+        #expect(model.signingIn == false)
+        #expect(await eventually(within: 5) { relay.recordedCalls.count == 2 && !model.signingIn && !model.busy })
+        #expect(relay.recordedCalls == ["switch-team -- team-b", "sign-in"])
+    }
+
     @MainActor @Test func supersedesAPendingSignInWithANewOne() async throws {
         let daemon = try StubDaemon(body: RelayStatusTests.signedOut)
         defer { daemon.stop() }

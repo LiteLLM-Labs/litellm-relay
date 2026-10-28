@@ -89,6 +89,10 @@ final class AppModel: ObservableObject {
         status?.usesStaticKey != true
     }
 
+    var locksAccountChanges: Bool {
+        busy || signingIn
+    }
+
     var keyExpiresAt: Date? {
         StatusFormatter.timestamp(status?.broker?.keyExpiresAt)
     }
@@ -132,12 +136,13 @@ final class AppModel: ObservableObject {
     }
 
     func run(_ command: RelayCommand) {
-        if command == .signIn { return signIn() }
         guard !busy else {
             queued = command
             return
         }
+        if command == .signIn { return signIn() }
         busy = true
+        pollsApplied = pollsStarted
         lastError = nil
         let binary = self.binary
         let timeout = commandTimeout
@@ -184,7 +189,7 @@ final class AppModel: ObservableObject {
     }
 
     private func pollUnlessRunning() async {
-        guard pollsRunning == 0 else { return }
+        guard pollsRunning == 0, !busy else { return }
         await poll()
     }
 

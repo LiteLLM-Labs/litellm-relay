@@ -191,7 +191,9 @@ struct PopoverView: View {
                 footerButton("Dashboard", "safari") { model.openDashboard() }
                 Spacer()
                 if model.offersSignOut {
-                    footerButton("Sign out", "rectangle.portrait.and.arrow.right") { model.run(.signOut) }
+                    footerButton("Sign out", "rectangle.portrait.and.arrow.right", disabled: model.locksAccountChanges) {
+                        model.run(.signOut)
+                    }
                 }
                 footerButton("Quit", "power") { model.quit() }
             }
@@ -226,7 +228,7 @@ struct PopoverView: View {
             content()
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .disabled(model.busy)
+                .disabled(model.locksAccountChanges)
                 .accessibilityLabel(title)
         }
     }
@@ -278,7 +280,12 @@ struct PopoverView: View {
         .opacity(disabled ? 0.5 : 1)
     }
 
-    private func footerButton(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+    private func footerButton(
+        _ title: String,
+        _ icon: String,
+        disabled: Bool = false,
+        _ action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 10, weight: .semibold))
@@ -297,5 +304,7 @@ struct PopoverView: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.5 : 1)
     }
 }
