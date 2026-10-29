@@ -101,19 +101,31 @@ enum StatusFormatter {
         }
     }
 
-    static func budgetLine(team: TeamBudget?, error: String?, polled: Bool, timeZone: TimeZone = NSTimeZone.default) -> String {
+    static func budgetLine(
+        team: TeamBudget?,
+        key: KeyBudget? = nil,
+        error: String?,
+        polled: Bool,
+        timeZone: TimeZone = NSTimeZone.default
+    ) -> String {
         let problem = error?.isEmpty == false ? error : nil
+        if team == nil, let key, let spend = key.spend {
+            return withProblem(budgetAmounts(spend: spend, cap: key.maxBudget, resetAt: key.budgetResetAt, timeZone: timeZone), problem)
+        }
         guard let team else { return problem ?? (polled ? "No team picked" : "Budget not read yet") }
         guard let spend = team.spend else { return problem ?? "Budget not read yet" }
-        let amounts = budgetAmounts(spend: spend, team: team, timeZone: timeZone)
+        return withProblem(budgetAmounts(spend: spend, cap: team.maxBudget, resetAt: team.budgetResetAt, timeZone: timeZone), problem)
+    }
+
+    private static func withProblem(_ amounts: String, _ problem: String?) -> String {
         guard let problem else { return amounts }
         return "\(amounts)\n\(problem)"
     }
 
-    private static func budgetAmounts(spend: Double, team: TeamBudget, timeZone: TimeZone) -> String {
+    private static func budgetAmounts(spend: Double, cap: Double?, resetAt: String?, timeZone: TimeZone) -> String {
         let spent = money(spend)
-        guard let cap = team.maxBudget else { return "\(spent), no budget" }
-        let reset = timestamp(team.budgetResetAt).map { ", resets \(resetDay($0, timeZone: timeZone))" } ?? ""
+        guard let cap else { return "\(spent), no budget" }
+        let reset = timestamp(resetAt).map { ", resets \(resetDay($0, timeZone: timeZone))" } ?? ""
         return "\(spent) of \(money(cap))\(reset)"
     }
 

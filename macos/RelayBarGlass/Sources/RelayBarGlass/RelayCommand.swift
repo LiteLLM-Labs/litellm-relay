@@ -72,6 +72,8 @@ enum RelayBinary {
 }
 
 enum ProcessRunner {
+    private static let killGrace: TimeInterval = 2
+
     static func run(binary: URL, arguments: [String], timeout: TimeInterval?) async -> CommandOutcome {
         let process = Process()
         process.executableURL = binary
@@ -94,7 +96,11 @@ enum ProcessRunner {
     }
 
     private static func stop(_ process: Process) {
-        if process.isRunning { process.terminate() }
+        guard process.isRunning else { return }
+        process.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + killGrace) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
     }
 
     private static func runBlocking(_ process: Process, binary: URL, completion: Completion) -> CommandResult {

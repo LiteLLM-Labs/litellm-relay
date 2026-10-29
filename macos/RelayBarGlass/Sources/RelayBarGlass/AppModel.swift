@@ -35,6 +35,7 @@ final class AppModel: ObservableObject {
     private var tickTimer: Timer?
     private var signInTask: Task<Void, Never>?
     private var queued: RelayCommand?
+    private var popoverShown = false
     private var pollsStarted = 0
     private var pollsApplied = 0
     private var pollsRunning = 0
@@ -157,6 +158,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func popoverOpened() {
+        popoverShown = true
+        guard !busy else { return }
+        Task { await poll() }
+    }
+
+    func popoverClosed() {
+        popoverShown = false
+    }
+
     func cancelSignIn() {
         signInTask?.cancel()
         signInTask = nil
@@ -200,7 +211,8 @@ final class AppModel: ObservableObject {
 
     private func readStatus() async -> Data? {
         relayPort = Self.configuredPort(configPath)
-        guard let url = URL(string: "http://127.0.0.1:\(relayPort)/api/status"),
+        let path = popoverShown ? "/api/status" : "/api/status?passive=1"
+        guard let url = URL(string: "http://127.0.0.1:\(relayPort)\(path)"),
               let (data, response) = try? await session.data(from: url),
               let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode)

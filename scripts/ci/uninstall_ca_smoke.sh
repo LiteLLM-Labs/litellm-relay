@@ -171,4 +171,32 @@ fi
 [[ ! -e "$relay_home" ]] || fail "a failed payload removal stopped --remove-data"
 grep -q "LiteLLM Relay uninstall complete." "$tmp_dir/uninstall.out" || fail "a failed payload removal stopped the summary"
 
+spaced_home="$tmp_dir/Relay User"
+mkdir -p "$spaced_home/Library/LaunchAgents" "$spaced_home/.litellm-relay"
+touch "$spaced_home/Library/LaunchAgents/ai.litellm.relaybar.plist"
+as_root RELAY_SMOKE_CONSOLE_USER=relay-smoke RELAY_SMOKE_CONSOLE_HOME="$spaced_home" RELAY_SMOKE_CONSOLE_UID=4242 \
+  bash "$ROOT/src/uninstall.sh" --keep-bin > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "a root uninstall for a console user whose home has a space exited non-zero"
+[[ ! -e "$spaced_home/Library/LaunchAgents/ai.litellm.relaybar.plist" ]] \
+  || fail "a root uninstall left the RelayBar plist in a console user's home that has a space"
+grep -qF "Relay data: $spaced_home/.litellm-relay" "$tmp_dir/uninstall.out" \
+  || fail "a root uninstall did not target the Relay data in a console user's home that has a space"
+
+as_root RELAY_SMOKE_CONSOLE_USER=relay-smoke-no-record RELAY_SMOKE_CONSOLE_UID=4243 \
+  bash "$ROOT/src/uninstall.sh" --keep-bin > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "a root uninstall for a console user with no local directory record exited non-zero"
+grep -qF "Relay data: /Users/relay-smoke-no-record/.litellm-relay" "$tmp_dir/uninstall.out" \
+  || fail "a root uninstall for a console user with no local directory record did not fall back to /Users/<name>"
+
+mkdir -p "$payload/RelayBarGlass.app/Contents/MacOS"
+cp "$ROOT/src/uninstall.sh" "$payload/uninstall.sh"
+as_root_with_console_user bash "$payload/uninstall.sh" > "$tmp_dir/uninstall.out" 2>&1 \
+  || fail "a root run of the package payload's uninstall.sh exited non-zero"
+[[ ! -e "$payload/uninstall.sh" ]] || fail "a root run of the package payload's uninstall.sh left the payload"
+if grep -qF "$payload/uninstall.sh" "$tmp_dir/uninstall.out"; then
+  fail "the cleanup hints named the payload uninstall.sh that the run removed"
+fi
+grep -qF "rm -rf $relay_home" "$tmp_dir/uninstall.out" \
+  || fail "the cleanup hints did not say how to remove Relay data once uninstall.sh was gone"
+
 echo "uninstall CA smoke passed"
