@@ -14,11 +14,11 @@ pub mod socket;
 pub(crate) mod test_support;
 
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, BTreeMap},
     fs,
     hash::{Hash, Hasher},
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, TryLockError},
     time::Duration,
 };
 
@@ -33,13 +33,17 @@ use crate::{
             resolve, AuthorizationServer, CachedCredential, CredentialRequest,
             HttpAuthorizationServer, Renewal, Resolved, SignInFailed,
         },
+        idp::display_name,
         token::{
             advance, Advanced, CachedSession, IdentityProvider, OidcProvider, SignIn,
             SignInRequired,
         },
     },
     auth::open_browser,
-    config::{config_path, load_settings, relay_home, IdpSection, RelaySettings},
+    config::{
+        config_path, load_settings, relay_home, save_settings, EnvironmentEntry, GatewaySection,
+        IdpSection, RelaySettings,
+    },
     system::hostname,
 };
 use caller::{effective_callers, unanchored_callers, Peer, Verdict};
@@ -74,6 +78,7 @@ pub struct SettingsVersion(u64);
 pub trait SettingsSource: Send + Sync {
     fn version(&self) -> Option<SettingsVersion>;
     fn load(&self) -> Option<RelaySettings>;
+    fn store(&self, settings: &RelaySettings) -> Result<()>;
 }
 
 pub struct FileSettings;
@@ -99,6 +104,14 @@ impl SettingsSource for FileSettings {
             }
         }
     }
+
+    fn store(&self, settings: &RelaySettings) -> Result<()> {
+        save_settings(settings).map(|_| ())
+    }
+}
+
+pub trait Handler: Send + Sync {
+    fn handle(&self, request: Request, peer: Peer) -> Reply;
 }
 
 pub trait CallerCheck: Send + Sync {
@@ -178,7 +191,7 @@ impl Context {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Credential { context: Context },
@@ -186,6 +199,9 @@ pub enum Request {
     SignIn,
     SignOut,
     Status,
+    SwitchTeam { team: String },
+    SwitchEnvironment { environment: String },
+    Recheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +240,10 @@ pub enum Refusal {
     SignInFailed(String),
     GatewayError(String),
     BadRequest(String),
+    UnknownEnvironment(String),
+    UnknownTeam(String),
+    SwitchFailed(String),
+    StaticKey(String),
 }
 
 impl Refusal {
@@ -234,6 +254,10 @@ impl Refusal {
             Refusal::SignInFailed(_) => "sign_in_failed",
             Refusal::GatewayError(_) => "gateway_error",
             Refusal::BadRequest(_) => "bad_request",
+            Refusal::UnknownEnvironment(_) => "unknown_environment",
+            Refusal::UnknownTeam(_) => "unknown_team",
+            Refusal::SwitchFailed(_) => "switch_failed",
+            Refusal::StaticKey(_) => "static_key",
         }
     }
 
@@ -243,7 +267,11 @@ impl Refusal {
             | Refusal::SignedOut(message)
             | Refusal::SignInFailed(message)
             | Refusal::GatewayError(message)
-            | Refusal::BadRequest(message) => message,
+            | Refusal::BadRequest(message)
+            | Refusal::UnknownEnvironment(message)
+            | Refusal::UnknownTeam(message)
+            | Refusal::SwitchFailed(message)
+            | Refusal::StaticKey(message) => message,
         }
     }
 }
@@ -277,19 +305,39 @@ fn same_bytes(left: &str, right: &str) -> bool {
 pub struct BrokerStatus {
     pub signed_in: bool,
     pub user_id: Option<String>,
+    pub display_name: Option<String>,
     pub team: Option<String>,
+    pub environment: Option<String>,
+    pub gateway_url: String,
     pub key_expires_at: Option<String>,
     pub key_extended_at: Option<String>,
     pub source: Option<&'static str>,
     pub refused_callers: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl BrokerStatus {
+    pub fn signed_in_with_the_idp(&self) -> bool {
+        self.signed_in && self.source != Some(Source::StaticKey.name())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Switched {
+    pub team: Option<String>,
+    pub environment: Option<String>,
+    pub gateway_url: String,
+    pub key_expires_at: Option<String>,
+    pub source: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     Credential(Issued),
     SignedIn { user_id: Option<String> },
     SignedOut,
     Status(BrokerStatus),
+    Switched(Switched),
+    Account(Value),
     Refused(Refusal),
 }
 
@@ -307,19 +355,27 @@ impl Reply {
                 json!({ "ok": true, "signed_in": true, "user_id": user_id })
             }
             Reply::SignedOut => json!({ "ok": true, "signed_in": false }),
-            Reply::Status(status) => {
-                let mut body = serde_json::to_value(status).unwrap_or_else(|_| json!({}));
-                if let Value::Object(fields) = &mut body {
-                    fields.insert("ok".to_string(), Value::Bool(true));
-                }
-                body
-            }
+            Reply::Status(status) => with_ok(serde_json::to_value(status)),
+            Reply::Switched(switched) => with_ok(serde_json::to_value(switched)),
+            Reply::Account(status) => with_ok(Ok(status.clone())),
             Reply::Refused(refusal) => json!({
                 "ok": false,
                 "reason": refusal.reason(),
                 "message": refusal.message(),
             }),
         }
+    }
+}
+
+fn with_ok(body: serde_json::Result<Value>) -> Value {
+    match body {
+        Ok(Value::Object(fields)) => Value::Object(
+            fields
+                .into_iter()
+                .chain([("ok".to_string(), Value::Bool(true))])
+                .collect(),
+        ),
+        _ => json!({ "ok": true }),
     }
 }
 
@@ -366,6 +422,7 @@ struct Target {
     mode: Mode,
     gateway_url: String,
     team: Option<String>,
+    environment: Option<String>,
     callers: Vec<caller::AllowedCaller>,
     unanchored: Vec<caller::AllowedCaller>,
 }
@@ -377,16 +434,86 @@ impl Target {
             version,
             mode: Mode::from_settings(settings),
             gateway_url: settings.gateway.url.trim_end_matches('/').to_string(),
-            team: managed_team(settings),
+            team: settings.managed_team(),
+            environment: settings
+                .current_environment()
+                .map(|entry| entry.name.clone()),
             callers: effective_callers(managed),
             unanchored: unanchored_callers(managed),
         }
     }
 }
 
+enum GatewayPatch {
+    Team(Option<String>),
+    Environment {
+        url: String,
+        team: Option<String>,
+        team_by_environment: BTreeMap<String, String>,
+    },
+}
+
+impl GatewayPatch {
+    fn applied_to(&self, settings: RelaySettings) -> RelaySettings {
+        let gateway = match self {
+            GatewayPatch::Team(team) => GatewaySection {
+                team: team.clone(),
+                ..settings.gateway
+            },
+            GatewayPatch::Environment {
+                url,
+                team,
+                team_by_environment,
+            } => GatewaySection {
+                url: url.clone(),
+                team: team.clone(),
+                team_by_environment: team_by_environment.clone(),
+                ..settings.gateway
+            },
+        };
+        RelaySettings {
+            gateway,
+            ..settings
+        }
+    }
+}
+
+fn switch_refusal(refusal: Refusal) -> Refusal {
+    match refusal {
+        Refusal::SignedOut(_) => Refusal::SignedOut(
+            "not signed in on this device; sign in first with `relay sign-in` or RelayBar's Sign in, then switch again"
+                .to_string(),
+        ),
+        other => Refusal::SwitchFailed(other.message().to_string()),
+    }
+}
+
+fn static_key_refusal(action: &str) -> Refusal {
+    Refusal::StaticKey(format!(
+        "{action} needs an IdP, and this device serves the static Gateway key from gateway.api_key in {}; delete gateway.api_key there to stop using it",
+        config_path().display()
+    ))
+}
+
+fn unknown_environment(name: &str, settings: &RelaySettings) -> String {
+    let names = settings
+        .environments
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    match names.is_empty() {
+        true => format!("no environment named {name:?}; none are configured"),
+        false => format!(
+            "no environment named {name:?}; configured: {}",
+            names.join(", ")
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MintedKey {
     token: String,
+    gateway_url: String,
     alias: String,
     expires_at: i64,
     extended_at: Option<i64>,
@@ -408,6 +535,16 @@ struct State {
     last_source: Option<Source>,
     refused_callers: u64,
     proxy_token: Option<String>,
+    completed_sign_ins: u64,
+    pending_sign_in_page: Option<String>,
+    explicit_sign_in_running: bool,
+}
+
+struct GatewayHold {
+    key: Option<MintedKey>,
+    credential: Option<CachedCredential>,
+    mint_refusal: Option<StickyRefusal>,
+    last_source: Option<Source>,
 }
 
 enum Bearer {
@@ -446,6 +583,7 @@ pub struct Broker {
     deps: Dependencies,
     state: Mutex<State>,
     renewal: Mutex<()>,
+    switching: Mutex<()>,
 }
 
 impl Broker {
@@ -458,6 +596,7 @@ impl Broker {
             deps,
             state: Mutex::new(State::default()),
             renewal: Mutex::new(()),
+            switching: Mutex::new(()),
         }
     }
 
@@ -468,6 +607,11 @@ impl Broker {
             Request::SignIn => self.sign_in(),
             Request::SignOut => self.sign_out(),
             Request::Status => Reply::Status(self.status()),
+            Request::SwitchTeam { team } => self.switch_team(&team),
+            Request::SwitchEnvironment { environment } => self.switch_environment(&environment),
+            Request::Recheck => Reply::Refused(Refusal::BadRequest(
+                "recheck is answered by the daemon's account service, not the broker".to_string(),
+            )),
         }
     }
 
@@ -511,8 +655,12 @@ impl Broker {
                     .to_string(),
             ));
         }
+        if let Some(bearer) = self.fresh_proxy_bearer(self.deps.clock.now()) {
+            return Ok(bearer);
+        }
+        let _renewal = self.lock_renewal();
         let target = self.lock_target().clone();
-        match self.issue(&target, Context::NonInteractive) {
+        match self.issue_under_renewal_lock(&target, Context::NonInteractive) {
             Reply::Credential(issued) => Ok(ProxyBearer {
                 token: issued.token,
                 gateway_url: target.gateway_url,
@@ -522,6 +670,10 @@ impl Broker {
                 "the broker answered without a credential".to_string(),
             )),
         }
+    }
+
+    pub fn admit_caller(&self, peer: Peer, what: &str) -> Result<(), Refusal> {
+        self.admit(peer, what).map(|_| ())
     }
 
     fn admit(&self, peer: Peer, what: &str) -> Result<Target, Refusal> {
@@ -544,6 +696,17 @@ impl Broker {
     }
 
     pub fn sign_in(&self) -> Reply {
+        let (sign_ins_at_start, pending_page, joined_a_sign_in) = {
+            let state = self.lock_state();
+            (
+                state.completed_sign_ins,
+                state.pending_sign_in_page.clone(),
+                state.explicit_sign_in_running,
+            )
+        };
+        if let Some(page) = &pending_page {
+            (self.deps.browser)(page);
+        }
         self.refresh();
         let _renewal = self.lock_renewal();
         let target = self.lock_target().clone();
@@ -552,8 +715,22 @@ impl Broker {
                 "sign-in needs an IdP; this device serves the configured Gateway key".to_string(),
             ));
         }
+        if pending_page.is_some() || joined_a_sign_in {
+            if let Some(reply) = self.signed_in_since(sign_ins_at_start) {
+                return reply;
+            }
+        }
+        if pending_page.is_some() {
+            return Reply::Refused(Refusal::SignInFailed(
+                "the browser sign-in that was open did not finish; sign in again to open a new page"
+                    .to_string(),
+            ));
+        }
         self.forget(&target.gateway_url, true);
-        match self.issue_under_renewal_lock(&target, Context::Interactive) {
+        self.lock_state().explicit_sign_in_running = true;
+        let reply = self.issue_under_renewal_lock(&target, Context::Interactive);
+        self.lock_state().explicit_sign_in_running = false;
+        match reply {
             Reply::Credential(_) => Reply::SignedIn {
                 user_id: self
                     .lock_state()
@@ -565,11 +742,178 @@ impl Broker {
         }
     }
 
+    fn signed_in_since(&self, completed_sign_ins: u64) -> Option<Reply> {
+        let state = self.lock_state();
+        let another_sign_in_finished = state.completed_sign_ins != completed_sign_ins;
+        (another_sign_in_finished && state.session.is_some()).then(|| Reply::SignedIn {
+            user_id: state
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_id.clone()),
+        })
+    }
+
     pub fn sign_out(&self) -> Reply {
+        self.refresh();
         let _renewal = self.lock_renewal();
-        let gateway_url = self.lock_target().gateway_url.clone();
-        self.forget(&gateway_url, true);
+        let target = self.lock_target().clone();
+        if matches!(target.mode, Mode::StaticKey(_)) {
+            return Reply::Refused(static_key_refusal("sign-out"));
+        }
+        self.forget(&target.gateway_url, true);
         Reply::SignedOut
+    }
+
+    pub fn switch_team(&self, team: &str) -> Reply {
+        let _switching = self.lock_switching();
+        self.refresh();
+        let settings = match self.switchable_settings() {
+            Ok(settings) => settings,
+            Err(refusal) => return Reply::Refused(refusal),
+        };
+        if settings.managed_team().as_deref() == Some(team) {
+            return self.switched_in_place();
+        }
+        let previous = GatewayPatch::Team(settings.gateway.team.clone());
+        self.apply_switch(
+            settings,
+            GatewayPatch::Team(Some(team.to_string())),
+            previous,
+        )
+    }
+
+    pub fn team_switch_refusal(&self) -> Option<Refusal> {
+        self.refresh();
+        self.switchable_settings().err()
+    }
+
+    pub fn environment_switch_refusal(&self, name: &str) -> Option<Refusal> {
+        self.refresh();
+        self.environment_destination(name).err()
+    }
+
+    pub fn switch_environment(&self, name: &str) -> Reply {
+        let _switching = self.lock_switching();
+        self.refresh();
+        let (settings, entry) = match self.environment_destination(name) {
+            Ok(destination) => destination,
+            Err(refusal) => return Reply::Refused(refusal),
+        };
+        if settings
+            .current_environment()
+            .is_some_and(|current| current.name == entry.name)
+        {
+            return self.switched_in_place();
+        }
+        let parked = &settings.gateway.team_by_environment;
+        let leaving = settings
+            .current_environment()
+            .map(|current| current.name.clone())
+            .zip(settings.gateway.team.clone());
+        let next = GatewayPatch::Environment {
+            url: entry.url.clone(),
+            team: parked.get(&entry.name).cloned(),
+            team_by_environment: parked
+                .iter()
+                .filter(|(name, _)| **name != entry.name)
+                .map(|(name, team)| (name.clone(), team.clone()))
+                .chain(leaving)
+                .collect(),
+        };
+        let previous = GatewayPatch::Environment {
+            url: settings.gateway.url.clone(),
+            team: settings.gateway.team.clone(),
+            team_by_environment: parked.clone(),
+        };
+        self.apply_switch(settings, next, previous)
+    }
+
+    fn environment_destination(
+        &self,
+        name: &str,
+    ) -> Result<(RelaySettings, EnvironmentEntry), Refusal> {
+        let settings = self.switchable_settings()?;
+        match settings.environment_named(name).cloned() {
+            Some(entry) => Ok((settings, entry)),
+            None => Err(Refusal::UnknownEnvironment(unknown_environment(
+                name, &settings,
+            ))),
+        }
+    }
+
+    fn switchable_settings(&self) -> Result<RelaySettings, Refusal> {
+        let target = self.lock_target().clone();
+        match &target.mode {
+            Mode::Idp(_) => {}
+            Mode::StaticKey(_) => return Err(static_key_refusal("switching")),
+            Mode::Unconfigured(hint) => return Err(Refusal::GatewayError(hint.clone())),
+        }
+        self.deps
+            .settings
+            .load()
+            .ok_or_else(|| Refusal::GatewayError("the Relay config could not be read".to_string()))
+    }
+
+    fn apply_switch(
+        &self,
+        settings: RelaySettings,
+        next: GatewayPatch,
+        previous: GatewayPatch,
+    ) -> Reply {
+        let renewal = self.lock_renewal();
+        if let Err(error) = self.deps.settings.store(&next.applied_to(settings.clone())) {
+            return Reply::Refused(Refusal::SwitchFailed(format!(
+                "the Relay config could not be written: {error:#}"
+            )));
+        }
+        let before = self.lock_target().clone();
+        let held = self.take_gateway_hold();
+        self.apply_saved_settings();
+        let target = self.lock_target().clone();
+        let refusal = match self.issue_under_renewal_lock(&target, Context::NonInteractive) {
+            Reply::Refused(refusal) => refusal,
+            _ => {
+                self.retire(&before.gateway_url, held);
+                drop(renewal);
+                return Reply::Switched(self.switched());
+            }
+        };
+        eprintln!(
+            "broker: the switch could not issue a credential ({}); restoring the previous config",
+            refusal.message()
+        );
+        let restored = previous.applied_to(self.deps.settings.load().unwrap_or(settings));
+        if let Err(error) = self.deps.settings.store(&restored) {
+            eprintln!("broker: the previous config could not be restored: {error:#}");
+        }
+        self.apply_saved_settings();
+        let back = self.lock_target().clone();
+        let same_gateway = (&back.mode, &back.gateway_url, &back.team)
+            == (&before.mode, &before.gateway_url, &before.team);
+        match same_gateway {
+            true => self.restore_gateway_hold(held),
+            false => self.retire(&before.gateway_url, held),
+        }
+        Reply::Refused(switch_refusal(refusal))
+    }
+
+    fn switched_in_place(&self) -> Reply {
+        let target = self.lock_target().clone();
+        match self.issue(&target, Context::NonInteractive) {
+            Reply::Refused(refusal) => Reply::Refused(switch_refusal(refusal)),
+            _ => Reply::Switched(self.switched()),
+        }
+    }
+
+    fn switched(&self) -> Switched {
+        let status = self.status();
+        Switched {
+            team: status.team,
+            environment: status.environment,
+            gateway_url: status.gateway_url,
+            key_expires_at: status.key_expires_at,
+            source: status.source,
+        }
     }
 
     pub fn shutdown(&self) {
@@ -578,24 +922,39 @@ impl Broker {
         self.forget(&gateway_url, false);
     }
 
+    pub fn configured(&self) -> bool {
+        !matches!(self.lock_target().mode, Mode::Unconfigured(_))
+    }
+
     pub fn status(&self) -> BrokerStatus {
-        self.refresh();
+        self.refresh_unless_renewing();
         let target = self.lock_target().clone();
         let now = self.deps.clock.now();
         let state = self.lock_state();
         let credential = state.credential.as_ref();
+        let signed_in = matches!(target.mode, Mode::StaticKey(_))
+            || credential.is_some_and(|credential| credential.is_valid(now));
         BrokerStatus {
-            signed_in: matches!(target.mode, Mode::StaticKey(_))
-                || credential.is_some_and(|credential| credential.is_valid(now)),
+            signed_in,
             user_id: credential.and_then(|credential| credential.user_id.clone()),
+            display_name: state
+                .session
+                .as_ref()
+                .filter(|_| signed_in)
+                .and_then(|session| display_name(&session.token)),
             team: target.team,
+            environment: target.environment,
+            gateway_url: target.gateway_url,
             key_expires_at: state.key.as_ref().map(|key| rfc3339(key.expires_at)),
             key_extended_at: state
                 .key
                 .as_ref()
                 .and_then(|key| key.extended_at)
                 .map(rfc3339),
-            source: state.last_source.map(Source::name),
+            source: match target.mode {
+                Mode::StaticKey(_) => Some(Source::StaticKey.name()),
+                _ => state.last_source.map(Source::name),
+            },
             refused_callers: state.refused_callers,
         }
     }
@@ -631,6 +990,27 @@ impl Broker {
     }
 
     fn refresh(&self) {
+        self.refresh_holding(|broker| Some(broker.lock_renewal()));
+    }
+
+    pub(crate) fn refresh_unless_renewing(&self) {
+        self.refresh_holding(Self::try_lock_renewal);
+    }
+
+    fn refresh_holding<'a>(&'a self, renewal: impl FnOnce(&'a Self) -> Option<MutexGuard<'a, ()>>) {
+        let Some(version) = self.deps.settings.version() else {
+            return;
+        };
+        if self.lock_target().version == Some(version) {
+            return;
+        }
+        let Some(_renewal) = renewal(self) else {
+            return;
+        };
+        self.apply_saved_settings();
+    }
+
+    fn apply_saved_settings(&self) {
         let Some(version) = self.deps.settings.version() else {
             return;
         };
@@ -641,14 +1021,21 @@ impl Broker {
             return;
         };
         let next = Target::from_settings(&settings, Some(version));
-        let _renewal = self.lock_renewal();
         let current = self.lock_target().clone();
-        if current.version == Some(version) {
-            return;
-        }
-        if current.mode != next.mode || current.gateway_url != next.gateway_url {
+        let moved = current.gateway_url != next.gateway_url;
+        let between_environments = settings
+            .environment_with_url(&current.gateway_url)
+            .is_some()
+            && settings.environment_with_url(&next.gateway_url).is_some();
+        if current.mode != next.mode || (moved && !between_environments) {
             eprintln!("broker: the Relay config changed its IdP or Gateway; signing out");
             self.forget(&current.gateway_url, true);
+        } else if moved {
+            eprintln!(
+                "broker: the Relay config moved the Gateway from {} to {}; the next request exchanges there with the same IdP session",
+                current.gateway_url, next.gateway_url
+            );
+            self.forget(&current.gateway_url, false);
         } else if current.team != next.team {
             eprintln!(
                 "broker: the Relay config changed the team from {} to {}; the next request exchanges again",
@@ -686,7 +1073,30 @@ impl Broker {
         self.issue_under_renewal_lock(&target, context)
     }
 
+    fn issue_unless_renewing(&self, target: &Target, context: Context) -> Option<Reply> {
+        if !matches!(target.mode, Mode::Idp(_)) {
+            return Some(self.issue(target, context));
+        }
+        if let Some(issued) = self.fresh_key(self.deps.clock.now()) {
+            return Some(self.serve(issued));
+        }
+        let _renewal = self.try_lock_renewal()?;
+        let target = self.lock_target().clone();
+        Some(self.issue_under_renewal_lock(&target, context))
+    }
+
     fn issue_under_renewal_lock(&self, target: &Target, context: Context) -> Reply {
+        let reply = self.issue_from_session(target, context);
+        if matches!(
+            (context, &reply),
+            (Context::Interactive, Reply::Credential(_))
+        ) {
+            self.lock_state().completed_sign_ins += 1;
+        }
+        reply
+    }
+
+    fn issue_from_session(&self, target: &Target, context: Context) -> Reply {
         let Mode::Idp(idp) = &target.mode else {
             return self.issue(target, context);
         };
@@ -751,6 +1161,20 @@ impl Broker {
     fn serve(&self, issued: Issued) -> Reply {
         self.lock_state().last_source = Some(issued.source);
         Reply::Credential(issued)
+    }
+
+    fn fresh_proxy_bearer(&self, now: i64) -> Option<ProxyBearer> {
+        let mut state = self.lock_state();
+        let bearer = state
+            .key
+            .as_ref()
+            .filter(|key| key.expires_at > now)
+            .map(|key| ProxyBearer {
+                token: key.token.clone(),
+                gateway_url: key.gateway_url.clone(),
+            })?;
+        state.last_source = Some(Source::MintedKey);
+        Some(bearer)
     }
 
     fn fresh_key(&self, now: i64) -> Option<Issued> {
@@ -837,15 +1261,20 @@ impl Broker {
         now: i64,
         sign_in: SignIn,
     ) -> Result<String> {
+        let open_sign_in_page = |page: &str| {
+            self.lock_state().pending_sign_in_page = Some(page.to_string());
+            (self.deps.browser)(page);
+        };
         let advanced = advance(
             self.deps.identity.as_ref(),
             idp,
             session.clone(),
             now,
             sign_in,
-            self.deps.browser.as_ref(),
-        )?;
-        match advanced {
+            &open_sign_in_page,
+        );
+        self.lock_state().pending_sign_in_page = None;
+        match advanced? {
             Advanced::Reused(token) => Ok(token),
             Advanced::Renewed(renewed) => {
                 eprintln!(
@@ -900,6 +1329,7 @@ impl Broker {
                 let mut state = self.lock_state();
                 state.key = Some(MintedKey {
                     token: minted.token.clone(),
+                    gateway_url: target.gateway_url.clone(),
                     alias: request.alias,
                     expires_at,
                     extended_at: None,
@@ -1010,19 +1440,35 @@ impl Broker {
     }
 
     fn forget(&self, gateway_url: &str, clear_session: bool) {
-        let (key, credential) = {
+        if clear_session {
             let mut state = self.lock_state();
-            let key = state.key.take();
-            let credential = state.credential.take();
-            state.mint_refusal = None;
-            state.last_source = None;
-            if clear_session {
-                state.session = None;
-                state.proxy_token = None;
-            }
-            (key, credential)
-        };
-        let (Some(key), Some(credential)) = (key, credential) else {
+            state.session = None;
+            state.proxy_token = None;
+        }
+        let held = self.take_gateway_hold();
+        self.retire(gateway_url, held);
+    }
+
+    fn take_gateway_hold(&self) -> GatewayHold {
+        let mut state = self.lock_state();
+        GatewayHold {
+            key: state.key.take(),
+            credential: state.credential.take(),
+            mint_refusal: state.mint_refusal.take(),
+            last_source: state.last_source.take(),
+        }
+    }
+
+    fn restore_gateway_hold(&self, held: GatewayHold) {
+        let mut state = self.lock_state();
+        state.key = held.key;
+        state.credential = held.credential;
+        state.mint_refusal = held.mint_refusal;
+        state.last_source = held.last_source;
+    }
+
+    fn retire(&self, gateway_url: &str, held: GatewayHold) {
+        let (Some(key), Some(credential)) = (held.key, held.credential) else {
             return;
         };
         match self
@@ -1056,34 +1502,31 @@ impl Broker {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn try_lock_renewal(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.renewal.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    fn lock_switching(&self) -> MutexGuard<'_, ()> {
+        self.switching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Handler for Broker {
+    fn handle(&self, request: Request, peer: Peer) -> Reply {
+        Broker::handle(self, request, peer)
+    }
 }
 
 enum KeyOutcome {
     Issued(Issued),
     DeadBearer,
-}
-
-fn managed_team(settings: &RelaySettings) -> Option<String> {
-    let claude = settings
-        .claude
-        .team
-        .as_deref()
-        .map(str::trim)
-        .filter(|team| !team.is_empty());
-    let codex = settings
-        .codex
-        .team
-        .as_deref()
-        .map(str::trim)
-        .filter(|team| !team.is_empty());
-    if let (Some(claude), Some(codex)) = (claude, codex) {
-        if claude != codex {
-            eprintln!(
-                "broker: claude.team ({claude}) and codex.team ({codex}) differ; minting keys for {claude}"
-            );
-        }
-    }
-    claude.or(codex).map(str::to_string)
 }
 
 fn mint_notice(team: &str, refusal: &MintRefusal) -> String {
@@ -1116,15 +1559,60 @@ mod tests {
 
     use super::{
         key::{ExtendOutcome, MintOutcome, MintRefusal},
-        test_support::{idp_settings, static_key_settings, Rig, GATEWAY, HOSTNAME, NOW},
+        test_support::{
+            idp_settings, static_key_settings, Rig, DISPLAY_NAME, GATEWAY, HOSTNAME, NOW,
+        },
         *,
     };
 
     const MINUTE: i64 = 60;
+    const UAT: &str = "https://uat.example.com";
 
     fn credential(rig: &Rig, context: Context) -> Reply {
         rig.broker
             .handle(Request::Credential { context }, rig.peer())
+    }
+
+    fn switch_team(rig: &Rig, team: &str) -> Reply {
+        rig.broker.handle(
+            Request::SwitchTeam {
+                team: team.to_string(),
+            },
+            rig.peer(),
+        )
+    }
+
+    fn switch_environment(rig: &Rig, name: &str) -> Reply {
+        rig.broker.handle(
+            Request::SwitchEnvironment {
+                environment: name.to_string(),
+            },
+            rig.peer(),
+        )
+    }
+
+    fn switched(reply: Reply) -> Switched {
+        match reply {
+            Reply::Switched(switched) => switched,
+            other => panic!("expected a switch, got {other:?}"),
+        }
+    }
+
+    fn environments_settings() -> RelaySettings {
+        let mut settings = idp_settings(Some("team-a"));
+        settings.environments = vec![
+            EnvironmentEntry {
+                name: "prod".to_string(),
+                url: GATEWAY.to_string(),
+                team: None,
+            },
+            EnvironmentEntry {
+                name: "uat".to_string(),
+                url: UAT.to_string(),
+                team: Some("uat-team".to_string()),
+            },
+        ];
+        settings
     }
 
     fn issued(reply: Reply) -> Issued {
@@ -1370,6 +1858,163 @@ mod tests {
     }
 
     #[test]
+    fn should_answer_the_status_at_once_while_a_sign_in_holds_a_config_change() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(1500));
+        let broker = Arc::clone(&rig.broker);
+        let signing_in = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        rig.settings.set(idp_settings(Some("team-b")));
+
+        let started = std::time::Instant::now();
+        let status = rig.broker.status();
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(500),
+            "status waited {waited:?}"
+        );
+        assert_eq!(status.team.as_deref(), Some("team-a"));
+
+        signing_in.join().expect("sign in");
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
+    }
+
+    #[test]
+    fn should_open_the_pending_sign_in_page_again_when_sign_in_is_clicked_twice() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(1500));
+        let broker = Arc::clone(&rig.broker);
+        let first = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(rig.browser_opens(), 1);
+
+        let broker = Arc::clone(&rig.broker);
+        let second = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(rig.browser_opens(), 2);
+
+        assert!(matches!(
+            first.join().expect("first"),
+            Reply::SignedIn { .. }
+        ));
+        assert!(matches!(
+            second.join().expect("second"),
+            Reply::SignedIn { .. }
+        ));
+        assert_eq!(rig.identity.sign_ins(), 1);
+
+        rig.identity.set_sign_in_delay(Duration::ZERO);
+        let opens_before_a_later_sign_in = rig.browser_opens();
+        assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
+        assert_eq!(rig.browser_opens(), opens_before_a_later_sign_in + 1);
+    }
+
+    #[test]
+    fn should_answer_signed_in_when_a_credential_request_finishes_the_page_a_sign_in_joined() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(600));
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let asking = thread::spawn(move || {
+            broker.handle(
+                Request::Credential {
+                    context: Context::Interactive,
+                },
+                peer,
+            )
+        });
+        thread::sleep(Duration::from_millis(200));
+
+        let joined = rig.broker.sign_in();
+
+        issued(asking.join().expect("credential"));
+        assert!(matches!(joined, Reply::SignedIn { .. }));
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 2);
+    }
+
+    #[test]
+    fn should_run_its_own_sign_in_when_a_concurrent_credential_request_needed_no_browser() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        issued(credential(&rig, Context::Interactive));
+        rig.broker.shutdown();
+        let gate = rig.auth.gate_next_exchange();
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let asking = thread::spawn(move || {
+            broker.handle(
+                Request::Credential {
+                    context: Context::Interactive,
+                },
+                peer,
+            )
+        });
+        gate.wait();
+        let broker = Arc::clone(&rig.broker);
+        let signing_in = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+        gate.wait();
+
+        issued(asking.join().expect("credential"));
+        let signed_in = signing_in.join().expect("sign-in");
+
+        assert!(matches!(signed_in, Reply::SignedIn { .. }), "{signed_in:?}");
+        assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(rig.browser_opens(), 2);
+    }
+
+    #[test]
+    fn should_not_open_a_new_sign_in_when_the_pending_one_it_joined_fails() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(600));
+        rig.identity.fail_sign_ins();
+        let broker = Arc::clone(&rig.broker);
+        let first = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+
+        let joined = rig.broker.sign_in();
+
+        assert!(matches!(
+            first.join().expect("first"),
+            Reply::Refused(Refusal::SignInFailed(_))
+        ));
+        assert!(matches!(joined, Reply::Refused(Refusal::SignInFailed(_))));
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 2);
+        assert!(!rig.broker.status().signed_in);
+    }
+
+    #[test]
+    fn should_refuse_a_joined_sign_in_when_a_credential_request_fails_the_page_on_a_stale_session()
+    {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        issued(credential(&rig, Context::Interactive));
+        rig.clock.advance(9 * 60 * MINUTE);
+        rig.auth.rotate();
+        rig.identity.fail_refreshes();
+        rig.identity.fail_sign_ins();
+        rig.identity.set_sign_in_delay(Duration::from_millis(600));
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let asking = thread::spawn(move || {
+            broker.handle(
+                Request::Credential {
+                    context: Context::Interactive,
+                },
+                peer,
+            )
+        });
+        thread::sleep(Duration::from_millis(200));
+
+        let joined = rig.broker.sign_in();
+
+        refused(asking.join().expect("credential"));
+        assert!(matches!(joined, Reply::Refused(Refusal::SignInFailed(_))));
+        assert_eq!(rig.identity.sign_ins(), 2);
+        assert!(!rig.broker.status().signed_in);
+    }
+
+    #[test]
     fn should_exchange_again_and_mint_anew_when_the_extension_answers_401() {
         let rig = Rig::new(idp_settings(Some("team-a")));
         rig.auth.set_session_lifetime(4 * 3600);
@@ -1434,6 +2079,33 @@ mod tests {
         assert_eq!(rig.broker.sign_in().to_json()["reason"], "gateway_error");
         rig.broker.tick();
         assert_eq!(rig.keys.extends().len(), 0);
+    }
+
+    #[test]
+    fn should_refuse_sign_out_on_a_static_key_naming_the_key_and_change_nothing() {
+        let rig = Rig::new(static_key_settings("sk-static"));
+        assert_eq!(rig.broker.status().source, Some("static_key"));
+        let version = rig.settings.version();
+        let refusal = refused(rig.broker.handle(Request::SignOut, rig.peer()));
+        assert_eq!(refusal.reason(), "static_key");
+        assert!(
+            refusal.message().contains("gateway.api_key"),
+            "{}",
+            refusal.message()
+        );
+        assert!(
+            refusal.message().contains("config.yaml"),
+            "{}",
+            refusal.message()
+        );
+        assert_eq!(rig.settings.version(), version);
+        let status = rig.broker.status();
+        assert!(status.signed_in);
+        assert_eq!(status.source, Some("static_key"));
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-static"
+        );
     }
 
     #[test]
@@ -1541,6 +2213,46 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_the_key_a_sign_in_finished_while_a_second_sign_in_waited() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let gate = rig.auth.gate_next_exchange();
+        let first = {
+            let broker = Arc::clone(&rig.broker);
+            thread::spawn(move || broker.sign_in())
+        };
+        gate.wait();
+        let second = {
+            let broker = Arc::clone(&rig.broker);
+            thread::spawn(move || broker.sign_in())
+        };
+        thread::sleep(Duration::from_millis(200));
+        gate.wait();
+        let signed_in = Reply::SignedIn {
+            user_id: Some("user-1".to_string()),
+        };
+        assert_eq!(first.join().expect("first sign-in"), signed_in);
+        assert_eq!(second.join().expect("second sign-in"), signed_in);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.keys.deletes().len(), 0);
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-1"
+        );
+        assert_eq!(
+            rig.broker.sign_in(),
+            Reply::SignedIn {
+                user_id: Some("user-1".to_string())
+            }
+        );
+        assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+    }
+
+    #[test]
     fn should_mint_for_a_team_added_to_the_config_after_start_without_a_browser() {
         let rig = Rig::new(idp_settings(None));
         let first = issued(credential(&rig, Context::Interactive));
@@ -1621,7 +2333,7 @@ mod tests {
     }
 
     #[test]
-    fn should_delete_the_key_at_the_old_gateway_when_the_config_moves_the_gateway() {
+    fn should_sign_out_when_the_config_moves_the_gateway_outside_its_environments() {
         let rig = Rig::new(idp_settings(Some("team-a")));
         assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
         rig.settings.set(other_gateway_settings());
@@ -1640,6 +2352,38 @@ mod tests {
             "https://other-gateway.example.com"
         );
         assert_eq!(rig.identity.sign_ins(), 2);
+        assert_eq!(rig.browser_opens(), 2);
+    }
+
+    #[test]
+    fn should_sign_out_when_the_config_moves_from_a_listed_environment_to_an_unlisted_gateway() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let mut moved = environments_settings();
+        moved.gateway.url = "https://other-gateway.example.com".to_string();
+        rig.settings.set(moved);
+        assert_eq!(
+            refused(credential(&rig, Context::NonInteractive)).reason(),
+            "signed_out"
+        );
+        assert_eq!(rig.identity.sign_ins(), 1);
+    }
+
+    #[test]
+    fn should_keep_the_idp_session_when_the_config_moves_between_two_listed_environments() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let mut moved = environments_settings();
+        moved.gateway.url = UAT.to_string();
+        rig.settings.set(moved);
+        let issued = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(issued.token, "sk-2");
+        assert_eq!(issued.source, Source::MintedKey);
+        assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
+        assert_eq!(rig.keys.mints()[1].gateway_url, UAT);
+        assert_eq!(rig.auth.exchanges(), 2);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
     }
 
     #[test]
@@ -1750,6 +2494,467 @@ mod tests {
             serde_json::from_str::<Request>("{\"op\":\"sign_out\"}").expect("parse"),
             Request::SignOut
         );
+        assert_eq!(
+            serde_json::from_str::<Request>("{\"op\":\"switch_team\",\"team\":\"team-b\"}")
+                .expect("parse"),
+            Request::SwitchTeam {
+                team: "team-b".to_string()
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(
+                "{\"op\":\"switch_environment\",\"environment\":\"uat\"}"
+            )
+            .expect("parse"),
+            Request::SwitchEnvironment {
+                environment: "uat".to_string()
+            }
+        );
+        let switched = Reply::Switched(Switched {
+            team: Some("team-b".to_string()),
+            environment: Some("uat".to_string()),
+            gateway_url: UAT.to_string(),
+            key_expires_at: Some(rfc3339(NOW)),
+            source: Some("minted_key"),
+        })
+        .to_json();
+        assert_eq!(switched["ok"], true);
+        assert_eq!(switched["team"], "team-b");
+        assert_eq!(switched["environment"], "uat");
+        assert_eq!(switched["gateway_url"], UAT);
+        assert_eq!(switched["key_expires_at"], "2027-01-15T08:00:00Z");
+        assert_eq!(switched["source"], "minted_key");
+        assert!(switched.get("token").is_none());
+        assert_eq!(
+            Reply::Refused(Refusal::UnknownEnvironment("no such".to_string())).to_json()["reason"],
+            "unknown_environment"
+        );
+        assert_eq!(
+            Reply::Refused(Refusal::SwitchFailed("refused".to_string())).to_json()["reason"],
+            "switch_failed"
+        );
+        assert_eq!(
+            Reply::Refused(Refusal::UnknownTeam("no such".to_string())).to_json()["reason"],
+            "unknown_team"
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>("{\"op\":\"recheck\"}").expect("parse"),
+            Request::Recheck
+        );
+        let account =
+            Reply::Account(json!({"teams": [{"id": "team-a"}], "polled_at": null})).to_json();
+        assert_eq!(account["ok"], true);
+        assert_eq!(account["teams"], json!([{"id": "team-a"}]));
+        assert_eq!(account["polled_at"], Value::Null);
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        let bare = rig.broker.handle(Request::Recheck, rig.peer());
+        assert!(
+            matches!(bare, Reply::Refused(Refusal::BadRequest(_))),
+            "{bare:?}"
+        );
+    }
+
+    #[test]
+    fn should_mint_under_the_new_team_and_delete_the_old_key_on_switch_team() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let switched = switched(switch_team(&rig, "team-b"));
+        assert_eq!(switched.team.as_deref(), Some("team-b"));
+        assert_eq!(switched.environment, None);
+        assert_eq!(switched.gateway_url, GATEWAY);
+        assert_eq!(
+            switched.key_expires_at,
+            Some(rfc3339(NOW + KEY_LIFETIME_SECONDS))
+        );
+        assert_eq!(switched.source, Some("minted_key"));
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+        let mints = rig.keys.mints();
+        assert_eq!(mints.len(), 2);
+        assert_eq!(mints[1].team, "team-b");
+        assert_eq!(mints[1].bearer, "llm_session_2");
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(
+            rig.settings
+                .load()
+                .expect("settings")
+                .gateway
+                .team
+                .as_deref(),
+            Some("team-b")
+        );
+        assert_eq!(
+            issued(credential(&rig, Context::NonInteractive)).token,
+            "sk-2"
+        );
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
+    }
+
+    #[test]
+    fn should_answer_switched_without_touching_the_gateway_when_the_team_is_already_current() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        let version = rig.settings.version();
+        let switched = switched(switch_team(&rig, "team-a"));
+        assert_eq!(switched.team.as_deref(), Some("team-a"));
+        assert_eq!(switched.source, Some("minted_key"));
+        assert_eq!(
+            switched.key_expires_at,
+            Some(rfc3339(NOW + KEY_LIFETIME_SECONDS))
+        );
+        assert_eq!(rig.settings.version(), version);
+        assert_eq!(rig.keys.deletes().len(), 0);
+        assert_eq!(rig.keys.mints().len(), 1);
+        assert_eq!(rig.auth.exchanges(), 1);
+    }
+
+    #[test]
+    fn should_revert_the_team_and_keep_serving_the_old_one_when_the_new_team_is_refused() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.auth.refuse_team("team-b");
+        let refusal = refused(switch_team(&rig, "team-b"));
+        assert_eq!(refusal.reason(), "switch_failed");
+        assert!(
+            refusal.message().contains("access_denied"),
+            "{}",
+            refusal.message()
+        );
+        assert_eq!(rig.settings.load().expect("settings").gateway.team, None);
+        assert!(rig.keys.deletes().is_empty());
+        let again = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(again.token, "sk-1");
+        assert_eq!(again.source, Source::MintedKey);
+        assert_eq!(rig.keys.mints().len(), 1);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-a"));
+    }
+
+    #[test]
+    fn should_refuse_a_signed_out_switch_without_a_browser_and_keep_the_previous_team() {
+        let rig = Rig::new(environments_settings());
+        for refusal in [
+            refused(switch_team(&rig, "team-b")),
+            refused(switch_environment(&rig, "uat")),
+        ] {
+            assert_eq!(refusal.reason(), "signed_out");
+            assert!(
+                refusal.message().contains("sign in first"),
+                "{}",
+                refusal.message()
+            );
+        }
+        assert_eq!(rig.browser_opens(), 0);
+        assert_eq!(rig.identity.sign_ins(), 0);
+        assert_eq!(rig.keys.mints().len(), 0);
+        let stored = rig.settings.load().expect("settings");
+        assert_eq!(stored.gateway.url, GATEWAY);
+        assert_eq!(stored.gateway.team, None);
+        assert!(stored.gateway.team_by_environment.is_empty());
+        let status = rig.broker.status();
+        assert_eq!(status.team.as_deref(), Some("team-a"));
+        assert_eq!(status.environment.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn should_refuse_a_signed_out_switch_to_the_current_team_or_environment() {
+        let rig = Rig::new(environments_settings());
+        let version = rig.settings.version();
+        for refusal in [
+            refused(switch_team(&rig, "team-a")),
+            refused(switch_environment(&rig, "prod")),
+        ] {
+            assert_eq!(refusal.reason(), "signed_out");
+            assert!(
+                refusal.message().contains("sign in first"),
+                "{}",
+                refusal.message()
+            );
+        }
+        assert_eq!(rig.settings.version(), version);
+        assert_eq!(rig.browser_opens(), 0);
+        assert_eq!(rig.keys.mints().len(), 0);
+    }
+
+    #[test]
+    fn should_refuse_a_switch_without_an_idp_before_touching_the_config() {
+        let rig = Rig::new(static_key_settings("sk-static"));
+        let version = rig.settings.version();
+        for refusal in [
+            refused(switch_team(&rig, "team-b")),
+            refused(switch_environment(&rig, "uat")),
+        ] {
+            assert_eq!(refusal.reason(), "static_key");
+            assert!(
+                refusal.message().contains("needs an IdP"),
+                "{}",
+                refusal.message()
+            );
+            assert!(
+                refusal.message().contains("gateway.api_key"),
+                "{}",
+                refusal.message()
+            );
+        }
+        assert_eq!(rig.settings.version(), version);
+        assert_eq!(rig.callers.checks(), 0);
+    }
+
+    #[test]
+    fn should_park_the_team_pick_per_environment_and_restore_it_on_return() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        assert_eq!(
+            switched(switch_team(&rig, "prod-pick")).team.as_deref(),
+            Some("prod-pick")
+        );
+        let on_uat = switched(switch_environment(&rig, "uat"));
+        assert_eq!(on_uat.team.as_deref(), Some("uat-team"));
+        assert_eq!(
+            rig.keys.mints().last().map(|mint| mint.team.clone()),
+            Some("uat-team".to_string())
+        );
+        assert_eq!(
+            switched(switch_team(&rig, "uat-pick")).team.as_deref(),
+            Some("uat-pick")
+        );
+        let back = switched(switch_environment(&rig, "prod"));
+        assert_eq!(back.team.as_deref(), Some("prod-pick"));
+        let mints = rig.keys.mints();
+        assert_eq!(
+            mints.last().map(|mint| mint.gateway_url.as_str()),
+            Some(GATEWAY)
+        );
+        assert_eq!(
+            mints.last().map(|mint| mint.team.as_str()),
+            Some("prod-pick")
+        );
+        assert!(mints
+            .iter()
+            .filter(|mint| mint.gateway_url == UAT)
+            .all(|mint| mint.team != "prod-pick"));
+        assert_eq!(
+            switched(switch_environment(&rig, "uat")).team.as_deref(),
+            Some("uat-pick")
+        );
+        assert_eq!(rig.identity.sign_ins(), 1);
+    }
+
+    #[test]
+    fn should_never_let_a_failed_switch_restore_its_team_over_a_later_switch() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.auth.refuse_team("team-z");
+        let gate = rig.auth.gate_next_exchange();
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let failing = thread::spawn(move || {
+            broker.handle(
+                Request::SwitchTeam {
+                    team: "team-z".to_string(),
+                },
+                peer,
+            )
+        });
+        gate.wait();
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let later = thread::spawn(move || {
+            broker.handle(
+                Request::SwitchTeam {
+                    team: "team-b".to_string(),
+                },
+                peer,
+            )
+        });
+        thread::sleep(Duration::from_millis(200));
+        gate.wait();
+        assert_eq!(
+            refused(failing.join().expect("failing switch")).reason(),
+            "switch_failed"
+        );
+        assert_eq!(
+            switched(later.join().expect("later switch"))
+                .team
+                .as_deref(),
+            Some("team-b")
+        );
+        assert_eq!(
+            rig.settings
+                .load()
+                .expect("settings")
+                .gateway
+                .team
+                .as_deref(),
+            Some("team-b")
+        );
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-b"));
+    }
+
+    #[test]
+    fn should_keep_the_gateway_session_when_a_switch_fails_on_an_expired_idp_token() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        rig.clock.advance(9 * 3600);
+        rig.identity.fail_refreshes();
+
+        let refusal = refused(switch_team(&rig, "team-b"));
+        let after = credential(&rig, Context::NonInteractive);
+
+        assert_eq!(refusal.reason(), "signed_out");
+        assert_eq!(issued(after).source, Source::MintedKey);
+        assert_eq!(
+            rig.keys.mints().last().map(|mint| mint.team.clone()),
+            Some("team-a".to_string())
+        );
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-a"));
+    }
+
+    #[test]
+    fn should_never_pair_a_key_with_another_gateway_url_while_environments_switch() {
+        let rig = Rig::new(environments_settings());
+        let proxy = issued(proxy_token(&rig, Context::Interactive)).token;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (broker, stop) = (Arc::clone(&rig.broker), Arc::clone(&stop));
+            thread::spawn(move || {
+                let reads = std::iter::from_fn(|| {
+                    (!stop.load(std::sync::atomic::Ordering::SeqCst))
+                        .then(|| broker.bearer_for_proxy(&proxy))
+                });
+                reads.flatten().collect::<Vec<ProxyBearer>>()
+            })
+        };
+        for round in 0..300 {
+            let name = if round % 2 == 0 { "uat" } else { "prod" };
+            switched(switch_environment(&rig, name));
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let bearers = reader.join().expect("reader");
+        let mints = rig.keys.mints();
+
+        let mismatched: Vec<&ProxyBearer> = bearers
+            .iter()
+            .filter(|bearer| {
+                let serial: usize = bearer
+                    .token
+                    .trim_start_matches("sk-")
+                    .parse()
+                    .expect("serial");
+                mints[serial - 1].gateway_url != bearer.gateway_url
+            })
+            .collect();
+        assert!(!bearers.is_empty());
+        assert!(
+            mismatched.is_empty(),
+            "{} of {} mismatched: {:?}",
+            mismatched.len(),
+            bearers.len(),
+            mismatched.first()
+        );
+    }
+
+    #[test]
+    fn should_list_the_configured_names_when_the_environment_is_unknown() {
+        let rig = Rig::new(environments_settings());
+        let version = rig.settings.version();
+        let refusal = refused(switch_environment(&rig, "staging"));
+        assert_eq!(refusal.reason(), "unknown_environment");
+        assert!(
+            refusal.message().contains("\"staging\""),
+            "{}",
+            refusal.message()
+        );
+        assert!(
+            refusal.message().contains("prod, uat"),
+            "{}",
+            refusal.message()
+        );
+        assert_eq!(rig.settings.version(), version);
+        assert_eq!(rig.keys.mints().len(), 0);
+        assert_eq!(rig.identity.sign_ins(), 0);
+    }
+
+    #[test]
+    fn should_switch_environment_keeping_the_idp_session_and_moving_the_key() {
+        let rig = Rig::new(environments_settings());
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        assert_eq!(rig.keys.mints()[0].team, "team-a");
+        let moved = switched(switch_environment(&rig, "uat"));
+        assert_eq!(moved.environment.as_deref(), Some("uat"));
+        assert_eq!(moved.gateway_url, UAT);
+        assert_eq!(moved.team.as_deref(), Some("uat-team"));
+        assert_eq!(moved.source, Some("minted_key"));
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 1);
+        assert_eq!(rig.keys.delete_urls(), vec![GATEWAY.to_string()]);
+        assert_eq!(
+            rig.keys.deletes(),
+            vec![("llm_session_1".to_string(), "sk-1".to_string())]
+        );
+        assert_eq!(rig.auth.exchanges(), 2);
+        assert_eq!(rig.auth.discoveries().last().map(String::as_str), Some(UAT));
+        let mints = rig.keys.mints();
+        assert_eq!(mints.len(), 2);
+        assert_eq!(mints[1].gateway_url, UAT);
+        assert_eq!(mints[1].team, "uat-team");
+        let stored = rig.settings.load().expect("settings");
+        assert_eq!(stored.gateway.url, UAT);
+        assert_eq!(stored.gateway.team, None);
+        let again = switched(switch_environment(&rig, "uat"));
+        assert_eq!(again.environment.as_deref(), Some("uat"));
+        assert_eq!(rig.keys.mints().len(), 2);
+        assert_eq!(rig.keys.deletes().len(), 1);
+        let status = rig.broker.status();
+        assert_eq!(status.environment.as_deref(), Some("uat"));
+        assert_eq!(status.gateway_url, UAT);
+        assert_eq!(status.team.as_deref(), Some("uat-team"));
+    }
+
+    #[test]
+    fn should_revert_both_gateway_fields_when_the_environment_switch_is_refused() {
+        let mut settings = environments_settings();
+        settings.gateway.team = Some("picked-team".to_string());
+        let rig = Rig::new(settings);
+        assert_eq!(issued(credential(&rig, Context::Interactive)).token, "sk-1");
+        assert_eq!(rig.keys.mints()[0].team, "picked-team");
+        rig.auth.refuse_team("uat-team");
+        let refusal = refused(switch_environment(&rig, "uat"));
+        assert_eq!(refusal.reason(), "switch_failed");
+        let stored = rig.settings.load().expect("settings");
+        assert_eq!(stored.gateway.url, GATEWAY);
+        assert_eq!(stored.gateway.team.as_deref(), Some("picked-team"));
+        assert!(stored.gateway.team_by_environment.is_empty());
+        assert!(rig.keys.delete_urls().is_empty());
+        let again = issued(credential(&rig, Context::NonInteractive));
+        assert_eq!(again.token, "sk-1");
+        assert_eq!(rig.keys.mints().len(), 1);
+        assert_eq!(rig.identity.sign_ins(), 1);
+        let status = rig.broker.status();
+        assert_eq!(status.environment.as_deref(), Some("prod"));
+        assert_eq!(status.gateway_url, GATEWAY);
+    }
+
+    #[test]
+    fn should_report_the_display_name_from_the_id_token_only_while_signed_in() {
+        let rig = Rig::new(environments_settings());
+        let before = rig.broker.status();
+        assert_eq!(before.display_name, None);
+        assert_eq!(before.environment.as_deref(), Some("prod"));
+        assert_eq!(before.gateway_url, GATEWAY);
+        issued(credential(&rig, Context::Interactive));
+        assert_eq!(
+            rig.broker.status().display_name.as_deref(),
+            Some(DISPLAY_NAME)
+        );
+        rig.broker.sign_out();
+        assert_eq!(rig.broker.status().display_name, None);
     }
 
     fn proxy_token(rig: &Rig, context: Context) -> Reply {

@@ -3,9 +3,12 @@ use std::{borrow::Cow, collections::HashMap, future::Future, pin::Pin, sync::Arc
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, CallToolResponse, Tool},
-    service::{RoleClient, RunningService, ServiceError},
+    service::{ClientInitializeError, RoleClient, RunningService, ServiceError},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+        streamable_http_client::{
+            StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
+        },
+        StreamableHttpClientTransport,
     },
     ServiceExt,
 };
@@ -168,9 +171,55 @@ async fn connect(target: &GatewayTarget) -> Result<Connection, UpstreamError> {
             credential,
         )]))
         .max_concurrent_requests(usize::MAX);
-    ().serve(StreamableHttpClientTransport::from_config(config))
+    let transport = StreamableHttpClientTransport::from_config(config);
+    let refused_response = refused_response_reader(&transport);
+    ().serve(transport)
         .await
-        .map_err(|error| UpstreamError(format!("could not connect to {endpoint}: {error}")))
+        .map_err(|error| UpstreamError(connect_failure(&endpoint, &error, refused_response)))
+}
+
+type RefusedResponseReader = fn(&ClientInitializeError) -> Option<String>;
+
+fn refused_response_reader<C: StreamableHttpClient>(
+    _transport: &StreamableHttpClientTransport<C>,
+) -> RefusedResponseReader {
+    refused_response::<C>
+}
+
+fn connect_failure(
+    endpoint: &str,
+    error: &ClientInitializeError,
+    refused_response: RefusedResponseReader,
+) -> String {
+    match refused_response(error) {
+        Some(response) => {
+            format!("the Gateway refused the MCP connection to {endpoint} with {response}")
+        }
+        None => format!("could not connect to {endpoint}: {error}"),
+    }
+}
+
+fn refused_response<C: StreamableHttpClient>(error: &ClientInitializeError) -> Option<String> {
+    let transport = match error {
+        ClientInitializeError::TransportError { error, .. } => error,
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            return refused_response::<C>(fallback)
+        }
+        _ => return None,
+    };
+    match transport
+        .error
+        .downcast_ref::<StreamableHttpError<C::Error>>()?
+    {
+        StreamableHttpError::UnexpectedServerResponse(response)
+            if response.starts_with("HTTP ") =>
+        {
+            Some(response.to_string())
+        }
+        StreamableHttpError::AuthRequired(_) => Some("HTTP 401 Unauthorized".to_string()),
+        StreamableHttpError::InsufficientScope(_) => Some("HTTP 403 Forbidden".to_string()),
+        _ => None,
+    }
 }
 
 fn upstream_tool(tool: Tool) -> Result<UpstreamTool, UpstreamError> {
@@ -408,11 +457,21 @@ mod tests {
             credential: "sk-someone-else".to_string(),
         };
         let upstream = RmcpUpstream::default();
-        assert!(upstream.list_tools(&target).await.is_err());
-        assert!(upstream
+        let listed = upstream
+            .list_tools(&target)
+            .await
+            .expect_err("a refused credential cannot list tools");
+        let called = upstream
             .call_tool(&target, "github-get_issue", None)
             .await
-            .is_err());
+            .expect_err("a refused credential cannot call a tool");
+        for refused in [listed.0, called.0] {
+            assert!(
+                refused.starts_with("the Gateway refused the MCP connection to http://127.0.0.1:"),
+                "{refused}"
+            );
+            assert!(refused.contains(" with HTTP 401 Unauthorized"), "{refused}");
+        }
         assert!(stand_in.calls.lock().expect("calls").is_empty());
     }
 }

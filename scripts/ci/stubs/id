@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+if [[ "$*" == "-u" && -n "${RELAY_SMOKE_UID:-}" ]]; then
+  echo "$RELAY_SMOKE_UID"
+  exit 0
+fi
+if [[ "$*" == "-u ${RELAY_SMOKE_CONSOLE_USER:-}" && -n "${RELAY_SMOKE_CONSOLE_UID:-}" ]]; then
+  echo "$RELAY_SMOKE_CONSOLE_UID"
+  exit 0
+fi
+exec /usr/bin/id "$@"

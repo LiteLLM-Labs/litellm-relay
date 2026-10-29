@@ -53,7 +53,7 @@ fn stand_in_daemon(home: &Path) -> Arc<Mutex<Vec<Value>>> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn relay_mcp_serves_the_four_tools_over_stdio_and_relays_a_call_to_the_daemon_socket() {
+async fn relay_mcp_serves_the_six_tools_over_stdio_and_relays_a_call_to_the_daemon_socket() {
     let home = scratch_home("client");
     let requests = stand_in_daemon(&home);
     let transport = TokioChildProcess::new(tokio::process::Command::new(RELAY).configure(|cmd| {
@@ -80,7 +80,9 @@ async fn relay_mcp_serves_the_four_tools_over_stdio_and_relays_a_call_to_the_dae
             "search_tools",
             "describe_tool",
             "call_tool",
-            "activate_server"
+            "activate_server",
+            "switch_team",
+            "switch_environment"
         ]
     );
     let read_only: Vec<Option<bool>> = tools
@@ -89,7 +91,14 @@ async fn relay_mcp_serves_the_four_tools_over_stdio_and_relays_a_call_to_the_dae
         .collect();
     assert_eq!(
         read_only,
-        [Some(true), Some(true), Some(false), Some(false)]
+        [
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(false)
+        ]
     );
     assert_eq!(
         tools[2].annotations.as_ref().unwrap().open_world_hint,

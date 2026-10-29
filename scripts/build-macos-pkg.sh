@@ -21,6 +21,8 @@ BINARY=""
 CONFIG_FILE=""
 OUTPUT=""
 SIGN_IDENTITY=""
+RELAYBAR="${RELAY_PKG_RELAYBAR:-0}"
+RELAYBAR_APP=""
 
 usage() {
   cat <<'USAGE'
@@ -39,6 +41,13 @@ Options:
                           (default: dist/litellm-relay-<version>.pkg)
   --identifier ID         Package identifier (default: ai.litellm.relay)
   --sign "IDENTITY"       Developer ID Installer identity for productsign
+  --relaybar              Build macos/RelayBarGlass with swift and ship
+                          RelayBarGlass.app in the package, so install.sh
+                          registers the menu bar app at login
+                          (RELAY_PKG_RELAYBAR=1 does the same; fails when
+                          swift is not on PATH)
+  --relaybar-app PATH     Ship this already built RelayBarGlass.app instead
+                          of building it (implies --relaybar, needs no swift)
   -h, --help              Show this help
 
 Notarization (staple) is a follow-up step handled outside this script.
@@ -53,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --identifier) IDENTIFIER="${2:-}"; shift 2 ;;
     --sign) SIGN_IDENTITY="${2:-}"; shift 2 ;;
+    --relaybar) RELAYBAR=1; shift ;;
+    --relaybar-app) RELAYBAR=1; RELAYBAR_APP="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -68,6 +79,16 @@ if [[ -z "$VERSION" ]]; then
   exit 2
 fi
 
+if [[ "$RELAYBAR" == "1" && -z "$RELAYBAR_APP" ]] && ! command -v swift >/dev/null 2>&1; then
+  echo "--relaybar needs swift on PATH to build the RelayBar menu bar app; install the Xcode Command Line Tools, pass --relaybar-app with a built RelayBarGlass.app, or drop --relaybar." >&2
+  exit 1
+fi
+
+if [[ -n "$RELAYBAR_APP" && ! -x "$RELAYBAR_APP/Contents/MacOS/RelayBarGlass" ]]; then
+  echo "not a RelayBarGlass.app bundle: $RELAYBAR_APP" >&2
+  exit 1
+fi
+
 if [[ -n "$CONFIG_FILE" && ! -f "$CONFIG_FILE" ]]; then
   echo "managed config not found: $CONFIG_FILE" >&2
   exit 1
@@ -76,7 +97,7 @@ fi
 if [[ -z "$BINARY" ]]; then
   echo "Building release binary with cargo..."
   cargo build --release --locked --manifest-path "$REPO_ROOT/Cargo.toml"
-  BINARY="$REPO_ROOT/target/release/litellm-relay"
+  BINARY="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/litellm-relay"
 fi
 
 if [[ ! -f "$BINARY" ]]; then
@@ -91,15 +112,32 @@ mkdir -p "$(dirname "$OUTPUT")"
 
 STAGE_DIR="$(mktemp -d)"
 SCRIPTS_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGE_DIR" "$SCRIPTS_DIR"' EXIT
+COMPONENT_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_DIR" "$SCRIPTS_DIR" "$COMPONENT_DIR"' EXIT
+chmod 755 "$STAGE_DIR"
 
 # Payload laid down at $INSTALL_LOCATION on the device.
 install -m 0755 "$BINARY" "$STAGE_DIR/litellm-relay"
 install -m 0755 "$REPO_ROOT/src/install.sh" "$STAGE_DIR/install.sh"
 install -m 0755 "$REPO_ROOT/src/uninstall.sh" "$STAGE_DIR/uninstall.sh"
 if [[ -n "$CONFIG_FILE" ]]; then
-  install -m 0644 "$CONFIG_FILE" "$STAGE_DIR/config.yaml"
+  install -m 0600 "$CONFIG_FILE" "$STAGE_DIR/config.yaml"
 fi
+if [[ -n "$RELAYBAR_APP" ]]; then
+  ditto "$RELAYBAR_APP" "$STAGE_DIR/RelayBarGlass.app"
+elif [[ "$RELAYBAR" == "1" ]]; then
+  echo "Building the RelayBar menu bar app..."
+  "$REPO_ROOT/macos/RelayBarGlass/build.sh"
+  ditto "$REPO_ROOT/macos/RelayBarGlass/RelayBarGlass.app" "$STAGE_DIR/RelayBarGlass.app"
+fi
+
+COMPONENT_PLIST="$COMPONENT_DIR/components.plist"
+pkgbuild --analyze --root "$STAGE_DIR" "$COMPONENT_PLIST" >/dev/null
+component=0
+while plutil -extract "$component" xml1 -o /dev/null "$COMPONENT_PLIST" >/dev/null 2>&1; do
+  plutil -replace "$component.BundleIsRelocatable" -bool NO "$COMPONENT_PLIST"
+  component=$((component + 1))
+done
 
 # Postinstall runs the installer as the console user.
 install -m 0755 "$SCRIPT_DIR/macos-pkg/postinstall" "$SCRIPTS_DIR/postinstall"
@@ -116,7 +154,9 @@ pkgbuild \
   --version "$VERSION" \
   --install-location "$INSTALL_LOCATION" \
   --scripts "$SCRIPTS_DIR" \
+  --component-plist "$COMPONENT_PLIST" \
   "$UNSIGNED_PKG"
+"$SCRIPT_DIR/macos-pkg/check-payload.sh" "$UNSIGNED_PKG"
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "Signing package with: $SIGN_IDENTITY"

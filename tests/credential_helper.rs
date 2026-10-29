@@ -161,3 +161,26 @@ fn sign_out_asks_the_daemon_to_forget_the_session() {
     assert!(text(&output.stdout).contains("Signed out"));
     assert_eq!(daemon.request(), json!({"op": "sign_out"}));
 }
+
+#[test]
+fn sign_out_on_a_static_key_changes_nothing_and_exits_zero() {
+    let daemon = FakeDaemon::answering(json!({
+        "ok": false,
+        "reason": "static_key",
+        "message": "sign-out needs an IdP, and this device serves the static Gateway key from gateway.api_key in /tmp/config.yaml; delete gateway.api_key there to stop using it"
+    }));
+
+    let output = relay(&daemon.home, &["sign-out"], None);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        text(&output.stderr)
+    );
+    let stdout = text(&output.stdout);
+    assert!(stdout.contains("Nothing to sign out"), "stdout: {stdout}");
+    assert!(stdout.contains("static Gateway key"), "stdout: {stdout}");
+    assert!(!stdout.contains("Signed out"), "stdout: {stdout}");
+    assert_eq!(daemon.request(), json!({"op": "sign_out"}));
+}

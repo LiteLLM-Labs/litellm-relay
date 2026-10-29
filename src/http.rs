@@ -115,6 +115,7 @@ where
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         501 => "Not Implemented",
         502 => "Bad Gateway",
         _ => "OK",
@@ -268,6 +269,10 @@ pub fn parse_limit(query: &str) -> usize {
         .and_then(|raw| raw.parse::<usize>().ok())
         .map(|value| value.clamp(1, 1000))
         .unwrap_or(250)
+}
+
+pub fn asks_passive_read(query: &str) -> bool {
+    query.split('&').any(|part| part == "passive=1")
 }
 
 pub fn parse_connect_target(target: &str) -> Result<ConnectTarget> {

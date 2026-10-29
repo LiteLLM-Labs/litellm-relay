@@ -54,7 +54,8 @@ jobs:
           ./scripts/build-macos-pkg.sh \
             --version "$version" \
             --binary target/release/litellm-relay \
-            --output "$pkg"
+            --output "$pkg" \
+            --relaybar
           shasum -a 256 "$pkg" > "$pkg.sha256"
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

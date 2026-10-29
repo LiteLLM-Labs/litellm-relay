@@ -79,6 +79,51 @@ pub fn ensure_ca(ca_dir: &Path) -> Result<CertificateAuthority> {
     })
 }
 
+pub trait CaTrust: Send + Sync {
+    fn trusts(&self, cert_path: &Path) -> bool;
+}
+
+pub struct UserCaTrust;
+
+impl CaTrust for UserCaTrust {
+    #[cfg(target_os = "macos")]
+    fn trusts(&self, cert_path: &Path) -> bool {
+        let outcome = run_quiet_within(
+            Command::new("/usr/bin/security")
+                .arg("verify-cert")
+                .arg("-c")
+                .arg(cert_path)
+                .arg("-l")
+                .arg("-L")
+                .arg("-q"),
+            VERIFY_CERT_TIMEOUT,
+        );
+        match outcome {
+            CommandOutcome::Succeeded => true,
+            CommandOutcome::Failed => false,
+            CommandOutcome::TimedOut => {
+                eprintln!(
+                    "cert: `security verify-cert` gave no answer in {} s; counting the Relay CA as untrusted",
+                    VERIFY_CERT_TIMEOUT.as_secs()
+                );
+                false
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn trusts(&self, _cert_path: &Path) -> bool {
+        true
+    }
+}
+
+pub fn trust_command(cert_path: &Path) -> String {
+    format!(
+        "security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \"{}\"",
+        cert_path.display()
+    )
+}
+
 pub fn server_tls_config(host: &str, ca_dir: &Path) -> Result<ServerConfig> {
     let (cert_path, key_path) = ensure_leaf_cert(host, ca_dir)?;
     let cert_file = fs::read(&cert_path)?;
@@ -166,6 +211,42 @@ fn ensure_leaf_cert(host: &str, ca_dir: &Path) -> Result<(PathBuf, PathBuf)> {
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
     }
     Ok((cert_path, key_path))
+}
+
+#[cfg(target_os = "macos")]
+const VERIFY_CERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum CommandOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn run_quiet_within(command: &mut Command, limit: std::time::Duration) -> CommandOutcome {
+    let spawned = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = spawned else {
+        return CommandOutcome::Failed;
+    };
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return CommandOutcome::Succeeded,
+            Ok(Some(_)) | Err(_) => return CommandOutcome::Failed,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return CommandOutcome::TimedOut;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 fn run_quiet(command: &mut Command) -> Result<()> {
@@ -256,5 +337,61 @@ mod tests {
     #[test]
     fn safe_cert_name_removes_path_characters() {
         assert_eq!(safe_cert_name("www.notion.so:443"), "www.notion.so_443");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_give_up_on_a_trust_check_that_never_answers_and_keep_the_answers_of_one_that_does() {
+        let started = std::time::Instant::now();
+        let hung = run_quiet_within(
+            Command::new("/bin/sleep").arg("30"),
+            std::time::Duration::from_millis(200),
+        );
+        let gave_up_after = started.elapsed();
+        let limit = std::time::Duration::from_secs(5);
+
+        assert_eq!(hung, CommandOutcome::TimedOut);
+        assert!(gave_up_after < limit, "{gave_up_after:?}");
+        assert_eq!(
+            run_quiet_within(&mut Command::new("/usr/bin/true"), limit),
+            CommandOutcome::Succeeded
+        );
+        assert_eq!(
+            run_quiet_within(&mut Command::new("/usr/bin/false"), limit),
+            CommandOutcome::Failed
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn should_trust_a_system_root_but_not_a_fresh_relay_ca_nobody_trusted() {
+        let ca_dir = std::env::temp_dir().join(format!("relay-ca-trust-{}", uuid::Uuid::new_v4()));
+        let ca = ensure_ca(&ca_dir).unwrap();
+        let roots = Command::new("/usr/bin/security")
+            .args([
+                "find-certificate",
+                "-a",
+                "-p",
+                "/System/Library/Keychains/SystemRootCertificates.keychain",
+            ])
+            .output()
+            .unwrap()
+            .stdout;
+
+        let fresh_ca_trusted = UserCaTrust.trusts(&ca.cert_path);
+        let some_root_trusted = decode_pem_blocks(&roots, "CERTIFICATE")
+            .unwrap()
+            .into_iter()
+            .take(5)
+            .enumerate()
+            .any(|(index, der)| {
+                let path = ca_dir.join(format!("root-{index}.der"));
+                fs::write(&path, der).unwrap();
+                UserCaTrust.trusts(&path)
+            });
+        fs::remove_dir_all(&ca_dir).unwrap();
+
+        assert!(!fresh_ca_trusted);
+        assert!(some_root_trusted);
     }
 }

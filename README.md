@@ -37,15 +37,18 @@ login and every `RELAY_AUTOCONFIGURE_INTERVAL` seconds, default 3600):
 | `ai.litellm.relay.autoconfigure` (LaunchAgent) | you | Claude Code, Codex | configs are user-writable (`~/.claude`, `~/.codex`) |
 | `ai.litellm.relay.autoconfigure-desktop` (LaunchDaemon) | root | Claude Desktop | its managed plist lives in the root-owned `/Library/Managed Preferences` |
 
-The root daemon pins `HOME` to the installing user so it reads that user's Relay
-config while running as root. It also runs whenever `/Library/Managed Preferences`
+The root daemon runs a root-owned copy of the Relay binary at
+`/Library/PrivilegedHelperTools/ai.litellm.relay.autoconfigure-desktop`, which
+each install refreshes, and pins `HOME` to the installing user so it reads that
+user's Relay config while running as root. It also runs whenever `/Library/Managed Preferences`
 changes: on an MDM-enrolled Mac a managed-preferences refresh (login, a profile
 push) regenerates that directory from the installed profiles and drops the plist,
 and the daemon writes it back within seconds, leaving it alone when it is already
 current. Installing it needs root; `install.sh` uses `sudo`
-when not already root (the macOS `.pkg` postinstall already runs as root). If it
-can't get root, Claude Code and Codex still auto-configure and Relay prints a
-warning for Claude Desktop.
+when not already root, and the macOS `.pkg` postinstall runs `install.sh` as the
+console user, so there the daemon is installed only when that user has
+passwordless `sudo`. If it can't get root, Claude Code and Codex still
+auto-configure and Relay prints a warning for Claude Desktop.
 
 On macOS Claude Code, Claude Desktop, and Codex get their credential from the
 Relay daemon, so `relay onboard`, `relay onboard-codex`,
@@ -85,23 +88,20 @@ check only runs once a supported tool is detected. When the Gateway reported an
 expiry at sign-in, the run also warns once the credential is within 24 hours of
 it. The same check is exposed on `/api/status` as a `credential` block
 (`configured` says whether a Gateway key is saved; `state` is `valid`,
-`restricted`, `rejected`, `unverifiable`, or `missing`; `expiry` is `unknown`,
-`ok`, `expiring_soon`, or `expired`; plus `detail`, `checked_at`, `enrolled_at`,
-and `expires_at`), and the dashboard shows it as the
-`Gateway credential` row. The status endpoint serves the last check for up to
-60 seconds and refreshes it in the background, so only the first call after
-`serve` starts waits on the Gateway (at most 10 seconds)
+`restricted`, `rejected`, `unverifiable`, `missing`, or `unchecked` when a key
+is saved but no check has finished yet; `expiry` is `unknown`, `ok`,
+`expiring_soon`, or `expired`; plus `detail`, `checked_at`, `enrolled_at`, and
+`expires_at`), and the dashboard shows it as the `Gateway credential` row.
+While the daemon holds an IdP session, the block describes that session
+instead (`configured` true, `state` `valid`, and `expires_at` the expiry of the
+key the daemon minted). The
+status endpoint answers at once with the last check, which is up to 60 seconds
+old, and refreshes it in the background, so the first call after `serve`
+starts reads `unchecked` until that check finishes (at most 10 seconds)
 
 ## Developers see their own usage, locally
 
-Relay also ships an optional **macOS menu bar app** so each developer can see **their own AI spend right on their machine** — no dashboard login. It reads live, key-scoped usage from the Gateway and breaks it down per coding tool: spend this month, spend/day, model mix, cache-hit rate, and the relay key's budget.
-
-<p>
-  <img width="340" alt="Claude Code usage in the menu bar" src="docs/img/relaybar-claude-code.png" />
-  <img width="340" alt="Codex CLI usage in the menu bar" src="docs/img/relaybar-codex-cli.png" />
-</p>
-
-Each tool (Claude Code, Codex CLI, Cursor, Gemini, …) gets its own tab with its own color. Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`).
+Relay also ships an optional **macOS menu bar app**, RelayBar, that sits on top of the daemon: it shows whether the developer is signed in and as whom, how long the key every coding tool is using stays valid and that the daemon renews it, the selected team's spend against its budget as the Gateway reports it, the MCP servers the daemon serves, and a Team and an Environment picker that move Claude Code, Codex, and the local proxy at once through `relay switch-team` and `relay switch-environment` (Claude Desktop's requests fail after a switch until it restarts, and the restart moves it to the new Gateway only where the `.pkg` or a `sudo` install added the root Claude Desktop agent). Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`) or ship it in the `.pkg` with `scripts/build-macos-pkg.sh --relaybar`.
 
 ## AI Tool Guides
 
@@ -146,6 +146,14 @@ endpoint (`ANTHROPIC_BASE_URL`, Codex's `base_url`) are forwarded to the
 Gateway with the developer's credential and are accounted there, in the
 Gateway logs and the menu bar usage card, not as rows in this table.
 
+The dashboard's data calls under `/api/` answer a page opened at an IP address,
+`localhost`, `relay.host`, or this Mac's own name (`<name>` or `<name>.local`),
+on any port, so `http://0.0.0.0:4142` and a Docker port mapping keep working.
+Any other `Host` (a page that rebinds its own domain to the Mac), a request
+whose `Origin` is another site, and a browser request whose `Sec-Fetch-Site` is
+anything but `same-origin` or `none` (such as an image another page embeds) get
+a 403.
+
 ## Install
 
 Relay has no tagged release yet, so install it from GitHub. The installer
@@ -168,8 +176,13 @@ curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src
 ```
 
 The installer builds the `relay` command, adds it to your `PATH`, and trusts
-the local Relay CA so AI app payloads can be captured. Pass `--skip-trust-ca`
-to install without trusting the CA.
+the local Relay CA so AI app payloads can be captured; macOS asks for your
+account password in a Certificate Trust Settings sheet for that step. Pass
+`--skip-trust-ca` to install without trusting the CA. A managed install
+(`--config-file` or `--skip-setup`, which is what the `.pkg` runs) trusts the
+CA only when its config sets `capture.payloads: true`, so a fleet on the
+default metadata-only capture never sees that sheet; see
+[CA trust on managed devices](docs/mdm.md#ca-trust-on-managed-devices).
 
 Then open a new terminal and run:
 

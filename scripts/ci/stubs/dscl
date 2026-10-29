@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+if [[ -n "${RELAY_SMOKE_CONSOLE_HOME:-}" && "$*" == ". -read /Users/${RELAY_SMOKE_CONSOLE_USER:-} NFSHomeDirectory" ]]; then
+  if [[ "$RELAY_SMOKE_CONSOLE_HOME" == *" "* ]]; then
+    printf 'NFSHomeDirectory:\n %s\n' "$RELAY_SMOKE_CONSOLE_HOME"
+  else
+    echo "NFSHomeDirectory: $RELAY_SMOKE_CONSOLE_HOME"
+  fi
+  exit 0
+fi
+exec /usr/bin/dscl "$@"

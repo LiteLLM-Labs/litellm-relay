@@ -2,9 +2,10 @@
 #
 # LiteLLM Relay package postinstall.
 #
-# Runs as root at install time. Relay is a per-user proxy (login-keychain CA
-# trust + a user LaunchAgent), so this installs it for the active console user
-# using the prebuilt binary — no Rust/cargo on the endpoint.
+# Runs as root at install time. Relay is a per-user proxy (a user LaunchAgent,
+# plus login-keychain CA trust when the managed config captures payloads), so
+# this installs it for the active console user using the prebuilt binary; no
+# Rust/cargo on the endpoint.
 set -euo pipefail
 
 PAYLOAD="/usr/local/litellm-relay"
@@ -15,16 +16,20 @@ CONFIG="$PAYLOAD/config.yaml"
 console_user="$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || echo root)"
 
 if [[ -z "$console_user" || "$console_user" == "root" || "$console_user" == "loginwindow" || "$console_user" == "_mbsetupuser" ]]; then
-  echo "No active console user; skipping per-user Relay setup." >&2
-  echo "Relay payload staged at $PAYLOAD; it will install on next user login run." >&2
-  exit 0
+  echo "No user is logged in at the console, so Relay was not installed for anyone." >&2
+  echo "The payload is staged at $PAYLOAD; this install reports a failure so the MDM runs it again once a user is logged in." >&2
+  exit 1
 fi
 
 console_uid="$(/usr/bin/id -u "$console_user")"
 
 args=(--background --skip-setup --prebuilt-binary "$BINARY")
 if [[ -f "$CONFIG" ]]; then
-  args+=(--config-file "$CONFIG")
+  seed_dir="$(/usr/bin/mktemp -d /private/tmp/litellm-relay-config.XXXXXX)"
+  trap '/bin/rm -rf "$seed_dir"' EXIT
+  /usr/bin/install -m 0600 -o "$console_user" "$CONFIG" "$seed_dir/config.yaml"
+  /bin/chmod 0711 "$seed_dir"
+  args+=(--config-file "$seed_dir/config.yaml")
 fi
 
 echo "Installing LiteLLM Relay for console user: $console_user (uid $console_uid)"

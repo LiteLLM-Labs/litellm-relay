@@ -4,6 +4,7 @@ use super::{caller::Peer, Broker, Context, Mode, Refusal, Reply, Target};
 pub struct SessionIdentity {
     pub gateway_url: String,
     pub user_id: Option<String>,
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,20 @@ pub struct SessionBearer {
 impl Broker {
     pub fn session_identity(&self) -> Option<SessionIdentity> {
         self.refresh();
+        self.held_identity()
+    }
+
+    pub fn session_identity_unless_renewing(&self) -> Option<SessionIdentity> {
+        self.refresh_unless_renewing();
+        self.held_identity()
+    }
+
+    fn holds_an_idp_session(&self) -> bool {
+        let state = self.lock_state();
+        state.credential.is_some() || state.session.is_some()
+    }
+
+    fn held_identity(&self) -> Option<SessionIdentity> {
         let target = self.lock_target().clone();
         let state = self.lock_state();
         let held = matches!(target.mode, Mode::StaticKey(_)) || state.credential.is_some();
@@ -27,6 +42,7 @@ impl Broker {
                 .credential
                 .as_ref()
                 .and_then(|credential| credential.user_id.clone()),
+            team: target.team,
         })
     }
 
@@ -46,8 +62,24 @@ impl Broker {
         self.session_bearer(&target, Context::NonInteractive)
     }
 
+    pub fn session_bearer_unless_renewing(&self) -> Option<Result<SessionBearer, Refusal>> {
+        self.refresh_unless_renewing();
+        let target = self.lock_target().clone();
+        if matches!(target.mode, Mode::Idp(_)) && !self.holds_an_idp_session() {
+            return Some(Err(Refusal::SignedOut(
+                "not signed in on this device".to_string(),
+            )));
+        }
+        let reply = self.issue_unless_renewing(&target, Context::NonInteractive)?;
+        Some(self.bearer_from(&target, reply))
+    }
+
     fn session_bearer(&self, target: &Target, context: Context) -> Result<SessionBearer, Refusal> {
-        match self.issue(target, context) {
+        self.bearer_from(target, self.issue(target, context))
+    }
+
+    fn bearer_from(&self, target: &Target, reply: Reply) -> Result<SessionBearer, Refusal> {
+        match reply {
             Reply::Credential(issued) => Ok(SessionBearer {
                 token: issued.token,
                 identity: SessionIdentity {
@@ -57,6 +89,7 @@ impl Broker {
                         .credential
                         .as_ref()
                         .and_then(|credential| credential.user_id.clone()),
+                    team: target.team.clone(),
                 },
             }),
             Reply::Refused(refusal) => Err(refusal),

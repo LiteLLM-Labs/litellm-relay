@@ -5,8 +5,10 @@ MDM, plus one configuration profile that points macOS Auto Proxy at Relay's
 local PAC URL. Relay is macOS-only today.
 
 Endpoints do **not** need Rust/cargo: the `.pkg` carries a prebuilt binary and
-its postinstall installs Relay for the console user (CA trust in the login
-keychain + a per-user LaunchAgent). See [`scripts/build-macos-pkg.sh`](../scripts/build-macos-pkg.sh).
+its postinstall installs Relay for the console user (a per-user LaunchAgent,
+plus CA trust in the login keychain only when the managed config captures
+payloads; see [CA trust on managed devices](#ca-trust-on-managed-devices)).
+See [`scripts/build-macos-pkg.sh`](../scripts/build-macos-pkg.sh).
 
 Recommended shape, same as other endpoint software: manual pilot on one Mac,
 then a small MDM pilot group, then broaden.
@@ -21,9 +23,10 @@ the PAC configuration profile and the macOS PKG app-add wizard:
 
 | Artifact | Purpose | Source |
 | --- | --- | --- |
-| `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, attached to the GitHub Release |
+| `litellm-relay-<version>.pkg` | Prebuilt binary + per-user install | Built by `scripts/build-macos-pkg.sh`, uploaded as an artifact of the release workflow run |
 | PAC configuration profile | Points macOS Auto Proxy at `http://127.0.0.1:4142/proxy.pac` | [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example) |
 | Managed `config.yaml` | Gateway URL, IdP issuer and client id, capture/shadow settings | [`mdm/config.yaml.example`](../mdm/config.yaml.example) |
+| `RelayBarGlass.app` (optional) | Menu bar app: sign-in state, key countdown, team and environment pickers, budget, MCP servers | Built into the `.pkg` by `scripts/build-macos-pkg.sh --relaybar` (or `--relaybar-app`), installed at `/usr/local/litellm-relay/RelayBarGlass.app` |
 
 The managed config can be baked into the `.pkg` at build time
 (`--config-file`) so no separate config delivery is needed:
@@ -31,6 +34,14 @@ The managed config can be baked into the `.pkg` at build time
 ```bash
 scripts/build-macos-pkg.sh --version 0.1.0 --config-file mdm/config.yaml.example
 ```
+
+A later install replaces `config.yaml` with the new managed config and keeps
+only the environment and team the developer picked. A value still equal to the
+one the earlier install seeded (kept in `~/.litellm-relay/.managed-config.yaml`)
+is not a pick, so a re-pushed `gateway.team` reaches every device that never
+switched. The first managed install on a device that has no seeded copy yet
+(one set up before this version, or by hand) keeps only the picked environment
+and its per-environment team picks, so the new managed `gateway.team` applies.
 
 ## Build the package
 
@@ -48,6 +59,38 @@ optional for a Jamf-only fleet but required for Intune (Gatekeeper). Tagging a
 release (`v*`) also builds the `.pkg` per architecture in
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
+The payload lands at `/usr/local/litellm-relay` owned by root, and the
+postinstall runs `install.sh` from there as the console user, so every payload
+entry except `config.yaml` has to be readable by other users. `config.yaml` is
+installed root-owned with mode 0600, so a seeded `gateway.api_key` is not
+readable by other accounts on the Mac, and the postinstall hands `install.sh` a
+private copy owned by the console user, which it deletes after the install.
+The builder stages the payload in a world-readable root and then runs
+[`scripts/macos-pkg/check-payload.sh`](../scripts/macos-pkg/check-payload.sh)
+on the built package, which fails the build and lists any entry other users
+could not read, and a `config.yaml` that is not root-only. Run it by hand on
+any `.pkg` before uploading it to your MDM.
+It checks every component package, including each one inside a
+`productbuild` distribution package, and it fails on a component that has no
+Bom, since that component's payload modes cannot be read.
+
+Add `--relaybar` (or set `RELAY_PKG_RELAYBAR=1`) to ship the RelayBar menu
+bar app in the same package. The build host needs `swift` on PATH, since the
+flag runs `macos/RelayBarGlass/build.sh` and copies the resulting
+`RelayBarGlass.app` into the payload at
+`/usr/local/litellm-relay/RelayBarGlass.app`. Without `swift` the build fails
+before it starts, so a package never ships without the app it was asked for.
+To package an app built elsewhere, pass `--relaybar-app path/to/RelayBarGlass.app`
+instead, which needs no `swift`. The package marks the app as not relocatable,
+so macOS installs it at that path even when another copy of the same bundle id
+is already on the Mac. When the app is present, `install.sh` writes a second
+per-user LaunchAgent, `~/Library/LaunchAgents/ai.litellm.relaybar.plist` (label
+`ai.litellm.relaybar`), so the tray starts at login next to the daemon. When
+it is missing, the install log warns that no menu bar app starts at login and
+names the path it looked at. The tray reads `relay.port` from the managed
+`config.yaml` (default 4142) and polls `http://127.0.0.1:<port>/api/status`.
+It holds no credential and persists nothing of its own.
+
 ## Manual pilot (one Mac, no MDM)
 
 ```bash
@@ -64,13 +107,26 @@ touching system settings:
 curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
 ```
 
+## Deploy while a user is logged in
+
+The postinstall installs Relay for the user logged in at the console. A
+package that runs at the login window or during Setup Assistant, as an
+enrollment trigger often does, only stages the payload at
+`/usr/local/litellm-relay` and exits 1, so the MDM records a failed install
+and retries it (Intune retries a failed Required app at its next check-in). Relay installs on the first run while a user is logged in.
+Deploy it with a login or check-in trigger scoped to a logged-in user, or
+re-run it after enrollment.
+
 ## Jamf Pro
 
 1. **Upload the package.** Settings → Computer Management → Packages → New (or
    upload via Jamf Admin). Upload `litellm-relay-<version>.pkg`.
 2. **Create the deploy policy.** Computers → Policies → New. Add a **Packages**
-   payload with the Relay package, action **Install**. Trigger: Recurring
-   check-in (or Enrollment Complete). Scope to your **pilot Smart Group** first.
+   payload with the Relay package, action **Install**. Trigger: Login, or
+   Recurring check-in; an Enrollment Complete run before anyone logs in only
+   stages the payload and shows as Failed (see
+   [Deploy while a user is logged in](#deploy-while-a-user-is-logged-in)).
+   Scope to your **pilot Smart Group** first.
 3. **Deploy the PAC profile.** Computers → Configuration Profiles → New. Add a
    **Proxies** payload → Automatic Proxy Configuration → URL
    `http://127.0.0.1:4142/proxy.pac`. Alternatively upload
@@ -89,6 +145,8 @@ curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
    `./IntuneAppUtil -c litellm-relay-<version>.pkg -o .`. Then Apps → macOS →
    Add → **macOS app (PKG)** / line-of-business app, upload the `.intunemac`.
 2. **Assign.** Assign the app as **Required** to your pilot Azure AD group.
+   A run before anyone logs in fails on purpose and Intune retries it (see
+   [Deploy while a user is logged in](#deploy-while-a-user-is-logged-in)).
 3. **Deploy the PAC profile.** Devices → Configuration → Create → macOS →
    **Templates → Custom**, upload
    [`mdm/litellm-relay-pac.mobileconfig.example`](../mdm/litellm-relay-pac.mobileconfig.example).
@@ -97,14 +155,78 @@ curl --cacert "$(relay ca-path)" -x http://127.0.0.1:4142 https://www.notion.so
    `http://127.0.0.1:4142/` and the Gateway on a pilot Mac.
 5. **Broaden.** Change the assignment to the full device group.
 
-Use Intune trusted-certificate profiles only when testing a future managed-CA
-MITM mode; the default install trusts Relay's CA in the user login keychain.
+By default the daemon generates Relay's CA on each device, so an Intune
+trusted-certificate profile cannot pre-trust it. With payload capture on, a
+fleet CA can go in that profile instead; see
+[CA trust on managed devices](#ca-trust-on-managed-devices).
 
 ## Kandji
 
 1. Upload the `.pkg` as a **Custom App**, audit-and-enforce or install-once.
 2. Add a **Custom Profile** with the PAC payload above.
-3. Use a Certificate Library Item only for a future managed-CA MITM test.
+3. Skip Certificate Library Items unless payload capture is on and you use a
+   fleet CA, since the Relay CA is otherwise per device (see
+   [CA trust on managed devices](#ca-trust-on-managed-devices)).
+
+## CA trust on managed devices
+
+Relay's CA ("LiteLLM Relay Local Root CA") is generated on each device by the
+daemon unless you supply a fleet CA (below), so by default no fleet-wide trust
+profile can carry it, and only payload capture
+(`capture.payloads: true`) ever needs it: the Claude Code, Codex, and Claude
+Desktop flows go to the Gateway through the credential broker, and with
+payload capture off the proxy tunnels TLS without decrypting it. The `.pkg`
+install therefore trusts the CA in the user's login keychain only when the
+managed config sets `capture.payloads: true`. That step raises the macOS
+"Certificate Trust Settings" password sheet on the device, and the install log
+(`/var/log/install.log`) says so before it appears; a cancelled sheet logs a
+warning with the command to run later, and the install carries on. A CA that
+macOS already trusts, such as the fleet CA below, is logged as already trusted
+and raises no sheet. With the default `capture.payloads: false` the install
+logs that it skipped CA trust and why, and no sheet appears. When an earlier
+install trusted a Relay CA in the login keychain, that trust is still there,
+so the log says so and prints one `security delete-certificate -Z <SHA-1> -t`
+command per certificate to run from the user's session. An install outside
+the user's GUI session cannot read that trust and logs that instead.
+`install.sh` run by hand (no `--config-file` or `--skip-setup`) keeps trusting
+the CA by default, since a person is there to answer the sheet.
+
+With payload capture on, a fleet CA avoids the sheet on every device. Generate
+one CA on a secure host. Relay's own per-device CA uses the same basic
+constraints and key usage but no name constraints or EKU, so this fleet CA is
+the narrower of the two:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 825 \
+  -subj "/CN=LiteLLM Relay Local Root CA" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "nameConstraints=critical,permitted;DNS:anthropic.com,permitted;DNS:claude.ai,permitted;DNS:openai.com,permitted;DNS:chatgpt.com,permitted;DNS:notion.so,permitted;DNS:notion.com" \
+  -keyout litellm-relay-ca-key.pem -out litellm-relay-ca.pem
+```
+
+The name constraints and the server-auth usage limit the CA to TLS server
+certificates for the hosts Relay intercepts by default (those domains and
+their subdomains), so macOS and OpenSSL reject anything it signs for another
+site. When the managed config adds hosts under `domains.ai`, add a
+`permitted;DNS:<domain>` entry for each one, or Relay's certificates for them
+fail to verify.
+
+Push `litellm-relay-ca.pem` as a certificate payload in a configuration
+profile (a Jamf Certificate payload, an Intune trusted certificate profile, or
+a Kandji Certificate Library Item), which macOS trusts without a sheet. Before
+the package installs, have an MDM script write both files to each user's
+`~/.litellm-relay/mitm` (or the `relay.mitm_ca_dir` the managed config sets),
+owned by that user and with the key at mode 0600. Never put the key in the
+package, since every account on the Mac can read its payload apart from
+`config.yaml`. The daemon uses
+the CA it finds there instead of generating one, and the install sees it is
+already trusted. The tradeoff is that one key signs for every Mac in the
+fleet, so whoever copies it from one Mac can intercept TLS to those hosts on
+all of them.
+Keep the per-device CA when that risk is not acceptable. Removing the profile
+removes its trust, while `--remove-ca-trust` only touches the login keychain.
 
 ## Offboarding / uninstall
 
@@ -115,6 +237,34 @@ PAC profile so macOS stops using Auto Proxy:
 ```bash
 /usr/local/litellm-relay/uninstall.sh --unset-system-proxy "Wi-Fi" --remove-data
 ```
+
+The uninstaller also boots out and removes the RelayBar LaunchAgent
+(`~/Library/LaunchAgents/ai.litellm.relaybar.plist`) when the package shipped
+the menu bar app, and the Claude Desktop LaunchDaemon with the root-owned copy
+of the binary it runs. The package payload at `/usr/local/litellm-relay`,
+RelayBarGlass.app included, is shared by every account on the Mac, so only a
+run as root (`sudo`, or an MDM script) without `--keep-bin` removes it and
+forgets the `ai.litellm.relay` receipt. A run as a user leaves the payload in
+place and prints one line saying an admin or MDM removes it with `sudo
+/usr/local/litellm-relay/uninstall.sh`. A payload that cannot be removed logs a
+warning, and the rest of the uninstall still runs.
+
+`--remove-ca-trust` removes every "LiteLLM Relay Local Root CA" certificate
+from the login keychain, including one a reinstall left behind, and its trust
+setting. A trusted one needs the account password in the Certificate Trust
+Settings sheet, which macOS shows only in the user's GUI session, so run that
+flag from a Terminal in that session. Over ssh or from an MDM script the trust
+change is denied, and the uninstaller prints the SHA-1 and trust state of each
+certificate that stayed, why, and one `security delete-certificate -Z <SHA-1>
+-t` command per certificate to finish from the session. Run as root, as an MDM
+script runs it, the uninstaller acts on the console user rather than root: it
+stops their LaunchAgents in their GUI domain and removes their plists, Relay
+data and shims. With `--remove-ca-trust` from a Terminal in their GUI session
+(`sudo` there), it reads and removes their login keychain certificates and
+trust settings as that user; over ssh or from an MDM script it declines as
+above. With nobody logged in at the console, a root run refuses and changes
+nothing, unless `RELAY_USER_HOME` names the home of the user to clean up
+(`sudo RELAY_USER_HOME=/Users/<name> /usr/local/litellm-relay/uninstall.sh`).
 
 ## Credential broker
 
@@ -193,9 +343,11 @@ that build like the installer's
 With an IdP configured, the first interactive request runs the browser sign-in
 from the daemon, exchanges the ID token for a Gateway session credential the
 way the older helpers did, and mints a Gateway key scoped to the device's team
-(`claude.team`, or `codex.team` when no Claude Code team is set; one key serves
-both clients, so give them the same team or expect spend under the Claude Code
-one) through `POST /key/generate` with a 60 minute duration and the alias
+(picked as [Environments and teams](#environments-and-teams) describes). One key
+serves every client, and each `relay onboard`, `relay onboard-codex`, and
+`relay onboard-claude-desktop` run with `--team` writes the device-wide
+`gateway.team`, so the latest one moves the spend of every tool to that team.
+The daemon mints it through `POST /key/generate` with a 60 minute duration and the alias
 `relay-<hostname>-<timestamp>`. The daemon extends that key at its half-life
 with `POST /key/update`, replaces an expired one on the next request, and
 deletes it on `relay sign-out` and when the daemon stops. Minting needs the
@@ -209,20 +361,104 @@ Without an IdP, the daemon serves `gateway.api_key` from `config.yaml` to the
 same allowed clients, so a static-key rollout gets the caller check too. The
 daemon re-reads `config.yaml` on the next request or tick after it changes, so
 a re-run of `relay autoconfigure` or `relay onboard` needs no daemon restart,
-and a changed IdP or Gateway signs the daemon out while a changed team only
-re-mints the key. A changed `credential.allowed_callers` list applies from the
-next request and leaves the key in place, so a client taken off the list is
-refused the next time it runs the helper
+and a changed IdP, or a `gateway.url` that moves anywhere but between two
+entries of the `environments` list, signs the daemon out, while a changed team
+or a move between two listed environments keeps the IdP session, deletes the
+key on the Gateway it leaves, and exchanges again on the next request without a
+browser. A changed `credential.allowed_callers`
+list applies from the next request and leaves the key in place, so a client
+taken off the list is refused the next time it runs the helper
 
 Claude Desktop runs the helper with `CLAUDE_HELPER_CONTEXT=background` or
 `scheduled-task` when nobody is at the keyboard; those requests never open a
 browser and answer `signed_out` until a developer runs the app interactively or
 `relay sign-in` from a terminal. `relay sign-in` always starts a fresh browser
-sign-in and `relay sign-out` deletes the key and forgets the session. The
-`broker` block of `/api/status` shows `signed_in`, `user_id`, `team`,
-`key_expires_at`, `key_extended_at`, the `source` of the last answer
-(`minted_key`, `session_credential`, `identity_token`, or `static_key`), and
-`refused_callers`, never a token
+sign-in and `relay sign-out` deletes the key and forgets the session. On a
+device that serves `gateway.api_key`, `relay sign-out` exits 0 and prints that
+the device uses a static Gateway key from `config.yaml` and nothing was signed
+out, both switches answer `static_key` with exit code 1 and change nothing, and
+RelayBar hides Sign out and the pickers there.
+`relay switch-team <team>` and `relay switch-environment <name>` move the
+daemon to another team or Gateway (see below) and print the outcome as one
+JSON line: `team`, `environment`, `gateway_url`, `key_expires_at`, and
+`source` on stdout when the switch went through, or
+`{"refused": "<reason>", "message": "..."}` on stderr with exit code 1 when it
+did not. The `broker` block of `/api/status` shows `signed_in`, `user_id`,
+`display_name` (from the ID token's `name`, `preferred_username`, or `email`),
+`team`, `environment`, `gateway_url`, `key_expires_at`, `key_extended_at`, the
+`source` of the last answer (`minted_key`, `session_credential`,
+`identity_token`, or `static_key`), and `refused_callers`, never a token
+
+The daemon also keeps an `account` block there. A plain read of `/api/status`
+opens a 10 minute watch, and `GET /api/status?passive=1` answers the same JSON
+without opening or extending it (RelayBar reads plainly every few seconds while
+its popover is open and passively while it is closed). While the watch is open,
+the daemon asks `GET <gateway.url>/health/liveliness` without a credential
+every 60 seconds, and every 300 seconds, plus once after a sign-in and after a
+switch, it reads `GET /user/info?user_id=<id>` and `GET /team/info?team_id=<team>`
+with the signed-in user's credential. A daemon nobody has read sends none of
+these, from the moment it starts, and one with no Gateway configured sends none
+at all. The read that opens the watch answers with the account not read yet,
+and the next 10 second tick fills it in. While an IdP daemon holds no session,
+because it is signed out or nobody signed in since it started, the account
+read sends no request at all, IdP discovery included, and only the liveliness
+probe runs. When the hour-long minted key has expired, the account read mints
+a new key with the held session first and then reads the account with it. A
+static key saved without a team reads its team from `GET /key/info`. The block
+shows `user` (`id`, `email`), `teams` (the `id` and `alias` of every team the
+user may attribute spend to, null until the first read), `teams_error`, `team`
+(the current team's `id`, `alias`, `spend`, `max_budget`, and `budget_reset_at`
+as the Gateway reports them, null when no team is selected), `key` (for a
+static key whose team is unknown, the key's own `spend`, `max_budget`, and
+`budget_reset_at` from `/key/info`, null in every other case), `budget_error`, `gateway` (`url`, `reachable`, `checked_at`,
+`error`), and `polled_at`. When `/user/info` fails or lists nothing, `teams`
+falls back to the current team alone and `teams_error` says why; when
+`/team/info` refuses the team, the budget comes from the `/user/info` entry and
+`budget_error` says why. When the Gateway cannot be reached, the last budget
+stays next to `budget_error`. `relay recheck` runs both reads and the probe now and
+prints the block as one JSON line, or `{"refused": "daemon_unavailable",
+"message": "..."}` on stderr with exit code 1 when the daemon is not running.
+The `environments` block of `/api/status` shows the `current` environment name
+and the `available` entries (`name`, `url`) from `config.yaml`. A
+`relay switch-team` to a team missing from a known list answers `unknown_team`
+with the known ids and changes nothing; with no list the Gateway decides
+
+### Environments and teams
+
+`environments` in `config.yaml` lists the Gateways a developer may switch
+between, each with a `name`, a `url`, and an optional `team` that is that
+Gateway's default team. The entry whose `url` equals `gateway.url` is the
+current one, and every entry shares the `idp` section, so one sign-in serves
+them all. The team the daemon mints keys for is `gateway.team` when set, else
+the current environment's `team`, else, on the first environment or a Gateway
+outside the list, `claude.team`, else `codex.team`, so a team picked on one
+environment never reaches another. `relay onboard`, `relay onboard-codex`,
+`relay onboard-claude-desktop`, and `relay setup` park `gateway.team` the way an
+environment switch does when they move `gateway.url` to another Gateway, and a
+`--team` given in the same command applies to the new one. They leave
+`claude.team` and `codex.team` as they are, so a move between two Gateways
+outside the list keeps those. A
+switch (`relay switch-team`, `relay switch-environment`, the MCP tools of the
+same names, or RelayBar) writes
+`gateway.url` and `gateway.team` back into `config.yaml`, where an environment
+switch keeps the team picked on the environment it leaves under
+`gateway.team_by_environment` and brings back the team picked on the new one,
+else that environment's default team applies, deletes the key on the Gateway it leaves, keeps the IdP session, and exchanges
+and mints again on the new Gateway or team without a browser. A switch the new
+Gateway refuses writes the previous values back and answers `switch_failed`
+with the Gateway's reason; a name missing from the list answers
+`unknown_environment` with the configured names. Without an `environments`
+list the daemon serves the one `gateway.url`, and `relay switch-team` still
+works against it. When the root Claude Desktop LaunchDaemon is installed, it
+watches `config.yaml` and rewrites Claude Desktop's managed settings within
+seconds of a switch, and Claude Desktop picks up the switch after it restarts.
+Until it restarts, Claude Desktop keeps calling the previous Gateway with the
+key its credential helper now gets for the new one, so its requests fail.
+Installing that daemon needs root, so it exists only after an admin ran
+`install.sh` with `sudo`, or after a `.pkg` install whose console user has
+passwordless `sudo`. Without it, nothing rewrites Claude Desktop's managed
+settings after a switch until `install.sh` or `relay onboard-claude-desktop`
+runs again with `sudo`
 
 ## Local inference proxy
 
@@ -241,8 +477,8 @@ user exactly as they do with `relay credential`
 
 A request with no proxy token, a wrong one, or two headers that disagree gets a
 401 before anything is sent to the Gateway, and so does every request after
-`relay sign-out`, a daemon restart, or a change to `credential.allowed_callers`,
-since each of those ends the token. Claude Code and Codex answer a 401 by
+`relay sign-out` on a device signed in through the IdP, a daemon restart, or a
+change to `credential.allowed_callers`, since each of those ends the token. Claude Code and Codex answer a 401 by
 running their helper again, which goes back through the caller check and signs
 in if needed. The
 proxy never opens a browser on its own. Connections that do not come from the
@@ -271,25 +507,34 @@ the signed-in user's credential against `<gateway.url>/mcp`. Calls therefore
 show on the Logs page under that user, and a client that is not an allowed
 caller gets `caller_refused` and nothing else
 
-The server exposes four tools. `search_tools(query)` answers from the daemon's
+The server exposes six tools. `search_tools(query)` answers from the daemon's
 in-memory catalog with at most five tool names from the servers the user
 activated, plus the names of inactive servers that have matching tools.
 `describe_tool(name)` returns the tool's description, input schema, upstream
 annotations, and its verdict. `call_tool(name, arguments)` runs the tool on the
 Gateway and returns its result unchanged. `activate_server(server)` makes a
-server's tools available for the rest of the signed-in session. The catalog is
-fetched when a session signs in and every five minutes after that, and dropped
-on sign-out
+server's tools available for the rest of the signed-in session.
+`switch_team(team)` and `switch_environment(environment)` move every client on
+the device to another team or Gateway, the same as `relay switch-team` and
+`relay switch-environment`: called without an argument they answer the current
+selection (`team`, `environment`, `gateway_url`, `teams`, `teams_error`, and
+`environments`) and ask nothing, and with one they run only after the user
+confirms the switch and answer the switch outcome plus the same selection. A
+blank team id, or one longer than 256 characters, answers `bad_request` and
+asks nothing. A team switch refetches the catalog at once so team-scoped servers show on the
+next call. The catalog is fetched when a session signs in and every five
+minutes after that, and dropped on sign-out
 
 Every catalog entry carries a verdict. A tool is allow only when its name says
 it reads (it starts with a word such as get, list, read, or search, contains no
 write word such as create, delete, or send, and its upstream annotations do not
 claim otherwise); everything else is ask. An allow tool runs with no prompt.
-An ask tool, and every `activate_server`, runs only after the user confirms it
-in the client: the daemon sends one question over the connection, `relay mcp`
-turns it into an MCP elicitation (a request of its own on a 2025 connection, an
-`input_required` tool result the client answers by retrying the call on a
-2026-07-28 one), and the client shows its own dialog. Claude
+An ask tool, every `activate_server`, and every switch with an argument runs
+only after the user confirms it in the client: the daemon sends one question
+over the connection, `relay mcp` turns it into an MCP elicitation (a request of
+its own on a 2025 connection, an `input_required` tool result the client
+answers by retrying the call on a 2026-07-28 one), and the client shows its
+own dialog. Claude
 Code shows a yes/no prompt naming the server, the tool, and the arguments, in
 its default and bypass modes alike, and answers cancel when it runs headless
 (`claude -p`). Codex shows a True/False dialog, where False and Esc both
@@ -314,9 +559,10 @@ On the broker plan (macOS) the writers register the server in each client and
 keep the client's own per-tool prompt out of the way, so the daemon's question
 is the one gate. Claude Code gets `mcpServers.litellm` (`type` `stdio`,
 `command` the Relay executable, `args` `["mcp"]`) in `~/.claude.json`, which
-is created as `{}` when missing, and the four rules `mcp__litellm__search_tools`,
-`mcp__litellm__describe_tool`, `mcp__litellm__call_tool`, and
-`mcp__litellm__activate_server` in `permissions.allow` of Claude Code's user
+is created as `{}` when missing, and the six rules `mcp__litellm__search_tools`,
+`mcp__litellm__describe_tool`, `mcp__litellm__call_tool`,
+`mcp__litellm__activate_server`, `mcp__litellm__switch_team`, and
+`mcp__litellm__switch_environment` in `permissions.allow` of Claude Code's user
 settings file (`settings.json` under `~/.claude`); other servers and rules are
 kept. Codex gets `[mcp_servers.litellm]` with `command`, `args = ["mcp"]`, and
 `default_tools_approval_mode = "approve"` in `~/.codex/config.toml`, next to

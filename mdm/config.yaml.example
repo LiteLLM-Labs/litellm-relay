@@ -5,6 +5,10 @@
 # ~/.litellm-relay/config.yaml with 0600 permissions and Relay reads it
 # when the LaunchAgent starts. Unset sections fall back to Relay defaults.
 #
+# Baked into the .pkg (build-macos-pkg.sh --config-file), this file lands at
+# /usr/local/litellm-relay/config.yaml owned by root with mode 0600, and the
+# postinstall hands the console user's install a private copy.
+#
 # Prefer browser SSO for developer Gateway auth. Only set gateway.api_key
 # here if your rollout uses a shared, non-user Gateway key, since this file
 # lands on every managed device.
@@ -14,9 +18,23 @@ relay:
   port: 4142
 
 gateway:
-  # Your LiteLLM AI Gateway base URL.
+  # Your LiteLLM AI Gateway base URL. With an environments list below, this
+  # is the current environment and a switch rewrites it.
   url: https://litellm-gateway.your-company.com
   # api_key: sk-...  # optional; omit to use per-user browser SSO
+  # team: eng-platform  # the team the daemon mints keys for; a team switch writes it
+
+# The Gateways a developer can switch between from RelayBar or an agent; the
+# one whose url equals gateway.url is current. All share the idp section. An
+# entry's team is that Gateway's default team until the developer picks one.
+# environments:
+#   - name: prod
+#     url: https://litellm-gateway.your-company.com
+#     team: eng-platform
+#   - name: uat
+#     url: https://litellm-gateway-uat.your-company.com
+#   - name: test
+#     url: https://litellm-gateway-test.your-company.com
 
 # Org IdP for the per-user OIDC sign-in (authorization code plus PKCE) that
 # Claude Code, Codex, and Claude Desktop use to reach the Gateway. Register
@@ -36,6 +54,8 @@ shadow:
 
 # Metadata-only by default. Enable payloads only if your policy allows it;
 # Relay still redacts headers and never logs cookies or authorization.
+# payloads: true is also what makes the managed install trust the Relay CA in
+# the user's login keychain, which asks the user for their account password.
 capture:
   payloads: false
   payload_preview_bytes: 0
