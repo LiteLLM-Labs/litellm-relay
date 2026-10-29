@@ -228,6 +228,7 @@ struct IdentityState {
     refreshes: u64,
     sign_in_delay: Duration,
     sign_ins_fail: bool,
+    refreshes_fail: bool,
 }
 
 #[derive(Clone)]
@@ -245,6 +246,7 @@ impl FakeIdentity {
                 refreshes: 0,
                 sign_in_delay: Duration::ZERO,
                 sign_ins_fail: false,
+                refreshes_fail: false,
             })),
         }
     }
@@ -259,6 +261,10 @@ impl FakeIdentity {
 
     pub(crate) fn fail_sign_ins(&self) {
         self.state.lock().unwrap().sign_ins_fail = true;
+    }
+
+    pub(crate) fn fail_refreshes(&self) {
+        self.state.lock().unwrap().refreshes_fail = true;
     }
 
     fn session(&self, serial: u64) -> Session {
@@ -287,11 +293,14 @@ impl IdentityProvider for FakeIdentity {
     }
 
     fn refresh(&self, _idp: &IdpSection, _refresh_token: &str) -> Result<Session> {
-        let serial = {
+        let (serial, fails) = {
             let mut state = self.state.lock().unwrap();
             state.refreshes += 1;
-            state.refreshes + 100
+            (state.refreshes + 100, state.refreshes_fail)
         };
+        if fails {
+            return Err(anyhow!("invalid_grant: the refresh token was revoked"));
+        }
         Ok(self.session(serial))
     }
 }

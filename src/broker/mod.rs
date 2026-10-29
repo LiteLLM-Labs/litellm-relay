@@ -692,8 +692,7 @@ impl Broker {
                 "sign-in needs an IdP; this device serves the configured Gateway key".to_string(),
             ));
         }
-        if let Some(reply) = self.signed_in_after_waiting(sign_ins_at_start, pending_page.is_some())
-        {
+        if let Some(reply) = self.signed_in_since(sign_ins_at_start) {
             return reply;
         }
         if pending_page.is_some() {
@@ -704,29 +703,21 @@ impl Broker {
         }
         self.forget(&target.gateway_url, true);
         match self.issue_under_renewal_lock(&target, Context::Interactive) {
-            Reply::Credential(_) => {
-                let mut state = self.lock_state();
-                state.completed_sign_ins += 1;
-                Reply::SignedIn {
-                    user_id: state
-                        .credential
-                        .as_ref()
-                        .and_then(|credential| credential.user_id.clone()),
-                }
-            }
+            Reply::Credential(_) => Reply::SignedIn {
+                user_id: self
+                    .lock_state()
+                    .credential
+                    .as_ref()
+                    .and_then(|credential| credential.user_id.clone()),
+            },
             other => other,
         }
     }
 
-    fn signed_in_after_waiting(
-        &self,
-        completed_sign_ins: u64,
-        joined_a_pending_page: bool,
-    ) -> Option<Reply> {
+    fn signed_in_since(&self, completed_sign_ins: u64) -> Option<Reply> {
         let state = self.lock_state();
         let another_sign_in_finished = state.completed_sign_ins != completed_sign_ins;
-        let waited_for_a_sign_in = another_sign_in_finished || joined_a_pending_page;
-        (waited_for_a_sign_in && state.session.is_some()).then(|| Reply::SignedIn {
+        (another_sign_in_finished && state.session.is_some()).then(|| Reply::SignedIn {
             user_id: state
                 .credential
                 .as_ref()
@@ -1046,6 +1037,17 @@ impl Broker {
     }
 
     fn issue_under_renewal_lock(&self, target: &Target, context: Context) -> Reply {
+        let reply = self.issue_from_session(target, context);
+        if matches!(
+            (context, &reply),
+            (Context::Interactive, Reply::Credential(_))
+        ) {
+            self.lock_state().completed_sign_ins += 1;
+        }
+        reply
+    }
+
+    fn issue_from_session(&self, target: &Target, context: Context) -> Reply {
         let Mode::Idp(idp) = &target.mode else {
             return self.issue(target, context);
         };
@@ -1869,6 +1871,36 @@ mod tests {
         assert!(matches!(joined, Reply::Refused(Refusal::SignInFailed(_))));
         assert_eq!(rig.identity.sign_ins(), 1);
         assert_eq!(rig.browser_opens(), 2);
+        assert!(!rig.broker.status().signed_in);
+    }
+
+    #[test]
+    fn should_refuse_a_joined_sign_in_when_a_credential_request_fails_the_page_on_a_stale_session()
+    {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        issued(credential(&rig, Context::Interactive));
+        rig.clock.advance(9 * 60 * MINUTE);
+        rig.auth.rotate();
+        rig.identity.fail_refreshes();
+        rig.identity.fail_sign_ins();
+        rig.identity.set_sign_in_delay(Duration::from_millis(600));
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let asking = thread::spawn(move || {
+            broker.handle(
+                Request::Credential {
+                    context: Context::Interactive,
+                },
+                peer,
+            )
+        });
+        thread::sleep(Duration::from_millis(200));
+
+        let joined = rig.broker.sign_in();
+
+        refused(asking.join().expect("credential"));
+        assert!(matches!(joined, Reply::Refused(Refusal::SignInFailed(_))));
+        assert_eq!(rig.identity.sign_ins(), 2);
         assert!(!rig.broker.status().signed_in);
     }
 
