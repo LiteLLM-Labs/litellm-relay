@@ -70,6 +70,7 @@ import Testing
         "gateway": {"url": "https://gateway.example.com", "reachable": false, "checked_at": null, "error": null},
         "polled_at": "2027-01-15T08:00:00Z"
       },
+      "key": {"spend": 3.5, "max_budget": 10.0, "budget_reset_at": "2027-02-01T00:00:00+00:00"},
       "environments": {"current": null, "available": []},
       "mcp": {"catalog_tools": null, "servers": {}}
     }
@@ -181,6 +182,7 @@ import Testing
                 gateway: GatewayProbe(url: "https://uat.example.com", reachable: false, checkedAt: "2027-01-15T07:59:30Z", error: "connection refused"),
                 polledAt: "2027-01-15T07:59:00Z"
             ),
+            key: nil,
             environments: EnvironmentsStatus(
                 current: "uat",
                 available: [EnvironmentEntry(name: "dev", url: "https://gateway.example.com"), EnvironmentEntry(name: "uat", url: "https://uat.example.com")]
@@ -211,6 +213,7 @@ import Testing
                 gateway: GatewayProbe(url: "https://gateway.example.com", reachable: true, checkedAt: "2027-01-15T08:00:05Z", error: "HTTP 503: warming up"),
                 polledAt: "2027-01-15T08:00:00Z"
             ),
+            key: nil,
             environments: EnvironmentsStatus(current: nil, available: []),
             mcp: McpStatus(catalogTools: 0, servers: [:])
         )
@@ -222,6 +225,21 @@ import Testing
         #expect(
             StatusFormatter.budgetLine(team: account.team, error: account.budgetError, polled: account.polledAt != nil, timeZone: .gmt)
                 == "$7.25 of $20.00, resets 1 Feb\nteam_id=team-a is not allowed to call /team/info"
+        )
+    }
+
+    @Test func decodesTheStaticKeyBudgetAndReadsAMissingOrNullKeyAsNone() throws {
+        #expect(try RelayStatus.decode(Data(Self.staticKey.utf8)).key == KeyBudget(spend: 3.5, maxBudget: 10, budgetResetAt: "2027-02-01T00:00:00+00:00"))
+        #expect(try RelayStatus.decode(Data(Self.signedIn.utf8)).key == nil)
+        #expect(try RelayStatus.decode(Data(#"{"listen": "127.0.0.1:4142", "key": null}"#.utf8)).key == nil)
+    }
+
+    @Test func showsTheStaticKeyBudgetFromADaemonStatusWhereNoTeamIsKnown() throws {
+        let status = try RelayStatus.decode(Data(Self.staticKey.utf8))
+        let account = try #require(status.account)
+        #expect(
+            StatusFormatter.budgetLine(team: account.team, key: status.key, error: account.budgetError, polled: account.polledAt != nil, timeZone: .gmt)
+                == "$3.50 of $10.00, resets 1 Feb"
         )
     }
 

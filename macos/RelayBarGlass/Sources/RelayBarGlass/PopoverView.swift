@@ -28,6 +28,8 @@ struct PopoverView: View {
         .frame(width: 400)
         .background(GlassBackground())
         .environment(\.colorScheme, .dark)
+        .onAppear { model.popoverOpened() }
+        .onDisappear { model.popoverClosed() }
     }
 
     private var header: some View {
@@ -113,7 +115,12 @@ struct PopoverView: View {
     private var accountCard: some View {
         let broker = model.status?.broker
         let account = model.status?.account
-        let budgetLine = StatusFormatter.budgetLine(team: account?.team, error: account?.budgetError, polled: account?.polledAt != nil)
+        let budgetLine = StatusFormatter.budgetLine(
+            team: account?.team,
+            key: model.status?.key,
+            error: account?.budgetError,
+            polled: account?.polledAt != nil
+        )
         let keyLine = StatusFormatter.keyLine(source: broker?.source, keyExpiresAt: model.keyExpiresAt, now: model.now)
         return VStack(alignment: .leading, spacing: 6) {
             iconLine("person.crop.circle", StatusFormatter.displayName(broker: broker, account: account), font: GlassTheme.label, color: GlassTheme.ink)

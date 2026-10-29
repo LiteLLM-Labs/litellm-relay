@@ -114,6 +114,21 @@ import Testing
         #expect(StatusFormatter.budgetLine(team: nil, error: nil, polled: true, timeZone: .gmt) == "No team picked")
     }
 
+    @Test func budgetLineShowsTheStaticKeyBudgetWhenNoTeamIsKnown() {
+        let capped = KeyBudget(spend: 3.5, maxBudget: 10, budgetResetAt: "2026-11-01T00:00:00Z")
+        #expect(StatusFormatter.budgetLine(team: nil, key: capped, error: nil, polled: true, timeZone: .gmt) == "$3.50 of $10.00, resets 1 Nov")
+        let noReset = KeyBudget(spend: 3.5, maxBudget: 10, budgetResetAt: nil)
+        #expect(StatusFormatter.budgetLine(team: nil, key: noReset, error: nil, polled: true, timeZone: .gmt) == "$3.50 of $10.00")
+        let uncapped = KeyBudget(spend: 3.5, maxBudget: nil, budgetResetAt: nil)
+        #expect(StatusFormatter.budgetLine(team: nil, key: uncapped, error: nil, polled: true, timeZone: .gmt) == "$3.50, no budget")
+        #expect(
+            StatusFormatter.budgetLine(team: nil, key: capped, error: "HTTP 403: not authorized", polled: true, timeZone: .gmt)
+                == "$3.50 of $10.00, resets 1 Nov\nHTTP 403: not authorized"
+        )
+        let team = TeamBudget(id: "team-a", alias: nil, spend: 1, maxBudget: 2, budgetResetAt: nil)
+        #expect(StatusFormatter.budgetLine(team: team, key: capped, error: nil, polled: true, timeZone: .gmt) == "$1.00 of $2.00")
+    }
+
     @Test func gatewayStateWaitsForTheFirstProbe() {
         let never = GatewayProbe(url: "https://gateway.example.com", reachable: false, checkedAt: nil, error: nil)
         let unprobed = GatewayProbe(url: "https://gateway.example.com", reachable: nil, checkedAt: nil, error: nil)

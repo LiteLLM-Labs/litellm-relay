@@ -105,6 +105,12 @@ console_user() {
   printf '%s\n' "$user"
 }
 
+user_home() {
+  dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null \
+    | awk 'NR == 1 && /^NFSHomeDirectory: / { print $2; exit } NR == 2 && /^ / { print substr($0, 2); exit }' \
+    || true
+}
+
 refuse_without_user() {
   cat >&2 <<REFUSE
 uninstall.sh is running as root and nobody is logged in at the console, so it
@@ -129,7 +135,7 @@ elif [[ -n "${RELAY_USER_HOME:-}" ]]; then
   RELAY_USER="$(stat -f%Su "$RELAY_USER_HOME")"
   RELAY_USER_UID="$(stat -f%u "$RELAY_USER_HOME")"
 elif RELAY_USER="$(console_user)"; then
-  RELAY_USER_HOME="$(dscl . -read "/Users/$RELAY_USER" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+  RELAY_USER_HOME="$(user_home "$RELAY_USER")"
   RELAY_USER_HOME="${RELAY_USER_HOME:-/Users/$RELAY_USER}"
   RELAY_USER_UID="$(id -u "$RELAY_USER")"
 else
@@ -418,14 +424,24 @@ if [[ "$REMOVE_DATA" == "1" ]]; then
   Relay data: $RELAY_HOME
 DONE
 else
+  if [[ -f "$0" ]]; then
+    UNINSTALL_COMMAND="$(printf '%q' "$0")"
+    CA_HINT="$UNINSTALL_COMMAND --remove-ca-trust  (from the GUI session)"
+    DATA_HINT="$UNINSTALL_COMMAND --remove-data"
+    PAC_HINT="$UNINSTALL_COMMAND --unset-system-proxy \"Wi-Fi\""
+  else
+    CA_HINT="delete \"$CA_LABEL\" from the login keychain in Keychain Access"
+    DATA_HINT="rm -rf $(printf '%q' "$RELAY_HOME")"
+    PAC_HINT="networksetup -setautoproxystate \"Wi-Fi\" off"
+  fi
   cat <<DONE
 
 Preserved:
   Relay data: $RELAY_HOME
 
 Optional cleanup:
-  Remove the Relay CA:   $0 --remove-ca-trust  (from the GUI session)
-  Remove Relay data:     $0 --remove-data
-  Disable system PAC:    $0 --unset-system-proxy "Wi-Fi"
+  Remove the Relay CA:   $CA_HINT
+  Remove Relay data:     $DATA_HINT
+  Disable system PAC:    $PAC_HINT
 DONE
 fi

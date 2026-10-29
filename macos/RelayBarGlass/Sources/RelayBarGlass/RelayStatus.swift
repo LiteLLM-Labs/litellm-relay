@@ -3,6 +3,7 @@ import Foundation
 struct RelayStatus: Decodable, Equatable {
     let broker: BrokerStatus?
     let account: AccountStatus?
+    let key: KeyBudget?
     let environments: EnvironmentsStatus?
     let mcp: McpStatus?
 
@@ -77,6 +78,18 @@ struct TeamBudget: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id
         case alias
+        case spend
+        case maxBudget = "max_budget"
+        case budgetResetAt = "budget_reset_at"
+    }
+}
+
+struct KeyBudget: Decodable, Equatable {
+    let spend: Double?
+    let maxBudget: Double?
+    let budgetResetAt: String?
+
+    enum CodingKeys: String, CodingKey {
         case spend
         case maxBudget = "max_budget"
         case budgetResetAt = "budget_reset_at"

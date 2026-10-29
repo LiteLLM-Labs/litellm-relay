@@ -47,6 +47,28 @@ import Testing
         _ = model
     }
 
+    @MainActor @Test func readsTheStatusPassivelyWhileThePopoverIsClosedAndPlainlyAsSoonAsItOpens() async throws {
+        let daemon = try StubDaemon(body: RelayStatusTests.signedIn)
+        defer { daemon.stop() }
+        let home = try TemporaryHome()
+        defer { home.remove() }
+        try home.writeRelayPort(daemon.port)
+
+        let model = AppModel(environment: [:], home: home.url, timing: quick)
+        #expect(await eventually(within: 3) { daemon.requestedPaths.count == 1 })
+        await model.poll()
+        #expect(daemon.requestedPaths == ["/api/status?passive=1", "/api/status?passive=1"])
+
+        model.popoverOpened()
+        #expect(await eventually(within: 3) { daemon.requestedPaths.count == 3 })
+        await model.poll()
+        #expect(daemon.requestedPaths.suffix(2) == ["/api/status", "/api/status"])
+
+        model.popoverClosed()
+        await model.poll()
+        #expect(daemon.requestedPaths.last == "/api/status?passive=1")
+    }
+
     @MainActor @Test func retriesASlowFirstPollBeforeCallingTheDaemonDown() async throws {
         let daemon = try StubDaemon(body: RelayStatusTests.signedIn, delays: [2])
         defer { daemon.stop() }
@@ -121,6 +143,23 @@ import Testing
         #expect(await eventually(within: 3) { !model.busy })
         #expect(model.errorMessage(for: .switchTeam) == "The Relay daemon did not answer within 0.5 s")
         #expect(await eventually(within: 10) { relay.pids(of: "switch-team").allSatisfy { !isAlive($0) } })
+    }
+
+    @MainActor @Test func killsATimedOutCommandThatIgnoresTheTerminateSignal() async throws {
+        let daemon = try StubDaemon(body: RelayStatusTests.signedIn)
+        defer { daemon.stop() }
+        let home = try TemporaryHome()
+        defer { home.remove() }
+        try home.writeRelayPort(daemon.port)
+        let relay = try home.stubRelay("trap '' TERM\nexec sleep 30")
+
+        let model = AppModel(environment: relay.environment, home: home.url, timing: AppTiming(pollInterval: 60, requestTimeout: 0.5, commandTimeout: 3))
+        model.run(.switchTeam("team-b"))
+        try #require(await eventually(within: 3) { relay.pids(of: "switch-team").count == 1 })
+        let stuck = relay.pids(of: "switch-team")[0]
+        #expect(await eventually(within: 10) { !model.busy })
+        #expect(model.errorMessage(for: .switchTeam) == "The Relay daemon did not answer within 3 s")
+        #expect(await eventually(within: 10) { !isAlive(stuck) })
     }
 
     @MainActor @Test func runsASignOutClickedWhileAnotherCommandRunsAndShowsItsFailure() async throws {

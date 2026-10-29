@@ -44,6 +44,7 @@ final class StubDaemon: @unchecked Sendable {
     private let delays: [TimeInterval]
     private let lock = NSLock()
     private var served = 0
+    private var paths: [String] = []
     private var stopped = false
 
     init(body: String, delays: [TimeInterval] = []) throws {
@@ -57,6 +58,12 @@ final class StubDaemon: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return served
+    }
+
+    var requestedPaths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths
     }
 
     func stop() {
@@ -92,30 +99,32 @@ final class StubDaemon: @unchecked Sendable {
 
     private func answer(_ client: Int32) {
         defer { close(client) }
-        guard readHeaders(client) else { return }
-        let (delay, body) = nextResponse()
+        guard let path = readRequestPath(client) else { return }
+        let (delay, body) = nextResponse(for: path)
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         let response = Data(head.utf8) + body
         _ = response.withUnsafeBytes { send(client, $0.baseAddress, response.count, 0) }
     }
 
-    private func readHeaders(_ client: Int32) -> Bool {
+    private func readRequestPath(_ client: Int32) -> String? {
         var received = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while received.range(of: Data("\r\n\r\n".utf8)) == nil {
             let count = recv(client, &buffer, buffer.count, 0)
-            guard count > 0 else { return false }
+            guard count > 0 else { return nil }
             received.append(contentsOf: buffer[0..<count])
         }
-        return true
+        let requestLine = String(decoding: received, as: UTF8.self).prefix { $0 != "\r" }
+        return requestLine.split(separator: " ").dropFirst().first.map(String.init) ?? ""
     }
 
-    private func nextResponse() -> (delay: TimeInterval, body: Data) {
+    private func nextResponse(for path: String) -> (delay: TimeInterval, body: Data) {
         lock.lock()
         defer { lock.unlock() }
         let index = served
         served += 1
+        paths.append(path)
         return (index < delays.count ? delays[index] : 0, body)
     }
 }
