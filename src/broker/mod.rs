@@ -472,6 +472,16 @@ impl GatewayPatch {
     }
 }
 
+fn switch_refusal(refusal: Refusal) -> Refusal {
+    match refusal {
+        Refusal::SignedOut(_) => Refusal::SignedOut(
+            "not signed in on this device; sign in first with `relay sign-in` or RelayBar's Sign in, then switch again"
+                .to_string(),
+        ),
+        other => Refusal::SwitchFailed(other.message().to_string()),
+    }
+}
+
 fn static_key_refusal(action: &str) -> Refusal {
     Refusal::StaticKey(format!(
         "{action} needs an IdP, and this device serves the static Gateway key from gateway.api_key in {}; delete gateway.api_key there to stop using it",
@@ -731,7 +741,7 @@ impl Broker {
             Err(refusal) => return Reply::Refused(refusal),
         };
         if settings.managed_team().as_deref() == Some(team) {
-            return Reply::Switched(self.switched());
+            return self.switched_in_place();
         }
         let previous = GatewayPatch::Team(settings.gateway.team.clone());
         self.apply_switch(
@@ -762,7 +772,7 @@ impl Broker {
             .current_environment()
             .is_some_and(|current| current.name == entry.name)
         {
-            return Reply::Switched(self.switched());
+            return self.switched_in_place();
         }
         let parked = &settings.gateway.team_by_environment;
         let leaving = settings
@@ -839,13 +849,15 @@ impl Broker {
             eprintln!("broker: the previous config could not be restored: {error:#}");
         }
         self.refresh();
-        Reply::Refused(match refusal {
-            Refusal::SignedOut(_) => Refusal::SignedOut(
-                "not signed in on this device; sign in first with `relay sign-in` or RelayBar's Sign in, then switch again"
-                    .to_string(),
-            ),
-            other => Refusal::SwitchFailed(other.message().to_string()),
-        })
+        Reply::Refused(switch_refusal(refusal))
+    }
+
+    fn switched_in_place(&self) -> Reply {
+        let target = self.lock_target().clone();
+        match self.issue(&target, Context::NonInteractive) {
+            Reply::Refused(refusal) => Reply::Refused(switch_refusal(refusal)),
+            _ => Reply::Switched(self.switched()),
+        }
     }
 
     fn switched(&self) -> Switched {
@@ -2450,6 +2462,26 @@ mod tests {
         let status = rig.broker.status();
         assert_eq!(status.team.as_deref(), Some("team-a"));
         assert_eq!(status.environment.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn should_refuse_a_signed_out_switch_to_the_current_team_or_environment() {
+        let rig = Rig::new(environments_settings());
+        let version = rig.settings.version();
+        for refusal in [
+            refused(switch_team(&rig, "team-a")),
+            refused(switch_environment(&rig, "prod")),
+        ] {
+            assert_eq!(refusal.reason(), "signed_out");
+            assert!(
+                refusal.message().contains("sign in first"),
+                "{}",
+                refusal.message()
+            );
+        }
+        assert_eq!(rig.settings.version(), version);
+        assert_eq!(rig.browser_opens(), 0);
+        assert_eq!(rig.keys.mints().len(), 0);
     }
 
     #[test]
