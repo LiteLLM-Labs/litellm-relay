@@ -81,7 +81,7 @@ pub fn onboard_desktop(params: OnboardDesktopParams) -> Result<()> {
 fn onboard_desktop_with(params: OnboardDesktopParams, daemon: &dyn DaemonHost) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
-        settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
+        settings.move_gateway_to(&gateway_url);
     }
     let saved_key_use = saved_key_use(params.api_key.as_deref(), params.saved_key_refused);
     if let Some(api_key) = params.api_key {

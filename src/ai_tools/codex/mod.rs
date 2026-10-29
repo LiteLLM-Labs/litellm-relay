@@ -94,7 +94,7 @@ pub fn onboard(params: CodexOnboardParams) -> Result<()> {
 fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
-        settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
+        settings.move_gateway_to(&gateway_url);
     }
     settings.idp.apply(&params.idp);
     if let Some(model) = params.model {
@@ -727,6 +727,66 @@ trust_level = \"trusted\" # inline comment
         seeded.unwrap();
         onboarded.unwrap();
         assert_eq!(saved.unwrap().managed_team().as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn should_park_the_team_of_the_gateway_an_onboard_moves_away_from() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = env::temp_dir().join(format!("relay-codex-move-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let old_home = env::var_os("HOME");
+        env::set_var("HOME", &home);
+        let mut on_prod = settings_with_team(None);
+        on_prod.gateway.url = "https://prod.example.com".into();
+        on_prod.gateway.team = Some("prod-picked-team".into());
+        on_prod.environments = vec![
+            crate::config::EnvironmentEntry {
+                name: "prod".into(),
+                url: "https://prod.example.com".into(),
+                team: None,
+            },
+            crate::config::EnvironmentEntry {
+                name: "uat".into(),
+                url: "https://uat.example.com".into(),
+                team: Some("uat-default".into()),
+            },
+        ];
+        let move_to = |url: &str, team: Option<&str>| {
+            onboard_with(
+                CodexOnboardParams {
+                    gateway_url: Some(url.into()),
+                    team: team.map(str::to_string),
+                    quiet: true,
+                    ..CodexOnboardParams::default()
+                },
+                &FakeHost::answering(),
+            )
+            .and_then(|_| load_settings())
+            .map(|saved| saved.managed_team())
+        };
+
+        let seeded = save_settings(&on_prod);
+        let on_uat = move_to("https://uat.example.com/", None);
+        let back_on_prod = move_to("https://prod.example.com", None);
+        let on_uat_with_a_team = move_to("https://uat.example.com", Some("uat-eng"));
+        let back_on_prod_again = move_to("https://prod.example.com", None);
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).unwrap();
+        seeded.unwrap();
+        assert_eq!(on_uat.unwrap().as_deref(), Some("uat-default"));
+        assert_eq!(back_on_prod.unwrap().as_deref(), Some("prod-picked-team"));
+        assert_eq!(on_uat_with_a_team.unwrap().as_deref(), Some("uat-eng"));
+        assert_eq!(
+            back_on_prod_again.unwrap().as_deref(),
+            Some("prod-picked-team")
+        );
     }
 
     #[test]

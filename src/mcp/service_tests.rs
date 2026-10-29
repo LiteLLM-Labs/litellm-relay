@@ -593,6 +593,38 @@ async fn should_list_the_selection_without_asking_when_a_switch_tool_has_no_argu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn should_refuse_a_blank_or_overlong_team_without_asking_even_with_no_known_team_list() {
+    let upstream = FakeUpstream::serving(tools());
+    let switcher = FakeSwitcher::knowing_no_teams();
+    let (rig, service) = service_with(static_key_settings("sk-static"), &upstream, &switcher);
+    for team in [String::new(), "   ".to_string(), "t".repeat(257)] {
+        let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+        let refused = ask(
+            &rig,
+            &service,
+            json!({"op": "switch_team", "team": team}),
+            &mut accepting,
+        )
+        .await;
+        assert_eq!(reason(refused), "bad_request", "{team:?}");
+        assert!(accepting.questions.is_empty(), "{team:?}");
+    }
+    assert!(switcher.switches().is_empty());
+
+    let longest = "t".repeat(256);
+    let mut accepting = FakeAsker::answering(&[Answer::Accept]);
+    ask(
+        &rig,
+        &service,
+        json!({"op": "switch_team", "team": longest}),
+        &mut accepting,
+    )
+    .await
+    .expect("a 256 character team id is allowed");
+    assert_eq!(switcher.switches(), vec![("team".to_string(), longest)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn should_switch_the_team_only_after_a_confirmation_and_refetch_the_catalog_at_once() {
     let upstream = FakeUpstream::serving(tools());
     let switcher = FakeSwitcher::default();

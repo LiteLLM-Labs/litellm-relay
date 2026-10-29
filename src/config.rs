@@ -55,7 +55,10 @@ pub struct RelaySettings {
     pub codex: CodexSection,
     pub credential: CredentialSection,
     pub mcp: McpSection,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        deserialize_with = "environments_without_malformed_entries",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub environments: Vec<EnvironmentEntry>,
 }
 
@@ -65,6 +68,179 @@ pub struct EnvironmentEntry {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+}
+
+fn environments_without_malformed_entries<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<EnvironmentEntry>, D::Error> {
+    deserializer.deserialize_any(EnvironmentsVisitor)
+}
+
+struct EnvironmentsVisitor;
+
+impl<'de> serde::de::Visitor<'de> for EnvironmentsVisitor {
+    type Value = Vec<EnvironmentEntry>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a list of environments")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut entries = Vec::new();
+        let mut position = 0;
+        while let Some(slot) = seq.next_element::<EnvironmentSlot>()? {
+            position += 1;
+            match slot {
+                EnvironmentSlot::Entry(entry) => entries.push(entry),
+                EnvironmentSlot::Malformed { name, problem } => {
+                    let named = name.map_or_else(String::new, |name| format!(" ({name})"));
+                    eprintln!("config: skipped environments entry {position}{named}: {problem}");
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map
+            .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+            .is_some()
+        {}
+        Ok(skipped_environments())
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(skipped_environments())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(skipped_environments())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(skipped_environments())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(skipped_environments())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(skipped_environments())
+    }
+}
+
+fn skipped_environments() -> Vec<EnvironmentEntry> {
+    eprintln!("config: skipped environments: it is not a list of entries with a name and a url");
+    Vec::new()
+}
+
+enum EnvironmentSlot {
+    Entry(EnvironmentEntry),
+    Malformed {
+        name: Option<String>,
+        problem: &'static str,
+    },
+}
+
+const NOT_AN_ENTRY: &str = "it is not an entry with a name and a url";
+
+impl EnvironmentSlot {
+    fn not_an_entry() -> Self {
+        Self::Malformed {
+            name: None,
+            problem: NOT_AN_ENTRY,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvironmentSlot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(EnvironmentSlotVisitor)
+    }
+}
+
+struct EnvironmentSlotVisitor;
+
+impl<'de> serde::de::Visitor<'de> for EnvironmentSlotVisitor {
+    type Value = EnvironmentSlot;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str(NOT_AN_ENTRY)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let (mut name, mut url, mut team) = (None, None, None);
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "name" => name = map.next_value::<Option<String>>()?,
+                "url" => url = map.next_value::<Option<String>>()?,
+                "team" => team = map.next_value::<Option<String>>()?,
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(match (name, url) {
+            (Some(name), Some(url)) => EnvironmentSlot::Entry(EnvironmentEntry { name, url, team }),
+            (Some(name), None) => EnvironmentSlot::Malformed {
+                name: Some(name),
+                problem: "it has no url",
+            },
+            (None, _) => EnvironmentSlot::Malformed {
+                name: None,
+                problem: "it has no name",
+            },
+        })
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(EnvironmentSlot::not_an_entry())
+    }
 }
 
 fn without_trailing_slash(url: &str) -> &str {
@@ -97,6 +273,35 @@ impl RelaySettings {
 
     pub fn environment_named(&self, name: &str) -> Option<&EnvironmentEntry> {
         self.environments.iter().find(|entry| entry.name == name)
+    }
+
+    pub fn move_gateway_to(&mut self, url: &str) {
+        let url = url.trim().trim_end_matches('/').to_string();
+        if without_trailing_slash(self.gateway.url.trim()) == url {
+            self.gateway.url = url;
+            return;
+        }
+        let leaving = self
+            .current_environment()
+            .map(|current| current.name.clone())
+            .zip(non_empty(self.gateway.team.as_deref()).map(str::to_string));
+        let arriving = self
+            .environment_with_url(&url)
+            .map(|entry| entry.name.clone());
+        let parked = &self.gateway.team_by_environment;
+        let team = arriving.as_ref().and_then(|name| parked.get(name)).cloned();
+        let team_by_environment = parked
+            .iter()
+            .filter(|(name, _)| Some(*name) != arriving.as_ref())
+            .map(|(name, team)| (name.clone(), team.clone()))
+            .chain(leaving)
+            .collect();
+        self.gateway = GatewaySection {
+            url,
+            team,
+            team_by_environment,
+            ..self.gateway.clone()
+        };
     }
 
     pub fn managed_team(&self) -> Option<String> {
@@ -692,21 +897,40 @@ fn save_settings_to(path: &Path, settings: &RelaySettings) -> Result<()> {
     if is_saved_owner_only(path, &contents) {
         return Ok(());
     }
+    let path = save_target(path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let staged = staged_path(path);
-    let written = write_owner_only(&staged, &contents)
-        .and_then(|()| keep_owner(path, &staged))
-        .and_then(|()| {
-            fs::rename(&staged, path)
-                .with_context(|| format!("failed to replace {}", path.display()))
-        });
+    let owner = owner_to_restore(&path)?;
+    let staged = staged_path(&path);
+    let written = write_owner_only(&staged, &contents, owner).and_then(|()| {
+        fs::rename(&staged, &path).with_context(|| format!("failed to replace {}", path.display()))
+    });
     if written.is_err() {
         let _ = fs::remove_file(&staged);
     }
     written
+}
+
+#[cfg(unix)]
+fn save_target(path: &Path) -> PathBuf {
+    let is_link =
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    if running_as_root() || !is_link {
+        return path.to_path_buf();
+    }
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(not(unix))]
+fn save_target(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
 }
 
 fn staged_path(path: &Path) -> PathBuf {
@@ -716,27 +940,33 @@ fn staged_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
+#[derive(Clone, Copy)]
+struct Owner {
+    uid: u32,
+    gid: u32,
+}
+
 #[cfg(unix)]
-fn keep_owner(path: &Path, staged: &Path) -> Result<()> {
+fn owner_to_restore(path: &Path) -> Result<Option<Owner>> {
     use std::os::unix::fs::MetadataExt;
+    if !running_as_root() {
+        return Ok(None);
+    }
     let owner = fs::symlink_metadata(path)
         .or_else(|_| fs::metadata(path.parent().unwrap_or(Path::new("."))))
         .with_context(|| format!("failed to read the owner of {}", path.display()))?;
-    let made =
-        fs::metadata(staged).with_context(|| format!("failed to read {}", staged.display()))?;
-    if (made.uid(), made.gid()) == (owner.uid(), owner.gid()) {
-        return Ok(());
-    }
-    std::os::unix::fs::chown(staged, Some(owner.uid()), Some(owner.gid()))
-        .with_context(|| format!("failed to give {} its owner back", path.display()))
+    Ok(Some(Owner {
+        uid: owner.uid(),
+        gid: owner.gid(),
+    }))
 }
 
 #[cfg(not(unix))]
-fn keep_owner(_path: &Path, _staged: &Path) -> Result<()> {
-    Ok(())
+fn owner_to_restore(_path: &Path) -> Result<Option<Owner>> {
+    Ok(None)
 }
 
-fn write_owner_only(path: &Path, contents: &str) -> Result<()> {
+fn write_owner_only(path: &Path, contents: &str, owner: Option<Owner>) -> Result<()> {
     use std::io::Write;
     let _ = fs::remove_file(path);
     let mut options = fs::OpenOptions::new();
@@ -749,6 +979,11 @@ fn write_owner_only(path: &Path, contents: &str) -> Result<()> {
     let mut file = options
         .open(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
+    #[cfg(unix)]
+    if let Some(Owner { uid, gid }) = owner {
+        std::os::unix::fs::fchown(&file, Some(uid), Some(gid))
+            .with_context(|| format!("failed to give {} its owner back", path.display()))?;
+    }
     file.write_all(contents.as_bytes())
         .and_then(|()| file.sync_all())
         .with_context(|| format!("failed to write {}", path.display()))
@@ -1607,6 +1842,126 @@ codex:
         fs::remove_dir_all(&dir).expect("cleanup");
 
         assert_eq!(after_unchanged, long_ago);
+        assert_eq!(reread.gateway.team.as_deref(), Some("another-team"));
+    }
+
+    #[test]
+    fn should_load_a_config_with_malformed_environments_and_skip_only_the_bad_entries() {
+        let bad_entries = r#"
+gateway:
+  url: https://uat.example.com
+  team: picked
+environments:
+  - name: prod
+  - just-a-name
+  - url: https://nameless.example.com
+  - name: uat
+    url: https://uat.example.com
+    team: 1234
+"#;
+        let not_a_list =
+            "gateway:\n  url: https://uat.example.com\n  team: picked\nenvironments: prod\n";
+
+        let entries = parse_settings(bad_entries).expect("bad entries load");
+        let scalar = parse_settings(not_a_list).expect("a scalar environments loads");
+
+        assert_eq!(
+            entries.environments,
+            vec![EnvironmentEntry {
+                name: "uat".into(),
+                url: "https://uat.example.com".into(),
+                team: Some("1234".into()),
+            }]
+        );
+        assert_eq!(entries.gateway.team.as_deref(), Some("picked"));
+        assert!(scalar.environments.is_empty());
+        assert_eq!(scalar.gateway.team.as_deref(), Some("picked"));
+        assert!(parse_settings("environments:\n")
+            .expect("null environments")
+            .environments
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    fn moved_team(settings: &RelaySettings) -> RelaySettings {
+        let mut moved = settings.clone();
+        moved.gateway.team = Some("another-team".into());
+        moved
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_save_through_a_symlinked_config_yaml_and_keep_the_link() {
+        if running_as_root() {
+            eprintln!("skipped: a root save never follows a config.yaml link");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("relay-config-link-{}", uuid::Uuid::new_v4()));
+        let target = dir.join("dotfiles").join("relay.yaml");
+        let path = dir.join("relay").join("config.yaml");
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        save_settings_to(&target, &settings).expect("target save");
+        fs::create_dir_all(dir.join("relay")).expect("relay dir");
+        std::os::unix::fs::symlink(&target, &path).expect("link");
+
+        save_settings_to(&path, &moved_team(&settings)).expect("save through the link");
+        let still_a_link = fs::symlink_metadata(&path)
+            .expect("link metadata")
+            .file_type()
+            .is_symlink();
+        let at_target: RelaySettings =
+            parse_settings(&fs::read_to_string(&target).expect("read target")).expect("parse");
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert!(still_a_link);
+        assert_eq!(at_target.gateway.team.as_deref(), Some("another-team"));
+    }
+
+    #[cfg(unix)]
+    fn user_groups() -> Vec<u32> {
+        let output = std::process::Command::new("id")
+            .arg("-G")
+            .output()
+            .expect("id -G");
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .filter_map(|group| group.parse().ok())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_save_a_config_yaml_whose_group_the_user_is_not_in() {
+        use std::os::unix::fs::MetadataExt;
+        let root_group_tmp = Path::new("/private/tmp");
+        if running_as_root() || !root_group_tmp.is_dir() {
+            eprintln!("skipped: needs a non-root user and /private/tmp");
+            return;
+        }
+        let seeded_dir = root_group_tmp.join(format!("relay-config-gid-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("relay-config-gid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&seeded_dir).expect("seeded dir");
+        fs::create_dir_all(&dir).expect("config dir");
+        let seeded = seeded_dir.join("config.yaml");
+        let path = dir.join("config.yaml");
+        let settings: RelaySettings = parse_settings(THREE_ENVIRONMENTS).expect("settings");
+        fs::write(&seeded, settings_yaml(&settings).expect("yaml")).expect("seed");
+        let foreign_gid = fs::metadata(&seeded).expect("seeded metadata").gid();
+        let moved_in = fs::rename(&seeded, &path).is_ok();
+        let dir_gid = fs::metadata(&dir).expect("dir metadata").gid();
+        let _ = fs::remove_dir_all(&seeded_dir);
+        if !moved_in || foreign_gid == dir_gid || user_groups().contains(&foreign_gid) {
+            let _ = fs::remove_dir_all(&dir);
+            eprintln!("skipped: no group outside the user's groups to test with");
+            return;
+        }
+
+        let saved = save_settings_to(&path, &moved_team(&settings));
+        let reread: RelaySettings =
+            parse_settings(&fs::read_to_string(&path).expect("read")).expect("parse");
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        saved.expect("save");
         assert_eq!(reread.gateway.team.as_deref(), Some("another-team"));
     }
 

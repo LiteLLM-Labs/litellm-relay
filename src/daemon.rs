@@ -48,8 +48,17 @@ impl Daemon {
     }
 
     fn unknown_team(&self, team: &str) -> Option<Refusal> {
+        let listed = |known: &[String]| known.iter().any(|id| id == team);
+        if self
+            .account
+            .known_teams()
+            .is_none_or(|known| listed(&known))
+        {
+            return None;
+        }
+        self.account.recheck();
         let known = self.account.known_teams()?;
-        (!known.iter().any(|id| id == team)).then(|| {
+        (!listed(&known)).then(|| {
             Refusal::UnknownTeam(format!(
                 "no team {team:?} for this user; the known teams are {}",
                 known.join(", ")
@@ -170,7 +179,7 @@ mod tests {
         assert_eq!(rig.keys.mints().len(), 1);
         assert!(rig.keys.deletes().is_empty());
         assert_eq!(rig.broker.status().team.as_deref(), Some("team-a"));
-        assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
         assert_eq!(
             daemon
                 .team_refusal("team-z")
@@ -178,6 +187,34 @@ mod tests {
             Some("unknown_team")
         );
         assert_eq!(daemon.team_refusal("team-b"), None);
+    }
+
+    #[test]
+    fn should_recheck_the_account_once_and_switch_to_a_team_the_gateway_just_added() {
+        let (rig, http, _account, daemon) = daemon_on(idp_settings(Some("team-a")));
+        assert!(matches!(
+            daemon.handle(Request::SignIn, rig.peer()),
+            Reply::SignedIn { .. }
+        ));
+        http.answer(
+            "/user/info?user_id=user-1",
+            200,
+            r#"{"user_id":"user-1","teams":[{"team_id":"team-a"},{"team_id":"team-c"}]}"#,
+        );
+
+        let reply = daemon.handle(
+            Request::SwitchTeam {
+                team: "team-c".to_string(),
+            },
+            rig.peer(),
+        );
+
+        assert!(matches!(reply, Reply::Switched(_)), "{reply:?}");
+        assert_eq!(rig.broker.status().team.as_deref(), Some("team-c"));
+        assert_eq!(
+            rig.keys.mints().last().map(|mint| mint.team.clone()),
+            Some("team-c".to_string())
+        );
     }
 
     #[test]

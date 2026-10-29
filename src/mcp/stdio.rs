@@ -186,7 +186,7 @@ pub fn meta_tools() -> Vec<Tool> {
         )),
         Tool::new(
             "switch_environment",
-            "Point Claude Code, Codex, and the local inference proxy at another configured Gateway environment at once, keeping the sign-in; Claude Desktop follows after it restarts only where the .pkg or a sudo install added Relay's root Claude Desktop agent, and elsewhere keeps the previous Gateway. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
+            "Point Claude Code, Codex, and the local inference proxy at another configured Gateway environment at once, keeping the sign-in. Claude Desktop's requests fail after the switch until it restarts, and a restart moves it to the new Gateway only where the .pkg or a sudo install added Relay's root Claude Desktop agent; elsewhere `relay onboard-claude-desktop` must run again with sudo before the restart. A call without an argument lists the current environment and the configured environments with their URLs, and asks nothing. With environment set, the user confirms the switch in a dialog; a declined or cancelled confirmation switches nothing. The result carries the new environment and Gateway URL plus the same selection.",
             schema(
                 json!({"environment": {"type": "string", "description": "The environment name to switch to, as listed under environments by a call without an argument"}}),
                 &[],
@@ -485,7 +485,7 @@ impl ServerHandler for RelayServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Tools on the LiteLLM Gateway, reached through the Relay daemon under the signed-in user. Start with search_tools, read describe_tool before call_tool, and activate a server named under inactive_servers with activate_server when its tools are needed.",
+                "Tools on the LiteLLM Gateway, reached through the Relay daemon under the signed-in user. Start with search_tools, read describe_tool before call_tool, and activate a server named under inactive_servers with activate_server when its tools are needed. Use switch_team and switch_environment to list or change the team and the Gateway every client on the device uses.",
             )
     }
 
@@ -935,7 +935,8 @@ mod tests {
             .unwrap();
         assert!(!environment.contains("every client"), "{environment}");
         assert!(
-            environment.contains("Claude Desktop follows after it restarts only where"),
+            environment
+                .contains("Claude Desktop's requests fail after the switch until it restarts"),
             "{environment}"
         );
         let _ = client

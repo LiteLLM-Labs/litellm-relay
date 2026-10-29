@@ -49,7 +49,7 @@ pub async fn run_setup(gateway_url: Option<String>, api_key: Option<String>) -> 
 
     println!();
     print_step(3, 4, "Save local Relay config");
-    settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
+    settings.move_gateway_to(&gateway_url);
     settings
         .gateway
         .enroll(api_key.trim().to_string(), expires_at);

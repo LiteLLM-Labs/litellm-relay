@@ -91,6 +91,13 @@ struct Budget {
     budget_reset_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct KeyBudget {
+    spend: f64,
+    max_budget: Option<f64>,
+    budget_reset_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reachability {
     url: String,
@@ -108,12 +115,13 @@ struct AccountState {
     user_email: Option<String>,
     budget: Option<Budget>,
     budget_error: Option<String>,
+    key_budget: Option<KeyBudget>,
     gateway: Option<Reachability>,
     polled_at: Option<i64>,
     account_checked_at: Option<i64>,
     settings_version: Option<SettingsVersion>,
     environments: Vec<EnvironmentEntry>,
-    watched_until: i64,
+    watched_until: Option<i64>,
 }
 
 impl AccountState {
@@ -124,6 +132,7 @@ impl AccountState {
         self.user_email = None;
         self.budget = None;
         self.budget_error = None;
+        self.key_budget = None;
         self.polled_at = None;
     }
 }
@@ -137,7 +146,6 @@ pub struct AccountService {
 
 impl AccountService {
     pub fn new(broker: Arc<Broker>, deps: AccountDependencies) -> Self {
-        let watched_until = deps.clock.now() + WATCH_SECONDS;
         Self {
             broker,
             deps,
@@ -150,12 +158,13 @@ impl AccountService {
                 user_email: None,
                 budget: None,
                 budget_error: None,
+                key_budget: None,
                 gateway: None,
                 polled_at: None,
                 account_checked_at: None,
                 settings_version: None,
                 environments: Vec::new(),
-                watched_until,
+                watched_until: None,
             }),
             pass: Mutex::new(()),
         }
@@ -164,7 +173,11 @@ impl AccountService {
     pub fn poll(&self) {
         let _pass = self.lock_pass();
         let now = self.deps.clock.now();
-        if now > self.lock_state().watched_until {
+        if self
+            .lock_state()
+            .watched_until
+            .is_none_or(|until| now > until)
+        {
             return;
         }
         let broker = self.broker.status();
@@ -212,9 +225,13 @@ impl AccountService {
     }
 
     pub fn status(&self) -> Value {
+        self.lock_state().watched_until = Some(self.deps.clock.now() + WATCH_SECONDS);
+        self.passive_status()
+    }
+
+    pub fn passive_status(&self) -> Value {
         let broker = self.broker.status();
-        let mut state = self.lock_state();
-        state.watched_until = self.deps.clock.now() + WATCH_SECONDS;
+        let state = self.lock_state();
         let session = (state.identity == identity_of(&broker)).then_some(&*state);
         let probed = probed_gateway(&state, &broker.gateway_url);
         let known_teams = session.and_then(|session| session.teams.as_ref());
@@ -251,6 +268,11 @@ impl AccountService {
             "teams": teams,
             "teams_error": session.and_then(|session| session.teams_error.as_ref()),
             "team": team,
+            "key": session.and_then(|session| session.key_budget.as_ref()).map(|key| json!({
+                "spend": key.spend,
+                "max_budget": key.max_budget,
+                "budget_reset_at": key.budget_reset_at,
+            })),
             "budget_error": session.and_then(|session| session.budget_error.as_ref()),
             "gateway": {
                 "url": broker.gateway_url,
@@ -327,8 +349,9 @@ impl AccountService {
                 Err("this key belongs to no Gateway user, so it has no teams to list".to_string())
             }
         };
-        let key_team = static_key.team_id.filter(|_| broker.team.is_none());
+        let key_team = static_key.team_id.clone().filter(|_| broker.team.is_none());
         let team = broker.team.as_deref().or(key_team.as_deref());
+        let key_budget = team.is_none().then(|| static_key.budget()).flatten();
         let previous = self.previous_budget(&bearer.identity, team);
         let (teams, teams_error) = teams_from(&user, team);
         let (budget, budget_error) = match team {
@@ -344,6 +367,7 @@ impl AccountService {
         state.user_email = user.ok().and_then(|info| info.email);
         state.budget = budget;
         state.budget_error = budget_error;
+        state.key_budget = key_budget;
         state.polled_at = Some(now);
         state.account_checked_at = Some(now);
     }
@@ -483,6 +507,22 @@ struct KeyInfo {
     user_id: Option<String>,
     #[serde(default)]
     team_id: Option<String>,
+    #[serde(default)]
+    spend: Option<f64>,
+    #[serde(default)]
+    max_budget: Option<f64>,
+    #[serde(default)]
+    budget_reset_at: Option<String>,
+}
+
+impl KeyInfo {
+    fn budget(&self) -> Option<KeyBudget> {
+        (self.spend.is_some() || self.max_budget.is_some()).then(|| KeyBudget {
+            spend: self.spend.unwrap_or(0.0),
+            max_budget: self.max_budget,
+            budget_reset_at: self.budget_reset_at.clone(),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -537,6 +577,7 @@ fn parse_key_info(answer: HttpAnswer) -> Result<KeyInfo, String> {
     Ok(KeyInfo {
         user_id: present(body.info.user_id),
         team_id: present(body.info.team_id),
+        ..body.info
     })
 }
 

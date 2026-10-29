@@ -24,17 +24,18 @@ use uuid::Uuid;
 use crate::{
     account::AccountService,
     apps::{classify_app_attribution, known_apps, AppAttribution},
-    broker::Broker,
+    broker::{Broker, BrokerStatus},
     cert::{client_tls_config, ensure_ca, server_tls_config, trust_command, CaTrust, UserCaTrust},
     config::{is_ai_host, is_notion_host, RelayConfig},
     events::{append_event, clear_events, read_events},
-    gateway::{CaptureIngest, GatewayClient, IngestResult},
+    gateway::{CaptureIngest, CredentialStatus, GatewayClient, IngestResult},
     http::{
-        build_http_payload, build_metadata_only_http_payload, copy_bidirectional_counted,
-        parse_connect_target, parse_limit, parse_request_line, parse_response_status, parse_route,
-        parse_start_line, read_http_body, read_http_head, read_http_message, read_until_headers,
-        redact_headers, request_protocol_decision, response_protocol_decision,
-        scrub_request_target, should_close, write_response, ProtocolCompatibilityDecision,
+        asks_passive_read, build_http_payload, build_metadata_only_http_payload,
+        copy_bidirectional_counted, parse_connect_target, parse_limit, parse_request_line,
+        parse_response_status, parse_route, parse_start_line, read_http_body, read_http_head,
+        read_http_message, read_until_headers, redact_headers, request_protocol_decision,
+        response_protocol_decision, scrub_request_target, should_close, write_response,
+        ProtocolCompatibilityDecision,
     },
     inference::{forward, gateway_client, is_inference_target, Head},
     mcp::service::McpService,
@@ -68,6 +69,12 @@ pub struct RelayProxy {
 struct CaVerdict {
     trusted: bool,
     checked_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum AccountRead {
+    Watching,
+    Passive,
 }
 
 impl RelayProxy {
@@ -269,8 +276,13 @@ impl RelayProxy {
 
         if method == "GET" && route.path == "/api/status" {
             let proxy = Arc::clone(self);
+            let read = match asks_passive_read(&route.query) {
+                true => AccountRead::Passive,
+                false => AccountRead::Watching,
+            };
             let payload = tokio::task::spawn_blocking(move || {
-                proxy.status_payload(proxy.gateway.credential_status().to_json())
+                let credential = proxy.credential_json(proxy.gateway.credential_status());
+                proxy.status_payload_for(credential, read)
             })
             .await??;
             return self.write_json(&mut stream, payload).await;
@@ -765,7 +777,24 @@ impl RelayProxy {
         write_response(stream, 200, "application/json; charset=utf-8", &body, true).await
     }
 
+    fn credential_json(&self, credential: CredentialStatus) -> Value {
+        let session = self
+            .broker
+            .as_ref()
+            .map(|broker| broker.status())
+            .filter(BrokerStatus::signed_in_with_the_idp);
+        match session {
+            Some(session) => idp_session_credential_json(&session),
+            None => credential.to_json(),
+        }
+    }
+
+    #[cfg(test)]
     fn status_payload(&self, credential: Value) -> Result<Value> {
+        self.status_payload_for(credential, AccountRead::Watching)
+    }
+
+    fn status_payload_for(&self, credential: Value, read: AccountRead) -> Result<Value> {
         let ca_path = if self.config.mitm_enabled {
             Some(
                 ensure_ca(&self.config.mitm_ca_dir)?
@@ -799,7 +828,10 @@ impl RelayProxy {
             "credential": credential,
             "broker": self.broker.as_ref().map(|broker| broker.status()),
             "mcp": self.mcp.as_ref().map(|mcp| mcp.status()),
-            "account": self.account.as_ref().map(|account| account.status()),
+            "account": self.account.as_ref().map(|account| match read {
+                AccountRead::Watching => account.status(),
+                AccountRead::Passive => account.passive_status(),
+            }),
             "environments": self.account.as_ref().map(|account| account.environments()),
         }))
     }
@@ -902,6 +934,9 @@ fn is_dashboard_request(header_text: &str, dashboard_names: &[String]) -> bool {
                 .strip_prefix("http://")
                 .is_some_and(|origin| origin.eq_ignore_ascii_case(authority))
         })
+        && values("sec-fetch-site").iter().all(|site| {
+            site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
+        })
 }
 
 fn metadata_tunnel_decision(
@@ -948,6 +983,21 @@ fn event_with_attribution(mut event: Value, attribution: &AppAttribution) -> Val
         }
     }
     event
+}
+
+fn idp_session_credential_json(session: &BrokerStatus) -> Value {
+    json!({
+        "configured": true,
+        "state": "valid",
+        "detail": null,
+        "checked_at": null,
+        "enrolled_at": null,
+        "expires_at": session.key_expires_at,
+        "expiry": match session.key_expires_at {
+            Some(_) => "ok",
+            None => "unknown",
+        },
+    })
 }
 
 #[cfg(test)]
@@ -1369,6 +1419,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_answer_a_passive_status_read_without_opening_the_account_watch() {
+        use crate::account::test_support::account_on;
+
+        let settings = static_key_settings("sk-static");
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let port = config.port;
+        let (rig, http, account) = account_on(settings.clone());
+        let saved = settings.clone();
+        let proxy = Arc::new(
+            RelayProxy::new(config)
+                .with_broker(Arc::clone(&rig.broker))
+                .with_account(Arc::clone(&account))
+                .with_saved_settings(Box::new(move || Some(saved.clone()))),
+        );
+        let status_at =
+            |target: &str| format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        let account_of = |answer: String| -> Value {
+            serde_json::from_str::<Value>(answer.split_once("\r\n\r\n").unwrap().1).unwrap()
+                ["account"]
+                .clone()
+        };
+
+        let passive = exchange(&proxy, None, &status_at("/api/status?passive=1")).await;
+        account.poll();
+        let key_reads_after_passive = http.calls_to("/key/info").len();
+        let plain = exchange(&proxy, None, &status_at("/api/status")).await;
+        account.poll();
+
+        assert_eq!(key_reads_after_passive, 0);
+        assert_eq!(http.calls_to("/key/info").len(), 1);
+        assert_eq!(account_of(passive), account_of(plain));
+    }
+
+    #[tokio::test]
+    async fn should_show_the_gateway_credential_as_valid_while_an_idp_daemon_is_signed_in() {
+        let settings = crate::broker::test_support::idp_settings(Some("team-a"));
+        let mut config = settings.to_config();
+        config.mitm_enabled = false;
+        config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
+        let port = config.port;
+        let rig = Rig::new(settings.clone());
+        let saved = settings.clone();
+        let proxy = Arc::new(
+            RelayProxy::new(config)
+                .with_broker(Arc::clone(&rig.broker))
+                .with_saved_settings(Box::new(move || Some(saved.clone()))),
+        );
+        let status = format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        let credential_of = |answer: String| -> Value {
+            serde_json::from_str::<Value>(answer.split_once("\r\n\r\n").unwrap().1).unwrap()
+                ["credential"]
+                .clone()
+        };
+
+        let signed_out = credential_of(exchange(&proxy, None, &status).await);
+        let broker = Arc::clone(&rig.broker);
+        tokio::task::spawn_blocking(move || broker.sign_in())
+            .await
+            .unwrap();
+        let signed_in = credential_of(exchange(&proxy, None, &status).await);
+
+        assert_eq!(signed_out["state"], "missing");
+        assert_eq!(signed_in["state"], "valid", "{signed_in}");
+        assert_eq!(signed_in["configured"], true);
+        assert_eq!(
+            signed_in["expires_at"].as_str(),
+            rig.broker.status().key_expires_at.as_deref()
+        );
+    }
+
+    #[tokio::test]
     async fn should_refuse_the_api_to_foreign_hosts_and_cross_origin_pages() {
         let upstream = Upstream::answering(&[JSON_OK]).await;
         let log_path =
@@ -1401,6 +1524,11 @@ mod tests {
                 "Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{}\r\n",
                 port + 1
             ),
+            format!("Host: 127.0.0.1:{port}\r\nSec-Fetch-Site: cross-site\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nSec-Fetch-Site: same-site\r\n"),
+            format!(
+                "Host: 127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Site: cross-site\r\n"
+            ),
         ] {
             seed();
             let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;
@@ -1423,6 +1551,8 @@ mod tests {
             format!("Host: 0.0.0.0:{port}\r\nOrigin: http://0.0.0.0:{port}\r\n"),
             "Host: localhost:8080\r\nOrigin: http://localhost:8080\r\n".to_string(),
             format!("Host: 192.168.1.148:{port}\r\n"),
+            format!("Host: 127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\n"),
+            format!("Host: localhost:{port}\r\nSec-Fetch-Site: none\r\n"),
         ] {
             seed();
             let answer = exchange(&daemon.proxy, None, &clear(headers.clone())).await;

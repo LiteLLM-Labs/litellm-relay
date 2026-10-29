@@ -183,6 +183,7 @@ struct SwitcherState {
     environment: String,
     switches: Vec<(String, String)>,
     refusal: Option<Refusal>,
+    knows_teams: bool,
 }
 
 #[derive(Clone)]
@@ -198,12 +199,19 @@ impl Default for FakeSwitcher {
                 environment: "dev".to_string(),
                 switches: Vec::new(),
                 refusal: None,
+                knows_teams: true,
             })),
         }
     }
 }
 
 impl FakeSwitcher {
+    pub(crate) fn knowing_no_teams() -> Self {
+        let switcher = Self::default();
+        switcher.state.lock().unwrap().knows_teams = false;
+        switcher
+    }
+
     pub(crate) fn refusing(&self, refusal: Refusal) {
         self.state.lock().unwrap().refusal = Some(refusal);
     }
@@ -241,7 +249,8 @@ fn gateway_of(environment: &str) -> &'static str {
 
 impl Switcher for FakeSwitcher {
     fn team_refusal(&self, team: &str) -> Option<Refusal> {
-        (!["team-a", "team-b"].contains(&team))
+        let knows_teams = self.state.lock().unwrap().knows_teams;
+        (knows_teams && !["team-a", "team-b"].contains(&team))
             .then(|| Refusal::UnknownTeam(format!("no team {team:?}; known: team-a, team-b")))
     }
 

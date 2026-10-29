@@ -88,7 +88,7 @@ pub struct UserCaTrust;
 impl CaTrust for UserCaTrust {
     #[cfg(target_os = "macos")]
     fn trusts(&self, cert_path: &Path) -> bool {
-        run_quiet(
+        let outcome = run_quiet_within(
             Command::new("/usr/bin/security")
                 .arg("verify-cert")
                 .arg("-c")
@@ -96,8 +96,19 @@ impl CaTrust for UserCaTrust {
                 .arg("-l")
                 .arg("-L")
                 .arg("-q"),
-        )
-        .is_ok()
+            VERIFY_CERT_TIMEOUT,
+        );
+        match outcome {
+            CommandOutcome::Succeeded => true,
+            CommandOutcome::Failed => false,
+            CommandOutcome::TimedOut => {
+                eprintln!(
+                    "cert: `security verify-cert` gave no answer in {} s; counting the Relay CA as untrusted",
+                    VERIFY_CERT_TIMEOUT.as_secs()
+                );
+                false
+            }
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -202,6 +213,42 @@ fn ensure_leaf_cert(host: &str, ca_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((cert_path, key_path))
 }
 
+#[cfg(target_os = "macos")]
+const VERIFY_CERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum CommandOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn run_quiet_within(command: &mut Command, limit: std::time::Duration) -> CommandOutcome {
+    let spawned = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = spawned else {
+        return CommandOutcome::Failed;
+    };
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return CommandOutcome::Succeeded,
+            Ok(Some(_)) | Err(_) => return CommandOutcome::Failed,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return CommandOutcome::TimedOut;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
 fn run_quiet(command: &mut Command) -> Result<()> {
     let status = command
         .stdout(Stdio::null())
@@ -290,6 +337,29 @@ mod tests {
     #[test]
     fn safe_cert_name_removes_path_characters() {
         assert_eq!(safe_cert_name("www.notion.so:443"), "www.notion.so_443");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_give_up_on_a_trust_check_that_never_answers_and_keep_the_answers_of_one_that_does() {
+        let started = std::time::Instant::now();
+        let hung = run_quiet_within(
+            Command::new("/bin/sleep").arg("30"),
+            std::time::Duration::from_millis(200),
+        );
+        let gave_up_after = started.elapsed();
+        let limit = std::time::Duration::from_secs(5);
+
+        assert_eq!(hung, CommandOutcome::TimedOut);
+        assert!(gave_up_after < limit, "{gave_up_after:?}");
+        assert_eq!(
+            run_quiet_within(&mut Command::new("/usr/bin/true"), limit),
+            CommandOutcome::Succeeded
+        );
+        assert_eq!(
+            run_quiet_within(&mut Command::new("/usr/bin/false"), limit),
+            CommandOutcome::Failed
+        );
     }
 
     #[cfg(target_os = "macos")]

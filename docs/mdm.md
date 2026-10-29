@@ -343,9 +343,11 @@ that build like the installer's
 With an IdP configured, the first interactive request runs the browser sign-in
 from the daemon, exchanges the ID token for a Gateway session credential the
 way the older helpers did, and mints a Gateway key scoped to the device's team
-(`claude.team`, or `codex.team` when no Claude Code team is set; one key serves
-both clients, so give them the same team or expect spend under the Claude Code
-one) through `POST /key/generate` with a 60 minute duration and the alias
+(picked as [Environments and teams](#environments-and-teams) describes). One key
+serves every client, and each `relay onboard`, `relay onboard-codex`, and
+`relay onboard-claude-desktop` run with `--team` writes the device-wide
+`gateway.team`, so the latest one moves the spend of every tool to that team.
+The daemon mints it through `POST /key/generate` with a 60 minute duration and the alias
 `relay-<hostname>-<timestamp>`. The daemon extends that key at its half-life
 with `POST /key/update`, replaces an expired one on the next request, and
 deletes it on `relay sign-out` and when the daemon stops. Minting needs the
@@ -387,18 +389,28 @@ did not. The `broker` block of `/api/status` shows `signed_in`, `user_id`,
 `source` of the last answer (`minted_key`, `session_credential`,
 `identity_token`, or `static_key`), and `refused_callers`, never a token
 
-The daemon also keeps an `account` block there. While something has read
-`/api/status` in the last 10 minutes (RelayBar reads it every few seconds), it
-asks `GET <gateway.url>/health/liveliness` without a credential every 60
-seconds, and every 300 seconds, plus once after a sign-in and after a switch,
-it reads `GET /user/info?user_id=<id>` and `GET /team/info?team_id=<team>` with
-the signed-in user's credential. A daemon nobody reads sends none of these on
-a timer, and one with no Gateway configured sends none at all. A static key saved without a team reads its
-team from `GET /key/info`. The block shows `user` (`id`, `email`), `teams` (the `id` and
-`alias` of every team the user may attribute spend to, null until the first
-read), `teams_error`, `team` (the current team's `id`, `alias`, `spend`,
-`max_budget`, and `budget_reset_at` as the Gateway reports them, null when no
-team is selected), `budget_error`, `gateway` (`url`, `reachable`, `checked_at`,
+The daemon also keeps an `account` block there. A plain read of `/api/status`
+opens a 10 minute watch, and `GET /api/status?passive=1` answers the same JSON
+without opening or extending it (RelayBar reads plainly every few seconds while
+its popover is open and passively while it is closed). While the watch is open,
+the daemon asks `GET <gateway.url>/health/liveliness` without a credential
+every 60 seconds, and every 300 seconds, plus once after a sign-in and after a
+switch, it reads `GET /user/info?user_id=<id>` and `GET /team/info?team_id=<team>`
+with the signed-in user's credential. A daemon nobody has read sends none of
+these, from the moment it starts, and one with no Gateway configured sends none
+at all. The read that opens the watch answers with the account not read yet,
+and the next 10 second tick fills it in. While an IdP daemon holds no session,
+because it is signed out or nobody signed in since it started, the account
+read sends no request at all, IdP discovery included, and only the liveliness
+probe runs. When the hour-long minted key has expired, the account read mints
+a new key with the held session first and then reads the account with it. A
+static key saved without a team reads its team from `GET /key/info`. The block
+shows `user` (`id`, `email`), `teams` (the `id` and `alias` of every team the
+user may attribute spend to, null until the first read), `teams_error`, `team`
+(the current team's `id`, `alias`, `spend`, `max_budget`, and `budget_reset_at`
+as the Gateway reports them, null when no team is selected), `key` (for a
+static key whose team is unknown, the key's own `spend`, `max_budget`, and
+`budget_reset_at` from `/key/info`, null in every other case), `budget_error`, `gateway` (`url`, `reachable`, `checked_at`,
 `error`), and `polled_at`. When `/user/info` fails or lists nothing, `teams`
 falls back to the current team alone and `teams_error` says why; when
 `/team/info` refuses the team, the budget comes from the `/user/info` entry and
@@ -419,8 +431,13 @@ Gateway's default team. The entry whose `url` equals `gateway.url` is the
 current one, and every entry shares the `idp` section, so one sign-in serves
 them all. The team the daemon mints keys for is `gateway.team` when set, else
 the current environment's `team`, else, on the first environment or a Gateway
-outside the list, `claude.team`, else `codex.team`, so a team from one Gateway
-never reaches another. A
+outside the list, `claude.team`, else `codex.team`, so a team picked on one
+environment never reaches another. `relay onboard`, `relay onboard-codex`,
+`relay onboard-claude-desktop`, and `relay setup` park `gateway.team` the way an
+environment switch does when they move `gateway.url` to another Gateway, and a
+`--team` given in the same command applies to the new one. They leave
+`claude.team` and `codex.team` as they are, so a move between two Gateways
+outside the list keeps those. A
 switch (`relay switch-team`, `relay switch-environment`, the MCP tools of the
 same names, or RelayBar) writes
 `gateway.url` and `gateway.team` back into `config.yaml`, where an environment
@@ -435,6 +452,8 @@ list the daemon serves the one `gateway.url`, and `relay switch-team` still
 works against it. When the root Claude Desktop LaunchDaemon is installed, it
 watches `config.yaml` and rewrites Claude Desktop's managed settings within
 seconds of a switch, and Claude Desktop picks up the switch after it restarts.
+Until it restarts, Claude Desktop keeps calling the previous Gateway with the
+key its credential helper now gets for the new one, so its requests fail.
 Installing that daemon needs root, so it exists only after an admin ran
 `install.sh` with `sudo`, or after a `.pkg` install whose console user has
 passwordless `sudo`. Without it, nothing rewrites Claude Desktop's managed
@@ -501,7 +520,8 @@ the device to another team or Gateway, the same as `relay switch-team` and
 selection (`team`, `environment`, `gateway_url`, `teams`, `teams_error`, and
 `environments`) and ask nothing, and with one they run only after the user
 confirms the switch and answer the switch outcome plus the same selection. A
-team switch refetches the catalog at once so team-scoped servers show on the
+blank team id, or one longer than 256 characters, answers `bad_request` and
+asks nothing. A team switch refetches the catalog at once so team-scoped servers show on the
 next call. The catalog is fetched when a session signs in and every five
 minutes after that, and dropped on sign-out
 

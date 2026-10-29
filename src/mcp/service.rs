@@ -110,6 +110,23 @@ pub trait Switcher: Send + Sync {
     fn selection(&self) -> Value;
 }
 
+const MAX_TEAM_ID_CHARS: usize = 256;
+
+fn team_id_problem(team: &str) -> Option<String> {
+    if team.trim().is_empty() {
+        return Some(
+            "the team id is empty; call switch_team without an argument to list the teams"
+                .to_string(),
+        );
+    }
+    let length = team.chars().count();
+    (length > MAX_TEAM_ID_CHARS).then(|| {
+        format!(
+            "the team id is {length} characters long; a team id has at most {MAX_TEAM_ID_CHARS}"
+        )
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpRefusal {
     Broker(Refusal),
@@ -673,6 +690,9 @@ impl McpService {
         let Some(team) = team else {
             return self.selection().await;
         };
+        if let Some(problem) = team_id_problem(&team) {
+            return Err(McpRefusal::BadRequest(problem));
+        }
         let checked = team.clone();
         self.refuse_early(move |switcher| switcher.team_refusal(&checked))
             .await?;

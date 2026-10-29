@@ -24,6 +24,11 @@ impl Broker {
         self.held_identity()
     }
 
+    fn holds_an_idp_session(&self) -> bool {
+        let state = self.lock_state();
+        state.credential.is_some() || state.session.is_some()
+    }
+
     fn held_identity(&self) -> Option<SessionIdentity> {
         let target = self.lock_target().clone();
         let state = self.lock_state();
@@ -60,6 +65,11 @@ impl Broker {
     pub fn session_bearer_unless_renewing(&self) -> Option<Result<SessionBearer, Refusal>> {
         self.refresh_unless_renewing();
         let target = self.lock_target().clone();
+        if matches!(target.mode, Mode::Idp(_)) && !self.holds_an_idp_session() {
+            return Some(Err(Refusal::SignedOut(
+                "not signed in on this device".to_string(),
+            )));
+        }
         let reply = self.issue_unless_renewing(&target, Context::NonInteractive)?;
         Some(self.bearer_from(&target, reply))
     }

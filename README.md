@@ -91,14 +91,17 @@ it. The same check is exposed on `/api/status` as a `credential` block
 `restricted`, `rejected`, `unverifiable`, `missing`, or `unchecked` when a key
 is saved but no check has finished yet; `expiry` is `unknown`, `ok`,
 `expiring_soon`, or `expired`; plus `detail`, `checked_at`, `enrolled_at`, and
-`expires_at`), and the dashboard shows it as the `Gateway credential` row. The
+`expires_at`), and the dashboard shows it as the `Gateway credential` row.
+While the daemon holds an IdP session, the block describes that session
+instead (`configured` true, `state` `valid`, and `expires_at` the expiry of the
+key the daemon minted). The
 status endpoint answers at once with the last check, which is up to 60 seconds
 old, and refreshes it in the background, so the first call after `serve`
 starts reads `unchecked` until that check finishes (at most 10 seconds)
 
 ## Developers see their own usage, locally
 
-Relay also ships an optional **macOS menu bar app**, RelayBar, that sits on top of the daemon: it shows whether the developer is signed in and as whom, how long the key every coding tool is using stays valid and that the daemon renews it, the selected team's spend against its budget as the Gateway reports it, the MCP servers the daemon serves, and a Team and an Environment picker that move Claude Code, Codex, and the local proxy at once through `relay switch-team` and `relay switch-environment` (Claude Desktop follows after it restarts where the `.pkg` or a `sudo` install added the root Claude Desktop agent, and keeps the previous Gateway elsewhere). Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`) or ship it in the `.pkg` with `scripts/build-macos-pkg.sh --relaybar`.
+Relay also ships an optional **macOS menu bar app**, RelayBar, that sits on top of the daemon: it shows whether the developer is signed in and as whom, how long the key every coding tool is using stays valid and that the daemon renews it, the selected team's spend against its budget as the Gateway reports it, the MCP servers the daemon serves, and a Team and an Environment picker that move Claude Code, Codex, and the local proxy at once through `relay switch-team` and `relay switch-environment` (Claude Desktop's requests fail after a switch until it restarts, and the restart moves it to the new Gateway only where the `.pkg` or a `sudo` install added the root Claude Desktop agent). Build it from [`macos/RelayBarGlass`](macos/RelayBarGlass) (`./build.sh && open RelayBarGlass.app`) or ship it in the `.pkg` with `scripts/build-macos-pkg.sh --relaybar`.
 
 ## AI Tool Guides
 
@@ -146,8 +149,10 @@ Gateway logs and the menu bar usage card, not as rows in this table.
 The dashboard's data calls under `/api/` answer a page opened at an IP address,
 `localhost`, `relay.host`, or this Mac's own name (`<name>` or `<name>.local`),
 on any port, so `http://0.0.0.0:4142` and a Docker port mapping keep working.
-Any other `Host` (a page that rebinds its own domain to the Mac) and a request
-whose `Origin` is another site get a 403.
+Any other `Host` (a page that rebinds its own domain to the Mac), a request
+whose `Origin` is another site, and a browser request whose `Sec-Fetch-Site` is
+anything but `same-origin` or `none` (such as an image another page embeds) get
+a 403.
 
 ## Install
 

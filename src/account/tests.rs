@@ -18,13 +18,19 @@ const TEAM_INFO: &str = r#"{"team_id":"team-a","team_info":{"team_id":"team-a","
 const TEAM_B_INFO: &str = r#"{"team_id":"team-b","team_info":{"team_id":"team-b","spend":0.0,"max_budget":null,"budget_duration":null,"budget_reset_at":null,"models":[]}}"#;
 const NOT_A_MEMBER: &str = r#"{"error":{"message":"User=user-1 not authorized to access this team=team-a","type":"auth_error","param":null,"code":"403"}}"#;
 
-fn signed_in() -> (Rig, FakeHttp, Arc<AccountService>) {
+fn signed_in_unread() -> (Rig, FakeHttp, Arc<AccountService>) {
     let (rig, http, account) = account_on(idp_settings(Some("team-a")));
     assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
     http.answer("/user/info?user_id=user-1", 200, USER_INFO);
     http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
     http.answer("/team/info?team_id=team-b", 200, TEAM_B_INFO);
     http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    (rig, http, account)
+}
+
+fn signed_in() -> (Rig, FakeHttp, Arc<AccountService>) {
+    let (rig, http, account) = signed_in_unread();
+    account.status();
     (rig, http, account)
 }
 
@@ -405,6 +411,7 @@ fn should_show_the_team_and_budget_of_a_static_key_saved_without_a_team() {
     http.answer("/user/info?user_id=user-1", 200, USER_INFO);
     http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
     http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    account.status();
     account.poll();
     let status = account.status();
     assert_eq!(
@@ -421,6 +428,7 @@ fn should_show_the_team_and_budget_of_a_static_key_saved_without_a_team() {
     assert_eq!(key_reads.len(), 1);
     assert_eq!(key_reads[0].bearer.as_deref(), Some("sk-static"));
     assert!(!status.to_string().contains("sk-static"));
+    assert_eq!(status["key"], Value::Null);
 
     let (_rig, idp_http, idp_account) = signed_in();
     idp_account.poll();
@@ -438,6 +446,7 @@ fn should_not_list_every_gateway_team_for_a_static_key_that_belongs_to_no_user()
     http.answer("/user/info", 200, USER_INFO);
     http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
     http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    account.status();
     account.poll();
     let status = account.status();
     assert!(http.calls_to("/user/info").is_empty());
@@ -494,4 +503,79 @@ fn should_poll_only_while_someone_reads_the_status_and_never_probe_an_unconfigur
     unconfigured.poll();
     unconfigured.recheck();
     assert!(unconfigured_http.calls_to("/health/liveliness").is_empty());
+}
+
+#[test]
+fn should_send_nothing_to_the_gateway_from_a_fresh_daemon_until_the_first_status_read() {
+    let (rig, http, account) = signed_in_unread();
+    for _ in 0..3 {
+        account.poll();
+        rig.clock.advance(300);
+    }
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 0);
+    assert_eq!(count(&http, "/health/liveliness"), 0);
+
+    account.status();
+    account.poll();
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
+    assert_eq!(count(&http, "/health/liveliness"), 1);
+}
+
+#[test]
+fn should_answer_a_passive_status_read_without_reopening_a_lapsed_watch() {
+    let (rig, http, account) = signed_in();
+    account.poll();
+    rig.clock.advance(601);
+
+    let passive = account.passive_status();
+    account.poll();
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
+    assert_eq!(count(&http, "/health/liveliness"), 1);
+
+    assert_eq!(passive, account.status());
+    account.poll();
+    assert_eq!(count(&http, "/user/info?user_id=user-1"), 2);
+    assert_eq!(count(&http, "/health/liveliness"), 2);
+}
+
+#[test]
+fn should_send_no_discovery_or_account_call_while_an_idp_daemon_is_signed_out() {
+    let (rig, http, account) = account_on(idp_settings(Some("team-a")));
+    http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    for _ in 0..3 {
+        account.status();
+        account.poll();
+        rig.clock.advance(300);
+    }
+    let status = account.status();
+
+    assert!(rig.auth.discoveries().is_empty());
+    assert_eq!(rig.identity.sign_ins(), 0);
+    assert_eq!(status["user"], json!({"id": null, "email": null}));
+    assert_eq!(status["teams"], Value::Null);
+    assert_eq!(status["polled_at"], Value::Null);
+    assert_eq!(count(&http, "/health/liveliness"), 3);
+}
+
+#[test]
+fn should_show_the_key_budget_of_a_static_key_that_names_no_team() {
+    let (_rig, http, account) = account_on(static_key_settings("sk-solo"));
+    http.answer(
+        "/key/info",
+        200,
+        r#"{"key":"sk-solo","info":{"key_name":"sk-...solo","user_id":null,"team_id":null,"spend":2.5,"max_budget":10.0,"budget_reset_at":"2027-02-01T00:00:00+00:00"}}"#,
+    );
+    http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    account.status();
+    account.poll();
+    let status = account.status();
+    assert_eq!(
+        status["key"],
+        json!({"spend": 2.5, "max_budget": 10.0, "budget_reset_at": "2027-02-01T00:00:00+00:00"})
+    );
+    assert_eq!(status["team"], Value::Null);
+
+    let (_rig, _idp_http, idp_account) = signed_in();
+    idp_account.poll();
+    assert_eq!(idp_account.status()["key"], Value::Null);
 }

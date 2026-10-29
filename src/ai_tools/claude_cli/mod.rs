@@ -86,7 +86,7 @@ fn onboard_with(
 ) -> Result<()> {
     let mut settings = load_settings()?;
     if let Some(gateway_url) = params.gateway_url {
-        settings.gateway.url = gateway_url.trim_end_matches('/').to_string();
+        settings.move_gateway_to(&gateway_url);
     }
     settings.idp.apply(&params.idp);
     if let Some(model) = params.model {
