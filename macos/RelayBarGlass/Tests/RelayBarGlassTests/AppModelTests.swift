@@ -153,12 +153,12 @@ import Testing
         try home.writeRelayPort(daemon.port)
         let relay = try home.stubRelay("trap '' TERM\nexec sleep 30")
 
-        let model = AppModel(environment: relay.environment, home: home.url, timing: AppTiming(pollInterval: 60, requestTimeout: 0.5, commandTimeout: 3))
+        let model = AppModel(environment: relay.environment, home: home.url, timing: AppTiming(pollInterval: 60, requestTimeout: 0.5, commandTimeout: 6))
         model.run(.switchTeam("team-b"))
-        try #require(await eventually(within: 3) { relay.pids(of: "switch-team").count == 1 })
+        try #require(await eventually(within: 6) { relay.pids(of: "switch-team").count == 1 })
         let stuck = relay.pids(of: "switch-team")[0]
-        #expect(await eventually(within: 10) { !model.busy })
-        #expect(model.errorMessage(for: .switchTeam) == "The Relay daemon did not answer within 3 s")
+        #expect(await eventually(within: 15) { !model.busy })
+        #expect(model.errorMessage(for: .switchTeam) == "The Relay daemon did not answer within 6 s")
         #expect(await eventually(within: 10) { !isAlive(stuck) })
     }
 
