@@ -681,8 +681,8 @@ impl Broker {
             let state = self.lock_state();
             (state.completed_sign_ins, state.pending_sign_in_page.clone())
         };
-        if let Some(page) = pending_page {
-            (self.deps.browser)(&page);
+        if let Some(page) = &pending_page {
+            (self.deps.browser)(page);
         }
         self.refresh();
         let _renewal = self.lock_renewal();
@@ -694,6 +694,12 @@ impl Broker {
         }
         if let Some(reply) = self.signed_in_since(sign_ins_at_start) {
             return reply;
+        }
+        if pending_page.is_some() {
+            return Reply::Refused(Refusal::SignInFailed(
+                "the browser sign-in that was open did not finish; sign in again to open a new page"
+                    .to_string(),
+            ));
         }
         self.forget(&target.gateway_url, true);
         match self.issue_under_renewal_lock(&target, Context::Interactive) {
@@ -1813,6 +1819,27 @@ mod tests {
         let opens_before_a_later_sign_in = rig.browser_opens();
         assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
         assert_eq!(rig.browser_opens(), opens_before_a_later_sign_in + 1);
+    }
+
+    #[test]
+    fn should_not_open_a_new_sign_in_when_the_pending_one_it_joined_fails() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(600));
+        rig.identity.fail_sign_ins();
+        let broker = Arc::clone(&rig.broker);
+        let first = thread::spawn(move || broker.sign_in());
+        thread::sleep(Duration::from_millis(200));
+
+        let joined = rig.broker.sign_in();
+
+        assert!(matches!(
+            first.join().expect("first"),
+            Reply::Refused(Refusal::SignInFailed(_))
+        ));
+        assert!(matches!(joined, Reply::Refused(Refusal::SignInFailed(_))));
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 2);
+        assert!(!rig.broker.status().signed_in);
     }
 
     #[test]

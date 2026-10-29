@@ -197,15 +197,7 @@ impl RelaySettings {
                 "no environment or team was picked over the earlier managed config".to_string(),
             );
         }
-        let default_environment = self.current_environment().map(|entry| entry.name.clone());
-        let managed_team = non_empty(self.gateway.team.as_deref()).map(str::to_string);
-        match self.carrying_selection_from(&picks) {
-            CarriedSelection::Carried { settings, summary } => CarriedSelection::Carried {
-                settings: Box::new(settings.parking_team(default_environment, managed_team)),
-                summary,
-            },
-            nothing => nothing,
-        }
+        self.carrying_picks_parking_the_managed_team(&picks)
     }
 
     pub fn carrying_install_picks(
@@ -215,13 +207,25 @@ impl RelaySettings {
     ) -> CarriedSelection {
         match seeded {
             Some(seeded) => self.carrying_picks_over(previous, seeded),
-            None => self.carrying_selection_from(&RelaySettings {
+            None => self.carrying_picks_parking_the_managed_team(&RelaySettings {
                 gateway: GatewaySection {
                     team: None,
                     ..previous.gateway.clone()
                 },
                 ..previous.clone()
             }),
+        }
+    }
+
+    fn carrying_picks_parking_the_managed_team(self, picks: &RelaySettings) -> CarriedSelection {
+        let default_environment = self.current_environment().map(|entry| entry.name.clone());
+        let managed_team = non_empty(self.gateway.team.as_deref()).map(str::to_string);
+        match self.carrying_selection_from(picks) {
+            CarriedSelection::Carried { settings, summary } => CarriedSelection::Carried {
+                settings: Box::new(settings.parking_team(default_environment, managed_team)),
+                summary,
+            },
+            nothing => nothing,
         }
     }
 
@@ -1730,6 +1734,17 @@ codex:
             summary,
             "carried the environment uat and the team picks for prod"
         );
+
+        let mut moved_to_uat = earlier.clone();
+        moved_to_uat.gateway.url = "https://uat.example.com".into();
+        let (settings, summary) = carried(pushed().carrying_install_picks(&moved_to_uat, None));
+        assert_eq!(settings.current_environment().unwrap().name, "uat");
+        assert_eq!(settings.gateway.team, None);
+        assert_eq!(
+            settings.gateway.team_by_environment,
+            BTreeMap::from([("prod".into(), "managed-2".into())])
+        );
+        assert_eq!(summary, "carried the environment uat");
     }
 
     #[test]

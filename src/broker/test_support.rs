@@ -227,6 +227,7 @@ struct IdentityState {
     sign_ins: u64,
     refreshes: u64,
     sign_in_delay: Duration,
+    sign_ins_fail: bool,
 }
 
 #[derive(Clone)]
@@ -243,6 +244,7 @@ impl FakeIdentity {
                 sign_ins: 0,
                 refreshes: 0,
                 sign_in_delay: Duration::ZERO,
+                sign_ins_fail: false,
             })),
         }
     }
@@ -255,6 +257,10 @@ impl FakeIdentity {
         self.state.lock().unwrap().sign_ins
     }
 
+    pub(crate) fn fail_sign_ins(&self) {
+        self.state.lock().unwrap().sign_ins_fail = true;
+    }
+
     fn session(&self, serial: u64) -> Session {
         Session {
             id_token: jwt_with_name(self.clock.now() + IDENTITY_TOKEN_LIFETIME, DISPLAY_NAME),
@@ -265,13 +271,18 @@ impl FakeIdentity {
 
 impl IdentityProvider for FakeIdentity {
     fn sign_in(&self, _idp: &IdpSection, browser: &dyn Fn(&str)) -> Result<Session> {
-        let (serial, delay) = {
+        let (serial, delay, fails) = {
             let mut state = self.state.lock().unwrap();
             state.sign_ins += 1;
-            (state.sign_ins, state.sign_in_delay)
+            (state.sign_ins, state.sign_in_delay, state.sign_ins_fail)
         };
         browser("https://idp.example.com/authorize");
         thread::sleep(delay);
+        if fails {
+            return Err(anyhow!(
+                "timed out waiting for the browser sign-in to complete"
+            ));
+        }
         Ok(self.session(serial))
     }
 
