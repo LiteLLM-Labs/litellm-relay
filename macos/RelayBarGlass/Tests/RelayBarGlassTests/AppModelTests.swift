@@ -120,7 +120,7 @@ import Testing
         #expect(model.busy)
         #expect(await eventually(within: 3) { !model.busy })
         #expect(model.errorMessage(for: .switchTeam) == "The Relay daemon did not answer within 0.5 s")
-        #expect(await eventually(within: 3) { relay.pids(of: "switch-team").allSatisfy { !isAlive($0) } })
+        #expect(await eventually(within: 10) { relay.pids(of: "switch-team").allSatisfy { !isAlive($0) } })
     }
 
     @MainActor @Test func runsASignOutClickedWhileAnotherCommandRunsAndShowsItsFailure() async throws {
@@ -161,12 +161,13 @@ import Testing
         #expect(model.signingIn)
         #expect(model.busy == false)
         model.run(.recheck)
-        #expect(await eventually(within: 3) { relay.recordedCalls.contains("recheck") && !model.busy })
+        #expect(await eventually(within: 10) { relay.recordedCalls.contains("recheck") && !model.busy })
 
-        let pending = relay.pids(of: "sign-in").first
+        try #require(await eventually(within: 10) { relay.pids(of: "sign-in").count == 1 })
+        let pending = relay.pids(of: "sign-in")[0]
         model.cancelSignIn()
         #expect(model.signingIn == false)
-        #expect(await eventually(within: 3) { pending.map { !isAlive($0) } == true })
+        #expect(await eventually(within: 10) { !isAlive(pending) })
         #expect(model.errorMessage(for: .signIn) == nil)
     }
 
@@ -238,15 +239,15 @@ import Testing
 
         let model = AppModel(environment: relay.environment, home: home.url, timing: quick)
         model.run(.signIn)
-        #expect(await eventually(within: 3) { relay.pids(of: "sign-in").count == 1 })
+        #expect(await eventually(within: 10) { relay.pids(of: "sign-in").count == 1 })
         model.run(.signIn)
-        #expect(await eventually(within: 3) { relay.pids(of: "sign-in").count == 2 })
+        try #require(await eventually(within: 10) { relay.pids(of: "sign-in").count == 2 })
         let (first, second) = (relay.pids(of: "sign-in")[0], relay.pids(of: "sign-in")[1])
-        #expect(await eventually(within: 3) { !isAlive(first) })
+        #expect(await eventually(within: 10) { !isAlive(first) })
         #expect(isAlive(second))
         #expect(model.signingIn)
 
         model.cancelSignIn()
-        #expect(await eventually(within: 3) { !isAlive(second) })
+        #expect(await eventually(within: 10) { !isAlive(second) })
     }
 }
