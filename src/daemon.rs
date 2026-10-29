@@ -130,7 +130,11 @@ mod tests {
     ) -> (Rig, FakeHttp, Arc<AccountService>, Daemon) {
         let (rig, http, account) = account_on(settings);
         http.answer("/user/info?user_id=user-1", 200, USER_INFO);
-        http.answer("/user/info", 200, USER_INFO);
+        http.answer(
+            "/key/info",
+            200,
+            r#"{"key":"sk-static","info":{"user_id":"user-1","team_id":null}}"#,
+        );
         http.answer("/health/liveliness", 200, "\"I'm alive!\"");
         let daemon = Daemon::new(Arc::clone(&rig.broker), Arc::clone(&account));
         (rig, http, account, daemon)
@@ -204,7 +208,7 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(rig.settings.version(), version);
-        assert_eq!(count(&http, "/user/info"), 1);
+        assert_eq!(count(&http, "/user/info?user_id=user-1"), 1);
     }
 
     #[test]

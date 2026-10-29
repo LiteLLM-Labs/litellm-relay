@@ -304,19 +304,30 @@ impl AccountService {
             .gateway_url
             .trim_end_matches('/')
             .to_string();
-        let user_info_route = match bearer.identity.user_id.as_deref() {
-            Some(user_id) => format!("/user/info?user_id={}", query_value(user_id)),
-            None => "/user/info".to_string(),
-        };
-        let user = self
-            .fetch(&base, &user_info_route, &bearer.token)
-            .and_then(parse_user_info);
-        let key_team = match (&broker.team, broker.source) {
-            (None, Some(source)) if source == Source::StaticKey.name() => {
-                self.key_team(&base, &bearer.token)
+        let static_key = match broker.source {
+            Some(source) if source == Source::StaticKey.name() => {
+                self.static_key(&base, &bearer.token)
             }
-            _ => None,
+            _ => KeyInfo::default(),
         };
+        let user = match bearer
+            .identity
+            .user_id
+            .as_deref()
+            .or(static_key.user_id.as_deref())
+        {
+            Some(user_id) => self
+                .fetch(
+                    &base,
+                    &format!("/user/info?user_id={}", query_value(user_id)),
+                    &bearer.token,
+                )
+                .and_then(parse_user_info),
+            None => {
+                Err("this key belongs to no Gateway user, so it has no teams to list".to_string())
+            }
+        };
+        let key_team = static_key.team_id.filter(|_| broker.team.is_none());
         let team = broker.team.as_deref().or(key_team.as_deref());
         let previous = self.previous_budget(&bearer.identity, team);
         let (teams, teams_error) = teams_from(&user, team);
@@ -337,15 +348,15 @@ impl AccountService {
         state.account_checked_at = Some(now);
     }
 
-    fn key_team(&self, base: &str, token: &str) -> Option<String> {
+    fn static_key(&self, base: &str, token: &str) -> KeyInfo {
         match self
             .fetch(base, "/key/info", token)
             .and_then(parse_key_info)
         {
-            Ok(team) => team,
+            Ok(info) => info,
             Err(message) => {
-                eprintln!("account: the key's team could not be read: {message}");
-                None
+                eprintln!("account: the key's user and team could not be read: {message}");
+                KeyInfo::default()
             }
         }
     }
@@ -463,11 +474,13 @@ struct UserTeam {
 
 #[derive(Deserialize)]
 struct KeyInfoBody {
-    info: KeyInfoFields,
+    info: KeyInfo,
 }
 
-#[derive(Deserialize)]
-struct KeyInfoFields {
+#[derive(Deserialize, Default)]
+struct KeyInfo {
+    #[serde(default)]
+    user_id: Option<String>,
     #[serde(default)]
     team_id: Option<String>,
 }
@@ -518,9 +531,13 @@ fn parse_user_info(answer: HttpAnswer) -> Result<UserInfo, String> {
     })
 }
 
-fn parse_key_info(answer: HttpAnswer) -> Result<Option<String>, String> {
+fn parse_key_info(answer: HttpAnswer) -> Result<KeyInfo, String> {
     let body: KeyInfoBody = parse_body(answer, "/key/info")?;
-    Ok(body.info.team_id.filter(|team| !team.trim().is_empty()))
+    let present = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    Ok(KeyInfo {
+        user_id: present(body.info.user_id),
+        team_id: present(body.info.team_id),
+    })
 }
 
 fn parse_team_info(answer: HttpAnswer, team: &str) -> Result<Budget, String> {

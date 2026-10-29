@@ -1074,7 +1074,12 @@ mod tests {
         config.log_path = std::env::temp_dir().join("relay-status-test-missing.log.jsonl");
         let (_rig, http, account) = account_on(settings.clone());
         http.answer(
-            "/user/info",
+            "/key/info",
+            200,
+            r#"{"key":"sk-status-secret","info":{"user_id":"u","team_id":"team-a"}}"#,
+        );
+        http.answer(
+            "/user/info?user_id=u",
             200,
             r#"{"user_id":"u","user_info":{"user_email":"dev@example.com"},"teams":[{"team_id":"team-a","team_alias":"Team A"}]}"#,
         );

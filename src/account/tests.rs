@@ -400,9 +400,9 @@ fn should_show_the_team_and_budget_of_a_static_key_saved_without_a_team() {
     http.answer(
         "/key/info",
         200,
-        r#"{"key":"sk-static","info":{"key_name":"sk-...atic","team_id":"team-a","spend":0.2}}"#,
+        r#"{"key":"sk-static","info":{"key_name":"sk-...atic","user_id":"user-1","team_id":"team-a","spend":0.2}}"#,
     );
-    http.answer("/user/info", 200, USER_INFO);
+    http.answer("/user/info?user_id=user-1", 200, USER_INFO);
     http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
     http.answer("/health/liveliness", 200, "\"I'm alive!\"");
     account.poll();
@@ -425,6 +425,24 @@ fn should_show_the_team_and_budget_of_a_static_key_saved_without_a_team() {
     let (_rig, idp_http, idp_account) = signed_in();
     idp_account.poll();
     assert!(idp_http.calls_to("/key/info").is_empty());
+}
+
+#[test]
+fn should_not_list_every_gateway_team_for_a_static_key_that_belongs_to_no_user() {
+    let (_rig, http, account) = account_on(static_key_settings("sk-admin"));
+    http.answer(
+        "/key/info",
+        200,
+        r#"{"key":"sk-admin","info":{"key_name":"sk-...dmin","user_id":null,"team_id":"team-a"}}"#,
+    );
+    http.answer("/user/info", 200, USER_INFO);
+    http.answer("/team/info?team_id=team-a", 200, TEAM_INFO);
+    http.answer("/health/liveliness", 200, "\"I'm alive!\"");
+    account.poll();
+    let status = account.status();
+    assert!(http.calls_to("/user/info").is_empty());
+    assert_eq!(status["teams"], json!([{"id": "team-a", "alias": null}]));
+    assert_eq!(status["team"]["max_budget"], json!(50.0));
 }
 
 #[test]
