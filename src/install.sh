@@ -657,7 +657,6 @@ CA and no keychain password sheet is shown.
 To capture payloads later, set capture.payloads: true and trust the CA from a
 Terminal in the user's session:
   security add-trusted-cert -r trustRoot -k "$LOGIN_KEYCHAIN" "$CA_PATH"
-or install with RELAY_TRUST_CA=1.
 SKIP
   report_existing_ca_trust
 fi

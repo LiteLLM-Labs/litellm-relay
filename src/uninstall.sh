@@ -107,7 +107,7 @@ console_user() {
 
 user_home() {
   dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null \
-    | awk 'NR == 1 && /^NFSHomeDirectory: / { print $2; exit } NR == 2 && /^ / { print substr($0, 2); exit }' \
+    | awk 'NR == 1 && /^NFSHomeDirectory: / { print substr($0, 19); exit } NR == 2 && /^ / { print substr($0, 2); exit }' \
     || true
 }
 
