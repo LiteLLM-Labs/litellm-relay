@@ -692,7 +692,8 @@ impl Broker {
                 "sign-in needs an IdP; this device serves the configured Gateway key".to_string(),
             ));
         }
-        if let Some(reply) = self.signed_in_since(sign_ins_at_start) {
+        if let Some(reply) = self.signed_in_after_waiting(sign_ins_at_start, pending_page.is_some())
+        {
             return reply;
         }
         if pending_page.is_some() {
@@ -717,10 +718,15 @@ impl Broker {
         }
     }
 
-    fn signed_in_since(&self, completed_sign_ins: u64) -> Option<Reply> {
+    fn signed_in_after_waiting(
+        &self,
+        completed_sign_ins: u64,
+        joined_a_pending_page: bool,
+    ) -> Option<Reply> {
         let state = self.lock_state();
         let another_sign_in_finished = state.completed_sign_ins != completed_sign_ins;
-        (another_sign_in_finished && state.session.is_some()).then(|| Reply::SignedIn {
+        let waited_for_a_sign_in = another_sign_in_finished || joined_a_pending_page;
+        (waited_for_a_sign_in && state.session.is_some()).then(|| Reply::SignedIn {
             user_id: state
                 .credential
                 .as_ref()
@@ -1819,6 +1825,30 @@ mod tests {
         let opens_before_a_later_sign_in = rig.browser_opens();
         assert!(matches!(rig.broker.sign_in(), Reply::SignedIn { .. }));
         assert_eq!(rig.browser_opens(), opens_before_a_later_sign_in + 1);
+    }
+
+    #[test]
+    fn should_answer_signed_in_when_a_credential_request_finishes_the_page_a_sign_in_joined() {
+        let rig = Rig::new(idp_settings(Some("team-a")));
+        rig.identity.set_sign_in_delay(Duration::from_millis(600));
+        let broker = Arc::clone(&rig.broker);
+        let peer = rig.peer();
+        let asking = thread::spawn(move || {
+            broker.handle(
+                Request::Credential {
+                    context: Context::Interactive,
+                },
+                peer,
+            )
+        });
+        thread::sleep(Duration::from_millis(200));
+
+        let joined = rig.broker.sign_in();
+
+        issued(asking.join().expect("credential"));
+        assert!(matches!(joined, Reply::SignedIn { .. }));
+        assert_eq!(rig.identity.sign_ins(), 1);
+        assert_eq!(rig.browser_opens(), 2);
     }
 
     #[test]
