@@ -142,7 +142,7 @@ import Testing
     }
 
     @Test func displayNameFallsBackFromNameToEmailToId() {
-        let account = AccountStatus(user: AccountUser(id: "user-1", email: "dev@example.com"), teams: nil, teamsError: nil, team: nil, budgetError: nil, gateway: nil, polledAt: nil)
+        let account = AccountStatus(user: AccountUser(id: "user-1", email: "dev@example.com"), teams: nil, teamsError: nil, team: nil, key: nil, budgetError: nil, gateway: nil, polledAt: nil)
         #expect(StatusFormatter.displayName(broker: broker(displayName: "Dev Eloper", userId: "user-1"), account: account) == "Dev Eloper")
         #expect(StatusFormatter.displayName(broker: broker(displayName: nil, userId: "user-1"), account: account) == "dev@example.com")
         #expect(StatusFormatter.displayName(broker: broker(displayName: "", userId: "user-1"), account: account) == "dev@example.com")

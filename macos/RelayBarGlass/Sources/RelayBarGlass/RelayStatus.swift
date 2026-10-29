@@ -3,7 +3,6 @@ import Foundation
 struct RelayStatus: Decodable, Equatable {
     let broker: BrokerStatus?
     let account: AccountStatus?
-    let key: KeyBudget?
     let environments: EnvironmentsStatus?
     let mcp: McpStatus?
 
@@ -43,6 +42,7 @@ struct AccountStatus: Decodable, Equatable {
     let teams: [TeamEntry]?
     let teamsError: String?
     let team: TeamBudget?
+    let key: KeyBudget?
     let budgetError: String?
     let gateway: GatewayProbe?
     let polledAt: String?
@@ -52,6 +52,7 @@ struct AccountStatus: Decodable, Equatable {
         case teams
         case teamsError = "teams_error"
         case team
+        case key
         case budgetError = "budget_error"
         case gateway
         case polledAt = "polled_at"

@@ -66,11 +66,11 @@ import Testing
         "teams": [{"id": "team-a", "alias": "Team A"}],
         "teams_error": null,
         "team": null,
+        "key": {"spend": 3.5, "max_budget": 10.0, "budget_reset_at": "2027-02-01T00:00:00+00:00"},
         "budget_error": null,
         "gateway": {"url": "https://gateway.example.com", "reachable": false, "checked_at": null, "error": null},
         "polled_at": "2027-01-15T08:00:00Z"
       },
-      "key": {"spend": 3.5, "max_budget": 10.0, "budget_reset_at": "2027-02-01T00:00:00+00:00"},
       "environments": {"current": null, "available": []},
       "mcp": {"catalog_tools": null, "servers": {}}
     }
@@ -178,11 +178,11 @@ import Testing
                 teams: [TeamEntry(id: "team-a", alias: "Team A"), TeamEntry(id: "team-b", alias: "Team B")],
                 teamsError: nil,
                 team: TeamBudget(id: "team-a", alias: "Team A", spend: 7.25, maxBudget: 20, budgetResetAt: "2027-02-01T00:00:00+00:00"),
+                key: nil,
                 budgetError: "team_id=team-a is not allowed to call /team/info",
                 gateway: GatewayProbe(url: "https://uat.example.com", reachable: false, checkedAt: "2027-01-15T07:59:30Z", error: "connection refused"),
                 polledAt: "2027-01-15T07:59:00Z"
             ),
-            key: nil,
             environments: EnvironmentsStatus(
                 current: "uat",
                 available: [EnvironmentEntry(name: "dev", url: "https://gateway.example.com"), EnvironmentEntry(name: "uat", url: "https://uat.example.com")]
@@ -209,11 +209,11 @@ import Testing
                 teams: [TeamEntry(id: "team-c", alias: nil)],
                 teamsError: "the Gateway lists no teams for this user",
                 team: TeamBudget(id: "team-c", alias: nil, spend: 0.5, maxBudget: nil, budgetResetAt: nil),
+                key: nil,
                 budgetError: nil,
                 gateway: GatewayProbe(url: "https://gateway.example.com", reachable: true, checkedAt: "2027-01-15T08:00:05Z", error: "HTTP 503: warming up"),
                 polledAt: "2027-01-15T08:00:00Z"
             ),
-            key: nil,
             environments: EnvironmentsStatus(current: nil, available: []),
             mcp: McpStatus(catalogTools: 0, servers: [:])
         )
@@ -229,16 +229,16 @@ import Testing
     }
 
     @Test func decodesTheStaticKeyBudgetAndReadsAMissingOrNullKeyAsNone() throws {
-        #expect(try RelayStatus.decode(Data(Self.staticKey.utf8)).key == KeyBudget(spend: 3.5, maxBudget: 10, budgetResetAt: "2027-02-01T00:00:00+00:00"))
-        #expect(try RelayStatus.decode(Data(Self.signedIn.utf8)).key == nil)
-        #expect(try RelayStatus.decode(Data(#"{"listen": "127.0.0.1:4142", "key": null}"#.utf8)).key == nil)
+        #expect(try RelayStatus.decode(Data(Self.staticKey.utf8)).account?.key == KeyBudget(spend: 3.5, maxBudget: 10, budgetResetAt: "2027-02-01T00:00:00+00:00"))
+        #expect(try RelayStatus.decode(Data(Self.signedIn.utf8)).account?.key == nil)
+        #expect(try RelayStatus.decode(Data(#"{"listen": "127.0.0.1:4142", "account": {"key": null}}"#.utf8)).account?.key == nil)
     }
 
     @Test func showsTheStaticKeyBudgetFromADaemonStatusWhereNoTeamIsKnown() throws {
         let status = try RelayStatus.decode(Data(Self.staticKey.utf8))
         let account = try #require(status.account)
         #expect(
-            StatusFormatter.budgetLine(team: account.team, key: status.key, error: account.budgetError, polled: account.polledAt != nil, timeZone: .gmt)
+            StatusFormatter.budgetLine(team: account.team, key: account.key, error: account.budgetError, polled: account.polledAt != nil, timeZone: .gmt)
                 == "$3.50 of $10.00, resets 1 Feb"
         )
     }

@@ -117,7 +117,7 @@ struct PopoverView: View {
         let account = model.status?.account
         let budgetLine = StatusFormatter.budgetLine(
             team: account?.team,
-            key: model.status?.key,
+            key: account?.key,
             error: account?.budgetError,
             polled: account?.polledAt != nil
         )
