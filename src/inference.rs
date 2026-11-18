@@ -36,7 +36,7 @@ const HOP_BY_HOP: [&str; 9] = [
 const DECODE_ROUNDS: usize = 3;
 
 pub fn gateway_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::cert::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()

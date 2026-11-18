@@ -15,6 +15,7 @@ mod inference;
 mod mcp;
 mod pac;
 mod proxy;
+mod remote;
 mod setup;
 mod system;
 mod terminal;

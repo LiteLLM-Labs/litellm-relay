@@ -35,7 +35,7 @@ pub enum ExpiryState {
 
 /// HTTP client for credential probes, bounded so a silent Gateway never hangs a caller.
 pub fn check_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::cert::http_client_builder()
         .timeout(CREDENTIAL_CHECK_TIMEOUT)
         .build()
         .expect("reqwest client configuration should be valid")

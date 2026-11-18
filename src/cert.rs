@@ -32,9 +32,13 @@ pub struct CertificateAuthority {
     key_path: PathBuf,
 }
 
-#[cfg(not(test))]
 pub fn install_default_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    install_default_crypto_provider();
+    reqwest::Client::builder()
 }
 
 pub fn ensure_ca(ca_dir: &Path) -> Result<CertificateAuthority> {

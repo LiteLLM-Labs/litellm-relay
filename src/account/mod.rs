@@ -48,7 +48,7 @@ impl AccountHttp for HttpAccount {
         let url = url.to_string();
         let bearer = bearer.map(str::to_string);
         call(move || async move {
-            let client = reqwest::Client::builder()
+            let client = crate::cert::http_client_builder()
                 .timeout(timeout)
                 .connect_timeout(CONNECT_TIMEOUT.min(timeout))
                 .redirect(reqwest::redirect::Policy::none())

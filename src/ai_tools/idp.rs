@@ -308,7 +308,7 @@ fn request_tokens(token_endpoint: String, form: Vec<(String, String)>) -> Result
 }
 
 fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::cert::http_client_builder()
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("failed to build the IdP HTTP client")

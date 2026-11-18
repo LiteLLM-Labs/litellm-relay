@@ -139,7 +139,7 @@ impl CredentialCache {
 impl GatewayClient {
     pub fn new(config: Arc<RelayConfig>) -> Self {
         let timeout = Duration::from_secs_f64(config.request_timeout_seconds);
-        let http_client = reqwest::Client::builder()
+        let http_client = crate::cert::http_client_builder()
             .timeout(timeout)
             .build()
             .expect("reqwest client configuration should be valid");

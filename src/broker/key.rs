@@ -188,7 +188,7 @@ fn post(gateway_url: &str, route: &str, bearer: &str, body: Value) -> Result<Rep
     let url = format!("{}{route}", gateway_url.trim_end_matches('/'));
     let bearer = bearer.to_string();
     call(move || async move {
-        let client = reqwest::Client::builder()
+        let client = crate::cert::http_client_builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
             .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECONDS))
             .redirect(reqwest::redirect::Policy::none())

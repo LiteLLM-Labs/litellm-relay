@@ -1,5 +1,0 @@
-.local
-node_modules
-ios
-android
-*.test.ts

@@ -172,10 +172,17 @@ fn onboard_with(
 
 /// PATH first, then the directories the installers use, since the PATH of a
 /// LaunchAgent (the autoconfigure pass) carries neither Homebrew nor nvm.
-fn claude_binary(path: Option<&OsStr>, home: &Path) -> Option<PathBuf> {
+pub(crate) fn claude_binary(path: Option<&OsStr>, home: &Path) -> Option<PathBuf> {
+    claude_binary_in(path, install_dirs(home).into_iter())
+}
+
+fn claude_binary_in(
+    path: Option<&OsStr>,
+    directories: impl Iterator<Item = PathBuf>,
+) -> Option<PathBuf> {
     let on_path = path.map(env::split_paths).into_iter().flatten();
     on_path
-        .chain(install_dirs(home))
+        .chain(directories)
         .map(|dir| dir.join("claude"))
         .find(|candidate| candidate.is_file())
 }
@@ -227,7 +234,7 @@ fn node_version(name: &OsStr) -> (u64, u64, u64) {
 /// `node`, so no process in that chain carries Anthropic's signature and the
 /// daemon would refuse every credential call; later npm releases hard-link the
 /// native binary, which the daemon accepts like the installer's build.
-fn refuse_node_script_claude_code(claude_binary: Option<&Path>) -> Result<()> {
+pub(crate) fn refuse_node_script_claude_code(claude_binary: Option<&Path>) -> Result<()> {
     let Some(script) = claude_binary.filter(|path| runs_under_node(path)) else {
         return Ok(());
     };
@@ -888,15 +895,20 @@ mod tests {
         fs::create_dir_all(&path_bin).unwrap();
         fs::create_dir_all(home.join(".local/bin")).unwrap();
         let path = env::join_paths([&path_bin]).unwrap();
+        let lookup = |path| {
+            claude_binary_in(
+                path,
+                install_dirs(&home)
+                    .into_iter()
+                    .filter(|dir| dir.starts_with(&home)),
+            )
+        };
 
-        assert_eq!(claude_binary(Some(&path), &home), None);
+        assert_eq!(lookup(Some(path.as_os_str())), None);
 
         fs::write(nvm_bin.join("claude"), "#!/usr/bin/env node\n").unwrap();
-        assert_eq!(
-            claude_binary(Some(&path), &home),
-            Some(nvm_bin.join("claude"))
-        );
-        assert_eq!(claude_binary(None, &home), Some(nvm_bin.join("claude")));
+        assert_eq!(lookup(Some(path.as_os_str())), Some(nvm_bin.join("claude")));
+        assert_eq!(lookup(None), Some(nvm_bin.join("claude")));
 
         let newest_nvm_bin = home.join(".nvm/versions/node/v24.19.0/bin");
         let other_nvm_bins = [
@@ -908,19 +920,19 @@ mod tests {
             fs::write(bin.join("claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
         }
         assert_eq!(
-            claude_binary(Some(&path), &home),
+            lookup(Some(path.as_os_str())),
             Some(newest_nvm_bin.join("claude"))
         );
 
         fs::write(home.join(".local/bin/claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
         assert_eq!(
-            claude_binary(Some(&path), &home),
+            lookup(Some(path.as_os_str())),
             Some(home.join(".local/bin/claude"))
         );
 
         fs::write(path_bin.join("claude"), [0xcf, 0xfa, 0xed, 0xfe]).unwrap();
         assert_eq!(
-            claude_binary(Some(&path), &home),
+            lookup(Some(path.as_os_str())),
             Some(path_bin.join("claude"))
         );
         fs::remove_dir_all(&root).unwrap();

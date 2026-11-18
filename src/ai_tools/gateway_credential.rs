@@ -747,7 +747,7 @@ fn oauth_error_summary(body: &str) -> String {
 }
 
 fn http_client(redirects: Policy) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::cert::http_client_builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECONDS))
         .redirect(redirects)

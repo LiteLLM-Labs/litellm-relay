@@ -32,7 +32,7 @@ pub struct GatewaySsoClient {
 
 impl GatewaySsoClient {
     pub fn new() -> Self {
-        let http_client = reqwest::Client::builder()
+        let http_client = crate::cert::http_client_builder()
             .timeout(Duration::from_secs(10))
             .cookie_store(true)
             .build()

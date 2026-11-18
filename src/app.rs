@@ -33,6 +33,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Remote {
+        #[command(subcommand)]
+        command: crate::remote::Command,
+    },
     #[command(flatten)]
     Daemon(Box<CommandKind>),
     #[command(flatten)]
@@ -213,6 +217,9 @@ enum CommandKind {
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Remote { command }) => crate::remote::run(command)
+            .await
+            .map(|()| ExitCode::SUCCESS),
         None => run_interactive_default().await.map(|()| ExitCode::SUCCESS),
         Some(Command::Daemon(command)) => run_command(*command).await.map(|()| ExitCode::SUCCESS),
         Some(Command::Helper(HelperCommand::Credential { proxy })) => {
@@ -578,7 +585,7 @@ mod tests {
         let cli = Cli::try_parse_from(args).expect("the command line must parse");
         match cli.command.expect("a subcommand") {
             Command::Daemon(command) => *command,
-            Command::Helper(_) => panic!("expected a daemon command"),
+            Command::Helper(_) | Command::Remote { .. } => panic!("expected a daemon command"),
         }
     }
 
@@ -645,6 +652,7 @@ mod tests {
                 Command::Helper(HelperCommand::Recheck) => "recheck".to_string(),
                 Command::Helper(HelperCommand::Mcp) => "mcp".to_string(),
                 Command::Daemon(other) => describe(&other).to_string(),
+                Command::Remote { .. } => "remote".to_string(),
             };
             assert_eq!(parsed, expected);
         }
