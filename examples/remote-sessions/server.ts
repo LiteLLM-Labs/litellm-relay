@@ -1,32 +1,25 @@
-import { hostname, homedir, networkInterfaces } from 'node:os';
-import { resolve } from 'node:path';
+import { mkdir, chmod } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { createApp } from './app.ts';
 import { Authentication } from './auth.ts';
-import { CodexSessions } from './codex.ts';
 import { LiteLLMGateway } from './gateway.ts';
+import { StateStore } from './state.ts';
 
-const gatewayUrl = process.env.LITELLM_GATEWAY_URL?.replace(/\/v1\/?$/, '').replace(/\/$/, '');
-if (!gatewayUrl || new URL(gatewayUrl).protocol !== 'https:') {
-  console.error('Set LITELLM_GATEWAY_URL to your HTTPS LiteLLM gateway URL.');
-  process.exit(1);
-}
-const port = Number(process.env.REMOTE_PORT ?? '4174');
-const host = process.env.REMOTE_HOST ?? '127.0.0.1';
-const addresses = Object.values(networkInterfaces()).flatMap(value => value ?? [])
-  .filter(value => value.family === 'IPv4' && !value.internal).map(value => value.address);
-const socketPath = process.env.CODEX_CONTROL_SOCKET ?? `${homedir()}/.codex/app-server-control/app-server-control.sock`;
-const sessions = new CodexSessions(socketPath, process.env.LITELLM_MODEL_PROVIDER ?? 'litellm');
-const auth = new Authentication(new LiteLLMGateway(gatewayUrl), process.env.LITELLM_API_KEY ?? '', resolve('.local/owner.json'));
-await auth.load();
-const app = createApp({
-  auth, sessions, gatewayUrl, machineName: hostname(),
-  allowedHosts: new Set(['localhost', '127.0.0.1', '[::1]', hostname(), `${hostname()}.local`, ...addresses]),
-  phoneUrls: host === '127.0.0.1' ? [] : addresses.map(address => `http://${address}:${port}`),
+if (!process.env.LITELLM_GATEWAY_URL) throw new Error('Set LITELLM_GATEWAY_URL to your gateway URL.');
+const gateway = new URL(process.env.LITELLM_GATEWAY_URL);
+const publicUrl = new URL(process.env.REMOTE_PUBLIC_URL ?? 'http://127.0.0.1:4174');
+if (gateway.protocol !== 'https:' || gateway.username || gateway.password || gateway.search || gateway.hash) throw new Error('Set LITELLM_GATEWAY_URL to your HTTPS gateway URL.');
+if (publicUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(publicUrl.hostname)) throw new Error('REMOTE_PUBLIC_URL must use HTTPS except on localhost.');
+const gatewayUrl = gateway.toString().replace(/\/+$/, '').replace(/\/v1$/, '');
+const file = resolve(process.env.REMOTE_STATE_PATH ?? '.local/control.sqlite');
+await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+const state = new StateStore(file);
+await chmod(file, 0o600);
+const { server, devices } = createApp({ state, auth: new Authentication(new LiteLLMGateway(gatewayUrl), state, gatewayUrl), gatewayUrl, publicUrl: publicUrl.origin });
+server.listen(Number(process.env.REMOTE_PORT ?? '4174'), process.env.REMOTE_HOST ?? '127.0.0.1', () => {
+  console.log(`LiteLLM Remote service is running at ${publicUrl.origin}`);
+  console.log('Mac connectors connect outbound. No Codex socket or Mac LAN port is exposed.');
 });
-app.listen(port, host, () => {
-  console.log(`LiteLLM Remote bridge is running at http://localhost:${port}`);
-  console.log('Existing Codex sessions are read-only. No session will be resumed or restarted.');
-});
-app.on('error', error => { console.error(error.message); process.exitCode = 1; });
-process.on('SIGTERM', () => { sessions.close(); app.close(); });
-process.on('SIGINT', () => { sessions.close(); app.close(); });
+function stop(): void { devices.close(); server.close(() => { state.close(); }); }
+process.once('SIGTERM', stop);
+process.once('SIGINT', stop);

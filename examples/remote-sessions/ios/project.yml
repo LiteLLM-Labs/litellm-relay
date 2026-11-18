@@ -24,11 +24,10 @@ targets:
       path: LiteLLMRemote/Info.plist
       properties:
         CFBundleDisplayName: LiteLLM Remote
-        LiteLLMBridgeURL: $(REMOTE_BRIDGE_URL)
+        LiteLLMRemoteURL: $(REMOTE_SERVICE_URL)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSLocalNetworkUsageDescription: Connect to the LiteLLM bridge on your Mac to view your coding sessions.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UISupportedInterfaceOrientations:

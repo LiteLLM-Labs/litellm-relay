@@ -20,15 +20,13 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>LiteLLMBridgeURL</key>
-	<string>$(REMOTE_BRIDGE_URL)</string>
+	<key>LiteLLMRemoteURL</key>
+	<string>$(REMOTE_SERVICE_URL)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect to the LiteLLM bridge on your Mac to view your coding sessions.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

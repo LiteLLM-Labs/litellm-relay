@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "node --experimental-strip-types server.ts",
+    "agent": "node --experimental-strip-types agent.ts",
     "test": "node --experimental-strip-types --test *.test.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.327",
     "ws": "8.23.0",
     "zod": "4.6.7"
   },

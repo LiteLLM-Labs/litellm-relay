@@ -9,11 +9,16 @@
 /* Begin PBXBuildFile section */
 		0375118121BB6A17F5B4FA86 /* LiteLLMRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2DD63CC0C12C4DB06BCDC4B /* LiteLLMRemoteApp.swift */; };
 		046B4A0BD9155FEDA1F1BDDD /* RemoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F7629045C8E3822363E45B /* RemoteStore.swift */; };
+		07BA0B390E988486EE637582 /* DeviceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23002AD1A66750DDE13B0A1C /* DeviceViews.swift */; };
 		0CE958620626E09804E4193D /* SessionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99525DFBF30EDD5B995C1393 /* SessionViews.swift */; };
 		2ED1A11EBAF3FE6F4D7ADC58 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3DD3A4062935FC23761757F3 /* Assets.xcassets */; };
+		4BCB309597C99B89C241E35A /* NewSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFD09203FFA515AA1FF9E56E /* NewSessionView.swift */; };
 		77C2AF94471E8D5205538B41 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81636B9DC1927B76F84E0A5C /* Models.swift */; };
+		7DFAF3E4CE9A0A140503FC2F /* SessionVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 576637DE9C9CB401D6191F50 /* SessionVault.swift */; };
 		B353C6980210EEDEBDB8C89B /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */; };
 		D0ABFF0C2836B6049E25B888 /* RemoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */; };
+		E59607B355EBC8011B403D33 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CFCC18FB031202D1C353E36 /* Components.swift */; };
+		FC005057BCECF27F78FE8D32 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -28,12 +33,17 @@
 
 /* Begin PBXFileReference section */
 		00F4295C283EF3A7F83C8BD6 /* LiteLLMRemoteTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = LiteLLMRemoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		23002AD1A66750DDE13B0A1C /* DeviceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceViews.swift; sourceTree = "<group>"; };
 		2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTests.swift; sourceTree = "<group>"; };
+		25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
 		3DD3A4062935FC23761757F3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		4CFCC18FB031202D1C353E36 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		576637DE9C9CB401D6191F50 /* SessionVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVault.swift; sourceTree = "<group>"; };
 		65F7629045C8E3822363E45B /* RemoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStore.swift; sourceTree = "<group>"; };
 		81636B9DC1927B76F84E0A5C /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LiteLLMRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		99525DFBF30EDD5B995C1393 /* SessionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionViews.swift; sourceTree = "<group>"; };
+		AFD09203FFA515AA1FF9E56E /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
 		B2DD63CC0C12C4DB06BCDC4B /* LiteLLMRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiteLLMRemoteApp.swift; sourceTree = "<group>"; };
 		C49FD3722DBA7F3ABA2F0F83 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
@@ -53,11 +63,16 @@
 			isa = PBXGroup;
 			children = (
 				3DD3A4062935FC23761757F3 /* Assets.xcassets */,
+				4CFCC18FB031202D1C353E36 /* Components.swift */,
 				E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */,
+				25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */,
+				23002AD1A66750DDE13B0A1C /* DeviceViews.swift */,
 				C49FD3722DBA7F3ABA2F0F83 /* Info.plist */,
 				B2DD63CC0C12C4DB06BCDC4B /* LiteLLMRemoteApp.swift */,
 				81636B9DC1927B76F84E0A5C /* Models.swift */,
+				AFD09203FFA515AA1FF9E56E /* NewSessionView.swift */,
 				65F7629045C8E3822363E45B /* RemoteStore.swift */,
+				576637DE9C9CB401D6191F50 /* SessionVault.swift */,
 				99525DFBF30EDD5B995C1393 /* SessionViews.swift */,
 			);
 			path = LiteLLMRemote;
@@ -180,10 +195,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E59607B355EBC8011B403D33 /* Components.swift in Sources */,
 				B353C6980210EEDEBDB8C89B /* ConnectionView.swift in Sources */,
+				FC005057BCECF27F78FE8D32 /* ConversationView.swift in Sources */,
+				07BA0B390E988486EE637582 /* DeviceViews.swift in Sources */,
 				0375118121BB6A17F5B4FA86 /* LiteLLMRemoteApp.swift in Sources */,
 				77C2AF94471E8D5205538B41 /* Models.swift in Sources */,
+				4BCB309597C99B89C241E35A /* NewSessionView.swift in Sources */,
 				046B4A0BD9155FEDA1F1BDDD /* RemoteStore.swift in Sources */,
+				7DFAF3E4CE9A0A140503FC2F /* SessionVault.swift in Sources */,
 				0CE958620626E09804E4193D /* SessionViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

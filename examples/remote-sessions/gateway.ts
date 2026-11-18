@@ -16,7 +16,7 @@ export type LoginPoll = z.infer<typeof pollSchema>;
 export interface Gateway {
   start(): Promise<Result<LoginFlow>>;
   poll(flow: LoginFlow, team?: string): Promise<Result<LoginPoll>>;
-  verify(key: string): Promise<boolean>;
+  models(key: string): Promise<Result<readonly string[]>>;
 }
 
 export class LiteLLMGateway implements Gateway {
@@ -45,13 +45,15 @@ export class LiteLLMGateway implements Gateway {
     } catch { return failure(502, 'Cannot reach your LiteLLM gateway.'); }
   }
 
-  async verify(key: string): Promise<boolean> {
+  async models(key: string): Promise<Result<readonly string[]>> {
     try {
-      const response = await fetch(`${this.url}/v1/models`, {
-        headers: { Authorization: `Bearer ${key}` }, redirect: 'error', signal: AbortSignal.timeout(10000),
-      });
-      if (!response.ok) return false;
-      return z.object({ data: z.array(z.unknown()) }).safeParse(await response.json()).success;
-    } catch { return false; }
+      const response = await fetch(`${this.url}/v1/models`, { redirect: 'error', signal: AbortSignal.timeout(10000),
+        headers: { Authorization: `Bearer ${key}` } });
+      if (!response.ok) return failure(502, 'Your gateway could not return its model catalog.');
+      const parsed = z.object({ data: z.array(z.object({ id: z.string() })) }).safeParse(await response.json());
+      if (!parsed.success) return failure(502, 'The gateway returned an unsupported model catalog.');
+      return { ok: true, value: [...new Set(parsed.data.data.map(model => model.id).filter(id => id.length > 0 && id.length <= 200))] };
+    } catch { return failure(502, 'Could not load your gateway’s model catalog.'); }
   }
+
 }
