@@ -676,18 +676,33 @@ async fn claude_native_protocol_handoff_approvals_stop_and_route_changes() {
     let script = directory.0.join("claude-fixture");
     let cwd = directory.0.to_str().unwrap();
     let fixture = r#"#!/usr/bin/python3
-import json, os, sys
+import json, os, pathlib, sys, time
 if sys.argv[1:] == ['agents', '--json']:
     active = os.path.join(os.environ['CLAUDE_CONFIG_DIR'], 'active.json')
-    print(open(active).read() if os.path.exists(active) else '[]')
+    rows = json.loads(open(active).read()) if os.path.exists(active) else []
+    live = []
+    for row in rows:
+        try:
+            if row.get('fixture'):
+                os.kill(row['pid'], 0)
+            live.append(row)
+        except ProcessLookupError:
+            pass
+    print(json.dumps(live))
     sys.exit(0)
 assert not any(os.environ.get(key) for key in ['LITELLM_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
 session = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith(('--session-id=', '--resume=')))
+home = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+if (home / 'pause-startup').exists():
+    (home / 'active.json').write_text(json.dumps([{'sessionId':session,'pid':os.getpid(),'cwd':os.getcwd(),'fixture':True}]))
+    (home / 'starting').touch()
 def emit(value):
     print(json.dumps(value), flush=True)
 for line in sys.stdin:
     value = json.loads(line)
     if value['type'] == 'control_request':
+        while value['request']['subtype'] == 'initialize' and (home / 'pause-startup').exists():
+            time.sleep(0.01)
         emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
         if value['request']['subtype'] == 'interrupt':
             emit({'type':'result','subtype':'success','session_id':session})
@@ -706,12 +721,12 @@ for line in sys.stdin:
 "#;
     std::fs::write(&script, fixture).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let claude = claude::Claude::new(
-        script,
+    let claude = Arc::new(claude::Claude::new(
+        script.clone(),
         home.clone(),
         directory.0.join("grants"),
         Url::parse("https://gateway.example.test").unwrap(),
-    );
+    ));
     let session = claude.create(cwd.into()).unwrap();
     let (_, id) = protocol::split_session(&session.id).unwrap();
     assert!(claude
@@ -760,9 +775,28 @@ for line in sys.stdin:
         .await
         .is_err());
     assert_eq!(claude.interrupt(id).await.unwrap()["stopped"], true);
-    let existing = Uuid::new_v4();
     let project = home.join("projects/fixture");
     std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(format!("{id}.jsonl")),
+        format!(
+            "{}\n",
+            json!({"type":"user","cwd":cwd,"uuid":"first-context","message":{"content":"Continue"}})
+        ),
+    )
+    .unwrap();
+    claude.handoff(id).await.unwrap();
+    let reopened = claude::Claude::new(
+        script.clone(),
+        home.clone(),
+        directory.0.join("grants"),
+        Url::parse("https://gateway.example.test").unwrap(),
+    );
+    assert_eq!(
+        reopened.read(id).await.unwrap().session.model.as_deref(),
+        Some("fixture-model")
+    );
+    let existing = Uuid::new_v4();
     std::fs::write(project.join(format!("{existing}.jsonl")), format!("{}\n", json!({"type":"user","cwd":cwd,"uuid":"original","message":{"content":"Original context"}}))).unwrap();
     std::fs::write(
         home.join("active.json"),
@@ -825,4 +859,33 @@ for line in sys.stdin:
             .unwrap()["pid"],
         wrong_process
     );
+    let startup = claude.create(cwd.into()).unwrap();
+    let (_, startup_id) = protocol::split_session(&startup.id).unwrap();
+    std::fs::write(project.join(format!("{startup_id}.jsonl")), format!("{}\n", json!({"type":"user","cwd":cwd,"uuid":"startup-context","message":{"content":"Earlier context"}}))).unwrap();
+    std::fs::write(home.join("pause-startup"), "").unwrap();
+    let shared = claude.clone();
+    let sending = tokio::spawn(async move {
+        shared
+            .send(startup_id, "Continue after startup".into(), None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !home.join("starting").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let starting = claude.read(startup_id).await.unwrap();
+    assert_eq!(starting.session.status, "working");
+    assert!(starting.session.can_stop);
+    assert!(!starting.session.can_send);
+    assert_eq!(starting.messages[0].text, "Earlier context");
+    assert_eq!(claude.interrupt(startup_id).await.unwrap()["stopped"], true);
+    assert!(sending.await.unwrap().is_err());
+    std::fs::remove_file(home.join("pause-startup")).unwrap();
+    claude
+        .send(startup_id, "Retry after stop".into(), None)
+        .await
+        .unwrap();
 }

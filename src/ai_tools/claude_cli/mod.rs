@@ -332,16 +332,13 @@ fn write_claude_settings(settings: &RelaySettings, credential: &Credential) -> R
     Ok(path)
 }
 
-/// Merges Relay's managed keys into an existing `settings.json` object,
-/// preserving all other keys. The credential modes are mutually exclusive:
-/// StaticKey writes `ANTHROPIC_AUTH_TOKEN` and drops any `apiKeyHelper`, while
-/// the helpers write `apiKeyHelper` and drop `ANTHROPIC_AUTH_TOKEN`.
 fn merge_claude_settings(
     mut root: Map<String, Value>,
     settings: &RelaySettings,
     credential: &Credential,
 ) -> Result<Map<String, Value>> {
     let env = env_object(&mut root);
+    env.insert("ANTHROPIC_API_KEY".into(), Value::String(String::new()));
     env.insert(
         "ANTHROPIC_BASE_URL".into(),
         Value::String(base_url(settings, credential)),
@@ -369,7 +366,7 @@ fn merge_claude_settings(
             );
         }
         Credential::TokenHelper | Credential::Broker { .. } => {
-            env.remove("ANTHROPIC_AUTH_TOKEN");
+            env.insert("ANTHROPIC_AUTH_TOKEN".into(), Value::String(String::new()));
         }
     }
 
@@ -532,10 +529,8 @@ mod tests {
             Value::String("http://127.0.0.1:4199".into()),
             "the broker path must send Claude Code to the daemon on loopback, whatever relay.host says"
         );
-        assert!(
-            !env.contains_key("ANTHROPIC_AUTH_TOKEN"),
-            "the broker path must leave no bearer in the settings file"
-        );
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "");
+        assert_eq!(env["ANTHROPIC_API_KEY"], "");
         assert_eq!(env["KEEP"], Value::String("yes".into()));
         assert_eq!(
             env["ANTHROPIC_CUSTOM_HEADERS"],
@@ -741,14 +736,8 @@ mod tests {
                 .ends_with("claude-token"),
             "token helper mode must set apiKeyHelper"
         );
-        assert!(
-            root["env"]
-                .as_object()
-                .unwrap()
-                .get("ANTHROPIC_AUTH_TOKEN")
-                .is_none(),
-            "token helper mode must remove a stale static ANTHROPIC_AUTH_TOKEN"
-        );
+        assert_eq!(root["env"]["ANTHROPIC_AUTH_TOKEN"], "");
+        assert_eq!(root["env"]["ANTHROPIC_API_KEY"], "");
         assert!(
             !root["env"]
                 .as_object()

@@ -8,6 +8,7 @@ mod cert;
 mod config;
 mod credential;
 mod daemon;
+mod datetime;
 mod events;
 mod gateway;
 mod http;

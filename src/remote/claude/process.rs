@@ -15,8 +15,8 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    sync::{mpsc, oneshot},
+    process::{ChildStdin, Command},
+    sync::{mpsc, oneshot, watch},
 };
 use url::Url;
 use uuid::Uuid;
@@ -28,6 +28,7 @@ pub(super) struct Permission {
 }
 #[derive(Default)]
 pub(super) struct Live {
+    pub(super) starting: bool,
     pub(super) working: bool,
     pub(super) closed: bool,
     pub(super) stopping: bool,
@@ -158,11 +159,43 @@ struct Write {
 #[derive(Clone)]
 pub(super) struct Running {
     sender: mpsc::Sender<Write>,
+    stop: watch::Sender<bool>,
+    finished: watch::Receiver<bool>,
     pub(super) live: Arc<Mutex<Live>>,
     pub(super) endpoint: Url,
 }
 
+struct Startup {
+    stop: watch::Sender<bool>,
+    completed: bool,
+}
+
+impl Drop for Startup {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.stop.send_replace(true);
+        }
+    }
+}
+
 impl Running {
+    pub(super) async fn close(&self) -> Result<()> {
+        self.live.lock().expect("Claude live lock").stopping = true;
+        self.stop.send_replace(true);
+        let mut finished = self.finished.clone();
+        finished
+            .wait_for(|finished| *finished)
+            .await
+            .map_err(|_| Failure::new(503, "Claude shutdown could not be confirmed."))?;
+        if !self.live.lock().expect("Claude live lock").closed {
+            return Err(Failure::new(
+                503,
+                "Claude shutdown could not be confirmed. Restart the connector before retrying.",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn write(&self, value: Value, control: bool) -> Result<Value> {
         let (reply, receive) = oneshot::channel();
         self.sender
@@ -288,6 +321,13 @@ impl Claude {
             .get(&grant.id)
             .filter(|run| !run.live.lock().expect("Claude live lock").closed)
         {
+            let live = run.live.lock().expect("Claude live lock");
+            if live.starting || live.stopping {
+                return Err(Failure::new(
+                    409,
+                    "Claude is still starting or stopping. Wait before retrying.",
+                ));
+            }
             return Ok(run.clone());
         }
         if self
@@ -380,7 +420,12 @@ impl Claude {
             .take()
             .ok_or_else(|| Failure::new(503, "Cannot read Claude output."))?;
         let (sender, mut receiver) = mpsc::channel::<Write>(32);
-        let live = Arc::new(Mutex::new(Live::default()));
+        let (stop, mut stopping) = watch::channel(false);
+        let (finished, completion) = watch::channel(false);
+        let live = Arc::new(Mutex::new(Live {
+            starting: true,
+            ..Live::default()
+        }));
         let state = live.clone();
         let id = grant.id;
         tokio::spawn(async move {
@@ -389,9 +434,10 @@ impl Claude {
             let mut line = Vec::new();
             loop {
                 tokio::select! {
+                    _ = stopping.changed() => break,
                     write = receiver.recv() => {
                         let Some(write) = write else { break; };
-                        if input.write_all(format!("{}\n", write.value).as_bytes()).await.is_err() { let _ = write.reply.send(Err(Failure::new(503, "Claude disconnected."))); break; }
+                        if !write_input(&mut input, &mut stopping, &write.value).await { let _ = write.reply.send(Err(Failure::new(503, "Claude disconnected."))); break; }
                         if write.control { pending.retain(|_, reply| !reply.is_closed()); pending.insert(write.value["request_id"].as_str().unwrap_or("").into(), write.reply); }
                         else { let _ = write.reply.send(Ok(json!({}))); }
                     }
@@ -410,34 +456,67 @@ impl Claude {
                         }
                         let event = state.lock().expect("Claude live lock").event(&value, id);
                         match event {
-                            Ok(Some(response)) => { if input.write_all(format!("{response}\n").as_bytes()).await.is_err() { break; } }
+                            Ok(Some(response)) => { if !write_input(&mut input, &mut stopping, &response).await { break; } }
                             Ok(None) => {}
                             Err(error) => { state.lock().expect("Claude live lock").error = Some(error.error); break; }
                         }
                     }
                 }
             }
-            let _ = child.kill().await;
+            let exited = child.kill().await.is_ok() || child.try_wait().ok().flatten().is_some();
             let mut live = state.lock().expect("Claude live lock");
             if live.working && !live.stopping && live.error.is_none() {
                 live.error = Some("Claude disconnected before confirming the turn completed. Refresh before retrying.".into());
             }
-            live.closed = true;
+            live.closed = exited;
+            live.starting = false;
             live.working = false;
             live.approvals.clear();
+            finished.send_replace(true);
         });
         let run = Running {
             sender,
+            stop,
+            finished: completion,
             live,
             endpoint,
         };
-        run.control(json!({"subtype":"initialize","hooks":null}))
-            .await?;
+        let mut startup = Startup {
+            stop: run.stop.clone(),
+            completed: false,
+        };
         self.runs
             .lock()
             .expect("Claude runs lock")
             .insert(grant.id, run.clone());
+        if let Err(error) = run
+            .control(json!({"subtype":"initialize","hooks":null}))
+            .await
+        {
+            run.close().await?;
+            return Err(error);
+        }
+        {
+            let mut live = run.live.lock().expect("Claude live lock");
+            if live.closed || live.stopping {
+                return Err(Failure::new(503, "Claude startup was stopped."));
+            }
+            live.starting = false;
+        }
+        startup.completed = true;
         Ok(run)
+    }
+}
+
+async fn write_input(
+    input: &mut ChildStdin,
+    stopping: &mut watch::Receiver<bool>,
+    value: &Value,
+) -> bool {
+    let line = format!("{value}\n");
+    tokio::select! {
+        _ = stopping.changed() => false,
+        result = input.write_all(line.as_bytes()) => result.is_ok(),
     }
 }
 

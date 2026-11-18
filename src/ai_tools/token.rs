@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -111,7 +111,7 @@ pub fn ensure_token(idp: &IdpSection, sign_in: SignIn) -> Result<String> {
     ensure_with(
         &token_cache_path(),
         idp,
-        Utc::now().timestamp(),
+        Timestamp::now().as_second(),
         sign_in,
         &open_browser,
     )

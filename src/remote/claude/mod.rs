@@ -48,6 +48,9 @@ impl Claude {
                 "This session is still open. Finish its turn and run /exit before handing it over.",
             ));
         }
+        if self.grants()?.iter().any(|grant| grant.id == id) {
+            return Ok(());
+        }
         let (cwd, messages, _) = self.history(id)?;
         self.save(&Grant {
             id,
@@ -67,7 +70,9 @@ impl Claude {
         let live = runs
             .get(&grant.id)
             .map(|run| run.live.lock().expect("Claude live lock"));
-        let working = live.as_ref().is_some_and(|live| live.working);
+        let working = live
+            .as_ref()
+            .is_some_and(|live| live.working || live.starting);
         Session {
             id: Agent::Claude.session_id(&grant.id.to_string()),
             agent: Agent::Claude,
@@ -312,9 +317,17 @@ impl Claude {
             .expect("Claude runs lock")
             .get(&id)
             .cloned();
-        let Some(run) = run.filter(|run| run.live.lock().expect("Claude live lock").working) else {
+        let Some(run) = run.filter(|run| {
+            let live = run.live.lock().expect("Claude live lock");
+            live.working || live.starting
+        }) else {
             return Ok(json!({"stopped":false}));
         };
+        let starting = run.live.lock().expect("Claude live lock").starting;
+        if starting {
+            run.close().await?;
+            return Ok(json!({"stopped":true}));
+        }
         run.live.lock().expect("Claude live lock").stopping = true;
         run.control(json!({"subtype":"interrupt"})).await?;
         Ok(json!({"stopped":true}))

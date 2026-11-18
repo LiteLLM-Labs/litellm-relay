@@ -31,15 +31,17 @@ relay onboard-codex \
   --oidc-issuer https://login.yourco.com \
   --oidc-client-id 00000000-0000-0000-0000-000000000000 \
   --team engineering \
-  --model gpt-5-codex
+  --model "$CODEX_GATEWAY_MODEL"
 ```
+
+Set `CODEX_GATEWAY_MODEL` to an exact model ID served by your gateway. Relay preserves an existing model, but a fresh configuration requires `--model` rather than assuming an upstream default exists on your gateway.
 
 The `--oidc-*` flags are the same ones `relay onboard` takes (see [Claude Code](claude-code.md#commands)); the IdP session is shared, so a developer who already signed in for Claude Code is not asked again.
 
 This writes `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5-codex"
+model = "<gateway-model-id>"
 model_provider = "litellm"
 
 [model_providers.litellm]

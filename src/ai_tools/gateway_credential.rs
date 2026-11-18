@@ -5,7 +5,7 @@
 use std::{error::Error, fmt, fs, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::Utc;
+use jiff::Timestamp;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -114,7 +114,7 @@ pub fn ensure_gateway_credential(
         renewal,
     };
     let unlocked = load_store()?;
-    if let Some(credential) = fresh(&unlocked.credentials, request, Utc::now().timestamp()) {
+    if let Some(credential) = fresh(&unlocked.credentials, request, Timestamp::now().as_second()) {
         return Ok(GatewayCredential::Issued(credential.access_token.clone()));
     }
     let _renewing = lock_store()?;
@@ -124,7 +124,7 @@ pub fn ensure_gateway_credential(
         &mut identity_token,
         &store.credentials,
         request,
-        Utc::now().timestamp(),
+        Timestamp::now().as_second(),
     )?;
     match resolved {
         Resolved::Unsupported => Ok(GatewayCredential::Unsupported),

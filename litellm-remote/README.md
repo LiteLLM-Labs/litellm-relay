@@ -28,6 +28,8 @@ relay remote serve --listen 127.0.0.1:4174
 
 Terminate HTTPS at your existing ingress and forward WebSocket upgrades for `/agent`. Keep the listener private to that ingress. State defaults to Relay’s `remote/control.sqlite` file. Use `--state` to choose another path. The SQLite state is for hashed mobile and device tokens, account ownership, model IDs, and request deduplication. It does not store conversation transcripts or gateway inference credentials.
 
+The inference credential broker’s signed-caller check is supported on macOS only. On Linux, configure the CLIs to use the gateway directly with a virtual key, rather than the broker’s loopback inference endpoint. Never bypass the caller check.
+
 On each Mac, install a current Relay build with its inference proxy and credential broker. Onboard Claude Code or Codex through Relay first. Set `LITELLM_REMOTE_URL` to the remote service origin, then run the following commands.
 
 ```sh
@@ -36,6 +38,8 @@ relay remote connect
 ```
 
 Pairing opens gateway SSO and writes an owner-only device credential under Relay’s home directory. Sign in to the same account in the mobile app to see that Mac. Remove a Mac from the app to revoke its device token. Remote control remains opt-in. This version does not add process supervision to RelayBar or the MDM installer.
+
+Relay no longer invents a default Codex model ID. An existing Codex model is preserved. For a fresh setup, run `relay onboard-codex --model <gateway-model-id>` using an exact model ID from your gateway catalog.
 
 Codex uses the current user’s shared app-server control socket under `CODEX_HOME`. `remote connect --codex-socket` selects another socket. `--provider` selects the configured Codex provider ID and defaults to `litellm`.
 
@@ -56,6 +60,8 @@ The phone continues the saved UUID. It does not transfer in-flight tools, proces
 ## Mobile setup
 
 Users configure their own gateway URL. Route the gateway’s `/.well-known/litellm-remote.json` to the service’s discovery endpoint, or enter the service HTTPS address under Advanced in the app. Discovery reports the configured gateway and service origins. The clients reject a service associated with another gateway.
+
+Both mobile apps require an HTTPS gateway URL, including for localhost. A local HTTP gateway needs a TLS frontend with a certificate trusted by the phone. The control service may use HTTP on loopback for development, but that does not relax the gateway requirement. On a physical phone, localhost refers to the phone, so use a reachable hostname. The connector uses the operating system’s trusted certificate roots for WSS and does not fall back to insecure TLS.
 
 The gateway must support `/sso/cli/start` and `/sso/cli/poll/{login_id}`. Sign-in uses the system browser. Mobile sessions expire after seven days and are stored in iOS Keychain or encrypted with Android Keystore. Signing out revokes the mobile token. Devices and operations are scoped to the authenticated account.
 
@@ -85,3 +91,5 @@ cd litellm-remote/android
 ```
 
 Rust tests exercise persisted ownership and deduplication, gateway SSO and model authorization, outbound WebSocket routing, current Relay environment checks, public-message filtering, shared Codex RPC, and native Claude control messages. Protocol fixtures do not substitute for a live end-to-end check with the installed agents and a real gateway.
+
+The MCP SDK is pinned to the reviewed chrono-optional commit from [upstream PR 1474](https://github.com/modelcontextprotocol/rust-sdk/pull/1474). Default features remain disabled, so chrono is not included. Move back to a published SDK release once that change ships.

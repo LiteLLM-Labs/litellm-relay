@@ -3,7 +3,10 @@ package ai.litellm.remote
 import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -71,7 +74,7 @@ import kotlinx.coroutines.launch
             }
         }
         (state.actionError ?: state.error ?: state.detail?.error?.takeUnless { session.status == "handoff_required" } ?: state.modelError)?.let { Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ErrorNotice(it) } }
-        LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(22.dp), verticalArrangement = Arrangement.spacedBy(30.dp)) {
+        LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(22.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
             if (session.status == "handoff_required") item {
                 Surface(color = Color.White, shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -87,8 +90,11 @@ import kotlinx.coroutines.launch
             items(state.detail?.approvals.orEmpty(), key = { it.id }) { approval ->
                 Surface(color = Color.White, shape = RoundedCornerShape(17.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Warning.copy(alpha = 0.3f))) {
                     Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text("APPROVAL NEEDED", color = Warning, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                         Text(approval.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                        SelectionContainer { Text(approval.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace, lineHeight = 19.sp) }
+                        SelectionContainer(Modifier.fillMaxWidth().heightIn(max = 240.dp).background(Canvas, RoundedCornerShape(10.dp)).verticalScroll(rememberScrollState()).padding(12.dp)) {
+                            Text(approval.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace, lineHeight = 19.sp)
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OutlinedButton(onClick = { scope.launch { deciding = true; model.approve(approval, "decline"); deciding = false } }, enabled = !deciding) { Text("Decline") }
                             if (approval.canAccept) Button(onClick = { scope.launch { deciding = true; model.approve(approval, "accept"); deciding = false } }, enabled = !deciding) { Text("Allow once") }
@@ -185,7 +191,8 @@ import kotlinx.coroutines.launch
     } else if (message.role == "user") {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             Column(Modifier.align(Alignment.CenterEnd).widthIn(max = maxWidth - 48.dp)
-                .background(Color(0xFFECEFF3), RoundedCornerShape(20.dp)).padding(horizontal = 17.dp, vertical = 13.dp),
+                .background(RoyalBlue.copy(alpha = 0.09f), RoundedCornerShape(20.dp))
+                .border(1.dp, RoyalBlue.copy(alpha = 0.1f), RoundedCornerShape(20.dp)).padding(horizontal = 17.dp, vertical = 13.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SelectionContainer {
                     Text(if (expanded) message.text else message.text.take(8000), color = Ink, fontSize = 15.sp, lineHeight = 23.sp)
@@ -194,7 +201,7 @@ import kotlinx.coroutines.launch
             }
         }
     } else {
-        Column(Modifier.fillMaxWidth().padding(end = 10.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
+        Column(Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(20.dp)).border(1.dp, Border.copy(alpha = 0.7f), RoundedCornerShape(20.dp)).padding(17.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(30.dp).background(Color.White, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) { TrainMark(22) }
                 Text(agentName, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)

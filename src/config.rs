@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_saphyr::granit_parser::{Event, Marker, Parser, ScalarStyle, Span, Tag};
 
@@ -24,8 +24,8 @@ pub struct RelayConfig {
     pub shadow_enabled: bool,
     pub gateway_url: String,
     pub gateway_api_key: Option<String>,
-    pub gateway_enrolled_at: Option<DateTime<Utc>>,
-    pub gateway_expires_at: Option<DateTime<Utc>>,
+    pub gateway_enrolled_at: Option<Timestamp>,
+    pub gateway_expires_at: Option<Timestamp>,
     pub shadow_model: String,
     pub shadow_min_interval_seconds: u64,
     pub request_timeout_seconds: f64,
@@ -587,9 +587,9 @@ pub struct GatewaySection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enrolled_at: Option<DateTime<Utc>>,
+    pub enrolled_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -610,9 +610,9 @@ impl Default for GatewaySection {
 }
 
 impl GatewaySection {
-    pub fn enroll(&mut self, api_key: String, expires_at: Option<DateTime<Utc>>) {
+    pub fn enroll(&mut self, api_key: String, expires_at: Option<Timestamp>) {
         self.api_key = Some(api_key);
-        self.enrolled_at = Some(Utc::now());
+        self.enrolled_at = Some(Timestamp::now());
         self.expires_at = expires_at;
     }
 
@@ -789,7 +789,7 @@ pub struct CodexSection {
 impl Default for CodexSection {
     fn default() -> Self {
         Self {
-            model: "gpt-5-codex".into(),
+            model: String::new(),
             provider_id: "litellm".into(),
             team: None,
         }
@@ -1429,12 +1429,10 @@ gateway:
 
     #[test]
     fn should_round_trip_credential_timestamps() {
-        let enrolled_at = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T21:27:58.096Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let enrolled_at = "2026-09-21T21:27:58Z".parse::<jiff::Timestamp>().unwrap();
+        let expires_at = "2026-09-22T21:27:58.096Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap();
         let settings = RelaySettings {
             gateway: GatewaySection {
                 url: "https://gateway.example.com".into(),
@@ -1456,16 +1454,14 @@ gateway:
 
     #[test]
     fn should_stamp_enrollment_when_a_new_key_replaces_the_saved_one() {
-        let stale = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let stale = "2026-09-21T21:27:58Z".parse::<jiff::Timestamp>().unwrap();
         let mut gateway = GatewaySection {
             api_key: Some("sk-old".into()),
             enrolled_at: Some(stale),
             expires_at: Some(stale),
             ..GatewaySection::default()
         };
-        let before = Utc::now();
+        let before = Timestamp::now();
 
         gateway.enroll("sk-new".into(), None);
 
@@ -1476,12 +1472,8 @@ gateway:
 
     #[test]
     fn should_keep_enrollment_timestamps_when_the_saved_key_is_handed_back() {
-        let enrolled_at = DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T21:27:58Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let enrolled_at = "2026-09-21T21:27:58Z".parse::<jiff::Timestamp>().unwrap();
+        let expires_at = "2026-09-22T21:27:58Z".parse::<jiff::Timestamp>().unwrap();
         let mut gateway = GatewaySection {
             api_key: Some("sk-saved".into()),
             enrolled_at: Some(enrolled_at),
@@ -2237,18 +2229,14 @@ mcp:
         assert_eq!(settings.gateway.api_key.as_deref(), Some("sk-1234abcd"));
         assert_eq!(
             settings.gateway.enrolled_at,
-            Some(
-                DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
-                    .unwrap()
-                    .with_timezone(&Utc)
-            )
+            Some("2026-09-21T21:27:58Z".parse::<jiff::Timestamp>().unwrap())
         );
         assert_eq!(
             settings.gateway.expires_at,
             Some(
-                DateTime::parse_from_rfc3339("2026-09-22T21:27:58.096Z")
+                "2026-09-22T21:27:58.096Z"
+                    .parse::<jiff::Timestamp>()
                     .unwrap()
-                    .with_timezone(&Utc)
             )
         );
         assert!(settings.shadow.enabled);

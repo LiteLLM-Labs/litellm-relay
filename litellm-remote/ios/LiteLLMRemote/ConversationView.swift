@@ -37,7 +37,7 @@ struct SessionView: View {
             if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError { InlineError(text: error).padding(.horizontal, 18).padding(.top, 8) }
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 30) {
+                    LazyVStack(alignment: .leading, spacing: 22) {
                         if detail?.olderMessages == true { Text("Latest messages").font(.caption2).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity) }
                         if session.status == "handoff_required" {
                             VStack(alignment: .leading, spacing: 14) {
@@ -74,7 +74,7 @@ struct SessionView: View {
                 if session.canStop {
                     Button { Task { await stopTurn() } } label: {
                         if stopping { ProgressView() }
-                        else { Image(systemName: "stop.fill") }
+                        else { Label("Stop", systemImage: "stop.fill").labelStyle(.titleAndIcon).font(.caption.weight(.semibold)) }
                     }
                     .disabled(stopping).accessibilityLabel("Stop current turn")
                 }
@@ -181,13 +181,16 @@ struct SessionView: View {
 
     private func approvalCard(_ approval: SessionApproval) -> some View {
         VStack(alignment: .leading, spacing: 14) {
+            Text("APPROVAL NEEDED").font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(Palette.warning)
             Label(approval.title, systemImage: "hand.raised").font(.subheadline.weight(.semibold))
-            Text(approval.text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            ScrollView { Text(approval.text).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                .frame(maxHeight: 240).padding(12).background(Palette.background, in: RoundedRectangle(cornerRadius: 10))
             HStack {
                 Button("Decline", role: .destructive) { Task { await decide(approval, decision: "decline") } }.buttonStyle(.bordered)
                 if approval.canAccept { Button("Allow once") { Task { await decide(approval, decision: "accept") } }.buttonStyle(.borderedProminent).foregroundStyle(.white) }
             }
             .disabled(deciding)
+            .controlSize(.large)
         }
         .padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.white, in: RoundedRectangle(cornerRadius: 17))
         .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(Palette.warning.opacity(0.3)))
@@ -279,7 +282,8 @@ private struct MessageView: View {
                 }
                 .padding(.horizontal, 17).padding(.vertical, 13)
                 .foregroundStyle(Palette.ink)
-                .background(Color(red: 0.925, green: 0.935, blue: 0.95), in: RoundedRectangle(cornerRadius: 20))
+                .background(Palette.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 20))
+                .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.accent.opacity(0.1)))
                 .layoutPriority(1)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -295,7 +299,9 @@ private struct MessageView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.text.count > 8000 && !expanded { Button("Show full message") { expanded = true }.font(.caption) }
             }
-            .padding(.trailing, 10)
+            .padding(17).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white, in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.border.opacity(0.7)))
         }
     }
 }

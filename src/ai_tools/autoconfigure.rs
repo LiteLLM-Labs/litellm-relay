@@ -7,8 +7,8 @@
 use std::future::Future;
 
 use anyhow::Result;
-use chrono::Utc;
 use console::style;
+use jiff::Timestamp;
 use url::Url;
 
 use crate::{
@@ -165,7 +165,7 @@ async fn credential_gate(
         check,
         saved_key_is_only_the_desktop_fallback(&params, settings.idp.is_configured()),
         gateway_url,
-        expiry_state(expires_at, Utc::now()),
+        expiry_state(expires_at, Timestamp::now()),
     ))
 }
 
@@ -290,7 +290,7 @@ where
             println!(
                 "  {}  Gateway credential expires at {}. {REENROLL_HINT}",
                 style("!").yellow().bold(),
-                at.to_rfc3339()
+                crate::datetime::rfc3339(at)
             );
         }
         CredentialGate::NotStatic | CredentialGate::Verified { .. } => {}
@@ -402,7 +402,6 @@ fn desktop_reuse_saved_sso(params: &AutoConfigureParams) -> bool {
 mod tests {
     use super::*;
     use anyhow::anyhow;
-    use chrono::DateTime;
     use std::{
         cell::Cell,
         env, fs,
@@ -1051,9 +1050,7 @@ mod tests {
         let home = temp_home("verified");
         fs::create_dir_all(home.join(".claude")).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
-        let expires_at = DateTime::parse_from_rfc3339("2026-09-22T22:27:58Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let expires_at = "2026-09-22T22:27:58Z".parse::<jiff::Timestamp>().unwrap();
 
         for expiry in [
             ExpiryState::Unknown,

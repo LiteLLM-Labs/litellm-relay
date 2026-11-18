@@ -1510,12 +1510,8 @@ mod tests {
         let old_override = env::var_os(MANAGED_SETTINGS_PATH_ENV);
         env::set_var("HOME", &home);
         env::set_var(MANAGED_SETTINGS_PATH_ENV, &managed);
-        let enrolled_at = chrono::DateTime::parse_from_rfc3339("2026-09-21T21:27:58Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let expires_at = chrono::DateTime::parse_from_rfc3339("2026-09-23T21:27:58Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let enrolled_at = "2026-09-21T21:27:58Z".parse::<jiff::Timestamp>().unwrap();
+        let expires_at = "2026-09-23T21:27:58Z".parse::<jiff::Timestamp>().unwrap();
         let mut enrolled = settings_with("https://gw.corp", Some("sk-saved"), "claude-sonnet-4-5");
         enrolled.gateway.enrolled_at = Some(enrolled_at);
         enrolled.gateway.expires_at = Some(expires_at);
