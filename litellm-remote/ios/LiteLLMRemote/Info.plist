@@ -20,8 +20,6 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>LiteLLMRemoteURL</key>
-	<string>$(REMOTE_SERVICE_URL)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

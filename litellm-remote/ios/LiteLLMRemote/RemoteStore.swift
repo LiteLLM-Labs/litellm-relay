@@ -73,7 +73,7 @@ final class RemoteStore {
 
     init() {
         self.address = UserDefaults.standard.string(forKey: "workspaceAddress")
-            ?? (Bundle.main.object(forInfoDictionaryKey: "LiteLLMRemoteURL") as? String) ?? ""
+            ?? ""
         self.gatewayAddress = UserDefaults.standard.string(forKey: "gatewayAddress") ?? ""
         self.serviceOverride = UserDefaults.standard.string(forKey: "serviceOverride") ?? ""
     }

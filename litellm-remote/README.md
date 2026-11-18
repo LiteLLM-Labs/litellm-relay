@@ -43,7 +43,7 @@ Relay no longer invents a default Codex model ID. An existing Codex model is pre
 
 Codex uses the current user’s shared app-server control socket under `CODEX_HOME`. `remote connect --codex-socket` selects another socket. `--provider` selects the configured Codex provider ID and defaults to `litellm`.
 
-Claude uses the installed native executable and its stream-json control protocol. `--claude-executable` or `CLAUDE_EXECUTABLE` selects a binary. `CLAUDE_CONFIG_DIR` selects its settings and transcript directory. Native CLI settings, tool permissions, and the existing credential helper remain in use. The connector never calls `relay credential` itself or expands the broker allowlist.
+Claude uses the installed native executable and its stream-json control protocol. `--claude-executable` selects a binary. `CLAUDE_CONFIG_DIR` selects its settings and transcript directory. Native CLI settings, tool permissions, and the existing credential helper remain in use. The connector never calls `relay credential` itself or expands the broker allowlist.
 
 For a Relay-managed inference endpoint, inherited gateway keys are removed from the Claude child process. Embedded keys in Claude settings are rejected for that route. For an explicitly configured direct gateway endpoint, existing Claude credentials or an explicitly supplied `LITELLM_API_KEY` can authenticate inference. No credential value belongs in source or command examples.
 

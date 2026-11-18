@@ -121,9 +121,8 @@ pub async fn run(command: Command) -> Result<()> {
                 public.path() == "/",
                 "Use the control service origin without a path."
             );
-            let path = state
-                .or_else(|| std::env::var_os("REMOTE_STATE_PATH").map(PathBuf::from))
-                .unwrap_or_else(|| crate::config::relay_home().join("remote/control.sqlite"));
+            let path =
+                state.unwrap_or_else(|| crate::config::relay_home().join("remote/control.sqlite"));
             let service = service::Service::open(gateway, public, &path)
                 .map_err(|error| anyhow::anyhow!(error.error))?;
             let listener = tokio::net::TcpListener::bind(listen)

@@ -24,7 +24,6 @@ targets:
       path: LiteLLMRemote/Info.plist
       properties:
         CFBundleDisplayName: LiteLLM Remote
-        LiteLLMRemoteURL: $(REMOTE_SERVICE_URL)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

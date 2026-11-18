@@ -705,6 +705,11 @@ for line in sys.stdin:
             time.sleep(0.01)
         emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
         if value['request']['subtype'] == 'interrupt':
+            if (home / 'reap-exit').exists():
+                (home / 'exit-pid').write_text(str(os.getpid()))
+                while (home / 'reap-exit').exists():
+                    time.sleep(0.01)
+                sys.exit(0)
             emit({'type':'result','subtype':'success','session_id':session})
     elif value['type'] == 'user':
         with open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], 'deliveries.jsonl'), 'a') as log:
@@ -886,6 +891,32 @@ for line in sys.stdin:
     std::fs::remove_file(home.join("pause-startup")).unwrap();
     claude
         .send(startup_id, "Retry after stop".into(), None)
+        .await
+        .unwrap();
+    std::fs::write(home.join("reap-exit"), "").unwrap();
+    claude.interrupt(startup_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !home.join("exit-pid").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pid = std::fs::read_to_string(home.join("exit-pid"))
+        .unwrap()
+        .parse::<libc::pid_t>()
+        .unwrap();
+    std::fs::remove_file(home.join("reap-exit")).unwrap();
+    assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while claude.read(startup_id).await.unwrap().session.can_stop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    claude
+        .send(startup_id, "Retry after process exit".into(), None)
         .await
         .unwrap();
 }

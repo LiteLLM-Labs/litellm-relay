@@ -187,12 +187,6 @@ impl Running {
             .wait_for(|finished| *finished)
             .await
             .map_err(|_| Failure::new(503, "Claude shutdown could not be confirmed."))?;
-        if !self.live.lock().expect("Claude live lock").closed {
-            return Err(Failure::new(
-                503,
-                "Claude shutdown could not be confirmed. Restart the connector before retrying.",
-            ));
-        }
         Ok(())
     }
 
@@ -468,11 +462,12 @@ impl Claude {
             if live.working && !live.stopping && live.error.is_none() {
                 live.error = Some("Claude disconnected before confirming the turn completed. Refresh before retrying.".into());
             }
-            live.closed = exited;
+            live.closed = true;
             live.starting = false;
+            live.stopping = false;
             live.working = false;
             live.approvals.clear();
-            finished.send_replace(true);
+            finished.send_replace(exited);
         });
         let run = Running {
             sender,

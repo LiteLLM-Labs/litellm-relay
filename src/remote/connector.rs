@@ -189,7 +189,6 @@ pub fn sessions(
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::system::home_dir().join(".claude"));
     let executable = claude_executable
-        .or_else(|| std::env::var_os("CLAUDE_EXECUTABLE").map(PathBuf::from))
         .or_else(|| {
             crate::ai_tools::claude_cli::claude_binary(
                 std::env::var_os("PATH").as_deref(),
