@@ -1,0 +1,20 @@
+{
+  "name": "litellm-relay-remote-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types server.ts",
+    "test": "node --experimental-strip-types --test *.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "8.23.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "typescript": "7.0.2"
+  }
+}
