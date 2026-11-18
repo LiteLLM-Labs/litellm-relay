@@ -39,7 +39,7 @@ relay remote connect
 
 Pairing opens gateway SSO and writes an owner-only device credential under Relay’s home directory. Sign in to the same account in the mobile app to see that Mac. Remove a Mac from the app to revoke its device token. Remote control remains opt-in. This version does not add process supervision to RelayBar or the MDM installer.
 
-Relay no longer invents a default Codex model ID. An existing Codex model is preserved. For a fresh setup, run `relay onboard-codex --model <gateway-model-id>` using an exact model ID from your gateway catalog.
+This companion does not change Relay’s global Codex onboarding defaults. Configure an exact gateway-served model in your managed Relay configuration, or use the existing `relay onboard-codex --model <gateway-model-id>` command when setting up Codex manually.
 
 Codex uses the current user’s shared app-server control socket under `CODEX_HOME`. `remote connect --codex-socket` selects another socket. `--provider` selects the configured Codex provider ID and defaults to `litellm`.
 

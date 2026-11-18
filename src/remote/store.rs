@@ -229,6 +229,16 @@ impl Store {
         }
     }
 
+    pub fn cancel_pending(&self, subject: &str, request: Uuid) -> Result<()> {
+        self.db(|connection| {
+            connection.execute(
+                "DELETE FROM requests WHERE subject = ? AND request_id = ? AND response IS NULL",
+                params![subject, request.to_string()],
+            )
+        })
+        .map(|_| ())
+    }
+
     pub fn finish(&self, subject: &str, request: Uuid, result: Result<Value>) -> Result<()> {
         let result = serde_json::to_string(&Outcome::from_result(result))
             .map_err(|_| Failure::new(500, "Cannot save the request outcome."))?;

@@ -179,7 +179,7 @@ impl Claude {
             .map(|message| {
                 live.as_ref()
                     .and_then(|live| {
-                        live.messages.iter().find(|value| {
+                        live.transcript.messages.iter().find(|value| {
                             value.id == message.id && value.text.len() > message.text.len()
                         })
                     })
@@ -189,7 +189,7 @@ impl Claude {
             .chain(
                 live.as_ref()
                     .into_iter()
-                    .flat_map(|live| live.messages.iter())
+                    .flat_map(|live| live.transcript.messages.iter())
                     .filter(|message| !stored.iter().any(|value| value.id == message.id))
                     .cloned(),
             )
@@ -236,7 +236,7 @@ impl Claude {
             let mut live = run.live.lock().expect("Claude live lock");
             live.working = true;
             live.error = None;
-            live.message(
+            live.transcript.message(
                 Message {
                     id: turn.to_string(),
                     role: "user".into(),

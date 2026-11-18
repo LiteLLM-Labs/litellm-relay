@@ -1,4 +1,4 @@
-use super::super::protocol::{Failure, Message, Result};
+use super::super::protocol::{redact, Failure, Message, Result};
 use super::{visible, Claude, Grant};
 use serde_json::{json, Value};
 use std::{
@@ -6,6 +6,74 @@ use std::{
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+
+#[derive(Default)]
+pub(super) struct Transcript {
+    pub(super) messages: Vec<Message>,
+    block: String,
+    text_blocks: usize,
+    older: bool,
+}
+
+impl Transcript {
+    pub(super) fn message(&mut self, message: Message, append: bool) {
+        if let Some(previous) = self
+            .messages
+            .iter_mut()
+            .find(|value| value.id == message.id)
+        {
+            previous.text = if append {
+                format!("{}{}", previous.text, message.text)
+            } else {
+                message.text
+            };
+            previous.text = redact(&previous.text).chars().take(256_000).collect();
+            return;
+        }
+        self.messages.push(Message {
+            text: redact(&message.text).chars().take(256_000).collect(),
+            ..message
+        });
+        if self.messages.len() > 120 {
+            self.messages.remove(0);
+            self.older = true;
+        }
+    }
+
+    pub(super) fn append(&mut self, value: &Value) {
+        let role = value["type"].as_str().unwrap_or("");
+        let id = value["uuid"].as_str().unwrap_or("");
+        let block = value["message"]["id"].as_str().unwrap_or(id);
+        if role == "assistant" && self.block != block {
+            self.block = block.into();
+            self.text_blocks = 0;
+        }
+        for mut message in visible(&value["message"], id, role) {
+            if role == "assistant" && message.role == "assistant" {
+                message.id = format!("{block}/{}", self.text_blocks);
+                self.text_blocks += 1;
+            }
+            self.message(message, false);
+        }
+    }
+
+    pub(super) fn stream(&mut self, event: &Value) {
+        if event["type"] == "message_start" {
+            self.block = event["message"]["id"].as_str().unwrap_or("").into();
+            self.text_blocks = 0;
+        }
+        if event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta" {
+            self.message(
+                Message {
+                    id: format!("{}/{}", self.block, self.text_blocks),
+                    role: "assistant".into(),
+                    text: event["delta"]["text"].as_str().unwrap_or("").into(),
+                },
+                true,
+            );
+        }
+    }
+}
 
 impl Claude {
     pub(super) fn grants(&self) -> Result<Vec<Grant>> {
@@ -77,32 +145,16 @@ impl Claude {
         file.take(4 * 1024 * 1024)
             .read_to_end(&mut bytes)
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
-        let messages = bytes
+        let transcript = bytes
             .split(|byte| *byte == b'\n')
             .skip(usize::from(offset > 0))
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
             .filter(|value| value["parent_tool_use_id"].is_null() && value["isMeta"] != true)
-            .flat_map(|value| {
-                visible(
-                    &value["message"],
-                    value["uuid"].as_str().unwrap_or(""),
-                    value["type"].as_str().unwrap_or(""),
-                )
-            })
-            .collect::<Vec<_>>();
-        let older = offset > 0 || messages.len() > 120;
-        Ok((
-            cwd,
-            messages
-                .into_iter()
-                .rev()
-                .take(120)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect(),
-            older,
-        ))
+            .fold(Transcript::default(), |mut transcript, value| {
+                transcript.append(&value);
+                transcript
+            });
+        Ok((cwd, transcript.messages, offset > 0 || transcript.older))
     }
 }
 

@@ -789,7 +789,7 @@ pub struct CodexSection {
 impl Default for CodexSection {
     fn default() -> Self {
         Self {
-            model: String::new(),
+            model: "gpt-5-codex".into(),
             provider_id: "litellm".into(),
             team: None,
         }

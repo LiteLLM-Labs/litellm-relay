@@ -1,9 +1,9 @@
 use super::super::{
-    protocol::{now_ms, public_error, redact, Approval, Failure, Message, Result},
+    protocol::{now_ms, public_error, redact, Approval, Failure, Result},
     route,
 };
-use super::history::settings;
-use super::{visible, Claude, Grant};
+use super::history::{settings, Transcript};
+use super::{Claude, Grant};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -34,35 +34,11 @@ pub(super) struct Live {
     pub(super) stopping: bool,
     pub(super) model: Option<String>,
     pub(super) error: Option<String>,
-    pub(super) messages: Vec<Message>,
+    pub(super) transcript: Transcript,
     pub(super) approvals: HashMap<Uuid, Permission>,
-    pub(super) block: String,
 }
 
 impl Live {
-    pub(super) fn message(&mut self, message: Message, append: bool) {
-        if let Some(previous) = self
-            .messages
-            .iter_mut()
-            .find(|value| value.id == message.id)
-        {
-            previous.text = if append {
-                format!("{}{}", previous.text, message.text)
-            } else {
-                message.text
-            };
-            previous.text = redact(&previous.text).chars().take(256_000).collect();
-            return;
-        }
-        self.messages.push(Message {
-            text: redact(&message.text).chars().take(256_000).collect(),
-            ..message
-        });
-        if self.messages.len() > 120 {
-            self.messages.remove(0);
-        }
-    }
-
     fn event(&mut self, value: &Value, id: Uuid) -> Result<Option<Value>> {
         match value["type"].as_str().unwrap_or("") {
             "system" if value["subtype"] == "init" => {
@@ -72,30 +48,10 @@ impl Live {
                 self.model = value["model"].as_str().map(str::to_owned);
             }
             "assistant" | "user" if value["parent_tool_use_id"].is_null() => {
-                for message in visible(
-                    &value["message"],
-                    value["uuid"].as_str().unwrap_or(""),
-                    value["type"].as_str().unwrap_or(""),
-                ) {
-                    self.message(message, false);
-                }
+                self.transcript.append(value);
             }
             "stream_event" if value["parent_tool_use_id"].is_null() => {
-                let event = &value["event"];
-                if event["type"] == "message_start" {
-                    self.block = event["message"]["id"].as_str().unwrap_or("").into();
-                }
-                if event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta"
-                {
-                    self.message(
-                        Message {
-                            id: format!("{}/{}", self.block, event["index"]),
-                            role: "assistant".into(),
-                            text: event["delta"]["text"].as_str().unwrap_or("").into(),
-                        },
-                        true,
-                    );
-                }
+                self.transcript.stream(&value["event"]);
             }
             "result" => {
                 self.working = false;

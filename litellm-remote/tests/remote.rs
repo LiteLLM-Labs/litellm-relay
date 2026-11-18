@@ -273,6 +273,20 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
             .status(),
         503
     );
+    let input = json!({"requestId":Uuid::new_v4(),"cwd":"/fixture","agent":"claude"});
+    for _ in 0..2 {
+        assert_eq!(
+            client()
+                .post(path.clone())
+                .bearer_auth(&owner)
+                .json(&input)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
+    }
     let mut endpoint = server.url.join("/agent").unwrap();
     endpoint.set_scheme("ws").unwrap();
     let mut request = endpoint.as_str().into_client_request().unwrap();
@@ -282,7 +296,9 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
             .parse()
             .unwrap(),
     );
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(request.clone())
+        .await
+        .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let mac = tokio::spawn(async move {
@@ -298,6 +314,11 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
                         }
                     ));
                     count.fetch_add(1, Ordering::SeqCst);
+                    if matches!(&command.action, Action::Create { cwd, .. } if cwd == "/uncertain")
+                    {
+                        socket.close(None).await.unwrap();
+                        return;
+                    }
                     let reply = protocol::Reply {
                         id: command.id,
                         result: Outcome::from_result(Ok(json!({"id":"created-once"}))),
@@ -312,7 +333,6 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
             }
         }
     });
-    let input = json!({"requestId":Uuid::new_v4(),"cwd":"/fixture","agent":"claude"});
     for _ in 0..2 {
         let response = client()
             .post(path.clone())
@@ -328,6 +348,32 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
         );
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let uncertain = json!({"requestId":Uuid::new_v4(),"cwd":"/uncertain","agent":"claude"});
+    assert_eq!(
+        client()
+            .post(path.clone())
+            .bearer_auth(&owner)
+            .json(&uncertain)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        503
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let (_reconnected, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let retry = tokio::time::timeout(
+        Duration::from_secs(2),
+        client()
+            .post(path.clone())
+            .bearer_auth(&owner)
+            .json(&uncertain)
+            .send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retry.status(), 503);
     let denied = client()
         .post(
             server
@@ -706,7 +752,8 @@ for line in sys.stdin:
         emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
         if value['request']['subtype'] == 'interrupt':
             if (home / 'reap-exit').exists():
-                (home / 'exit-pid').write_text(str(os.getpid()))
+                (home / 'exit-pid.tmp').write_text(str(os.getpid()))
+                (home / 'exit-pid.tmp').replace(home / 'exit-pid')
                 while (home / 'reap-exit').exists():
                     time.sleep(0.01)
                 sys.exit(0)
@@ -717,12 +764,18 @@ for line in sys.stdin:
         reported = '00000000-0000-4000-8000-000000000001' if value['message']['content'] == 'Mismatch' else session
         emit({'type':'system','subtype':'init','session_id':reported,'model':'fixture-model'})
         emit({'type':'stream_event','event':{'type':'message_start','message':{'id':'reply'}}})
-        emit({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Live Claude reply'}}})
+        emit({'type':'assistant','uuid':'thinking','message':{'id':'reply','content':[{'type':'thinking','thinking':'Hidden'}]}})
+        emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'text_delta','text':'Live Claude reply'}}})
         emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Edit','input':{'file_path':'fixture.txt','old_string':'before','new_string':'after'}}})
     elif value['type'] == 'control_response':
         assert value['response']['response']['behavior'] == 'allow'
         assert value['response']['response']['updatedInput']['new_string'] == 'after'
-        emit({'type':'assistant','uuid':'uuid','message':{'id':'reply','content':[{'type':'text','text':'Live Claude reply completed'}]}})
+        reply = {'type':'assistant','uuid':'uuid','cwd':os.getcwd(),'message':{'id':'reply','content':[{'type':'text','text':'Live Claude reply completed'}]}}
+        project = home / 'projects' / 'fixture'
+        project.mkdir(parents=True, exist_ok=True)
+        with (project / (session + '.jsonl')).open('a') as transcript:
+            transcript.write(json.dumps(reply) + '\n')
+        emit(reply)
 "#;
     std::fs::write(&script, fixture).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -755,6 +808,14 @@ for line in sys.stdin:
         .iter()
         .any(|message| message.text == "Live Claude reply"));
     assert_eq!(detail.session.status, "needs_approval");
+    assert_eq!(
+        detail
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1
+    );
     let approval = Uuid::parse_str(&detail.approvals[0].id).unwrap();
     assert!(claude.send(id, "Duplicate".into(), None).await.is_err());
     assert!(claude
@@ -775,6 +836,46 @@ for line in sys.stdin:
         .approve(id, approval, Decision::Accept)
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !claude
+            .read(id)
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.text == "Live Claude reply completed")
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let completed = claude.read(id).await.unwrap();
+    assert_eq!(
+        completed
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1
+    );
+    let restored = claude::Claude::new(
+        script.clone(),
+        home.clone(),
+        directory.0.join("grants"),
+        Url::parse("https://gateway.example.test").unwrap(),
+    );
+    assert_eq!(
+        restored
+            .read(id)
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1
+    );
     assert!(claude
         .approve(id, approval, Decision::Accept)
         .await
@@ -802,7 +903,11 @@ for line in sys.stdin:
         Some("fixture-model")
     );
     let existing = Uuid::new_v4();
-    std::fs::write(project.join(format!("{existing}.jsonl")), format!("{}\n", json!({"type":"user","cwd":cwd,"uuid":"original","message":{"content":"Original context"}}))).unwrap();
+    std::fs::write(project.join(format!("{existing}.jsonl")), format!("{}\n{}\n{}\n",
+        json!({"type":"user","cwd":cwd,"uuid":"original","message":{"content":"Original context"}}),
+        json!({"type":"assistant","uuid":"chunk-a","message":{"id":"multi-block","content":[{"type":"text","text":"Repeated on purpose"}]}}),
+        json!({"type":"assistant","uuid":"chunk-b","message":{"id":"multi-block","content":[{"type":"text","text":"Repeated on purpose"}]}}),
+    )).unwrap();
     std::fs::write(
         home.join("active.json"),
         json!([{"sessionId":existing,"pid":1,"cwd":cwd}]).to_string(),
@@ -815,6 +920,10 @@ for line in sys.stdin:
         claude.read(existing).await.unwrap().messages[0].text,
         "Original context"
     );
+    let repeated = claude.read(existing).await.unwrap();
+    assert_eq!(repeated.messages.len(), 3);
+    assert_eq!(repeated.messages[1].text, repeated.messages[2].text);
+    assert_ne!(repeated.messages[1].id, repeated.messages[2].id);
     claude
         .send(existing, "Resume original".into(), None)
         .await

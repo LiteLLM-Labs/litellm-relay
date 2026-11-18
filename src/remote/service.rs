@@ -200,7 +200,14 @@ impl Service {
             }
             RequestState::New => {}
         }
-        let result = self.peers.request(&device, action).await;
+        let pending = match self.peers.dispatch(&device, action) {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.store.cancel_pending(&identity.subject, request)?;
+                return Err(error);
+            }
+        };
+        let result = self.peers.receive(&device, pending).await;
         self.store
             .finish(&identity.subject, request, result.clone())?;
         result

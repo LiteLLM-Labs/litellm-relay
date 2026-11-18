@@ -235,15 +235,7 @@ fn render_codex_config(
         .context("failed to parse existing ~/.codex/config.toml")?;
 
     let provider_id = settings.codex.provider_id.as_str();
-    if !settings.codex.model.trim().is_empty() {
-        doc["model"] = value(settings.codex.model.clone());
-    } else if !doc
-        .get("model")
-        .and_then(Item::as_str)
-        .is_some_and(|model| !model.trim().is_empty())
-    {
-        bail!("Choose a model served by your gateway with relay onboard-codex --model <model-id>.");
-    }
+    doc["model"] = value(settings.codex.model.clone());
     doc["model_provider"] = value(provider_id);
 
     table_like_mut(&mut doc, "model_providers")?.insert(
@@ -375,31 +367,6 @@ mod tests {
             doc["model_providers"]["litellm"]["wire_api"].as_str(),
             Some("responses")
         );
-    }
-
-    #[test]
-    fn should_keep_an_existing_model_and_require_one_for_a_fresh_codex_config() {
-        let settings = RelaySettings::default();
-        let existing = "model = \"gateway-coding-model\"\n";
-        let rendered = render_codex_config(
-            existing,
-            &settings,
-            &Credential::TokenHelper,
-            "/opt/relay/litellm-relay",
-        )
-        .unwrap();
-        assert_eq!(
-            parse(&rendered)["model"].as_str(),
-            parse(existing)["model"].as_str()
-        );
-        let error = render_codex_config(
-            "",
-            &settings,
-            &Credential::TokenHelper,
-            "/opt/relay/litellm-relay",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("--model"));
     }
 
     #[test]
@@ -836,7 +803,6 @@ trust_level = \"trusted\" # inline comment
             gateway_url: Some("https://gw.corp".into()),
             api_key: Some("sk-saved".into()),
             quiet: true,
-            model: Some("gateway-coding-model".into()),
             ..CodexOnboardParams::default()
         };
 
@@ -845,7 +811,6 @@ trust_level = \"trusted\" # inline comment
             CodexOnboardParams {
                 gateway_url: Some("https://gw.corp".into()),
                 env_key: Some("LITELLM_KEY".into()),
-                model: Some("gateway-coding-model".into()),
                 quiet: true,
                 ..CodexOnboardParams::default()
             },

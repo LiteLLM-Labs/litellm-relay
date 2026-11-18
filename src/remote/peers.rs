@@ -25,6 +25,11 @@ struct Connection {
     seen: Instant,
 }
 
+pub(super) struct Pending {
+    id: Uuid,
+    receiver: oneshot::Receiver<Outcome>,
+}
+
 pub struct Peers {
     connections: Mutex<HashMap<Uuid, Connection>>,
     store: Arc<Store>,
@@ -55,6 +60,11 @@ impl Peers {
     }
 
     pub async fn request(&self, device: &Device, action: Action) -> Result<Value> {
+        let pending = self.dispatch(device, action)?;
+        self.receive(device, pending).await
+    }
+
+    pub(super) fn dispatch(&self, device: &Device, action: Action) -> Result<Pending> {
         let id = Uuid::new_v4();
         let (sender, receiver) = oneshot::channel();
         {
@@ -80,10 +90,14 @@ impl Peers {
                 .map_err(|_| Failure::new(503, "Your Mac is busy or disconnected."))?;
             connection.pending.insert(id, sender);
         }
-        let reply = tokio::time::timeout(Duration::from_secs(25), receiver).await;
+        Ok(Pending { id, receiver })
+    }
+
+    pub(super) async fn receive(&self, device: &Device, pending: Pending) -> Result<Value> {
+        let reply = tokio::time::timeout(Duration::from_secs(25), pending.receiver).await;
         if let Ok(mut connections) = self.connections.lock() {
             if let Some(connection) = connections.get_mut(&device.id) {
-                connection.pending.remove(&id);
+                connection.pending.remove(&pending.id);
             }
         }
         match reply {
