@@ -79,6 +79,30 @@ pub async fn check_credential(
     }
 }
 
+/// The model IDs the Gateway serves for `api_key`, or None when the catalog
+/// cannot be read with this credential.
+pub async fn list_models(
+    http: &reqwest::Client,
+    gateway_url: &str,
+    api_key: &str,
+) -> Option<Vec<String>> {
+    let url = format!("{}/v1/models", gateway_url.trim_end_matches('/'));
+    let response = http.get(url).bearer_auth(api_key).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    let models = body
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|model| model.get("id")?.as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some(models)
+}
+
 /// The Gateway's own explanation, from either its `{"error":{"message"}}` or its
 /// FastAPI `{"detail"}` error shape.
 fn gateway_message(body: &str) -> Option<String> {

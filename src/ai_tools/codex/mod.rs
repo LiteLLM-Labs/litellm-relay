@@ -5,6 +5,7 @@ use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table, TableLike, 
 
 use crate::{
     ai_tools::{
+        blocking,
         credential::{
             bearer_plan, keep_key_for_broker, local_proxy_url, relay_executable, BearerPlan, Host,
             PROXY_FLAG,
@@ -14,6 +15,7 @@ use crate::{
         launch_agent::{require_daemon, DaemonHost, Launchd},
     },
     config::{load_settings, save_settings, IdpOverrides, RelaySettings},
+    credential::{check_client, list_models},
     mcp::CLIENT_SERVER_NAME,
     system::home_dir,
 };
@@ -97,6 +99,7 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
         settings.move_gateway_to(&gateway_url);
     }
     settings.idp.apply(&params.idp);
+    let explicit_model = params.model.is_some();
     if let Some(model) = params.model {
         settings.codex.model = model;
     }
@@ -115,6 +118,13 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
     }
     let host = Host::current();
     keep_key_for_broker(&mut settings, host, explicit_key.as_deref());
+    if !explicit_model {
+        let probe_key = explicit_key
+            .clone()
+            .or_else(|| settings.gateway.api_key.clone())
+            .filter(|key| !key.trim().is_empty());
+        align_model_with_gateway(&mut settings, probe_key);
+    }
     let static_key = explicit_key.as_deref().or_else(|| {
         if host == Host::MacOs && !settings.idp.is_configured() {
             settings
@@ -178,6 +188,51 @@ fn onboard_with(params: CodexOnboardParams, daemon: &dyn DaemonHost) -> Result<(
 }
 
 /// Prints the Gateway credential on stdout for Codex's `auth` command hook.
+/// Managed setup reaches here with no model choice, so the saved or default
+/// model is checked against what the gateway actually serves before it is
+/// written into Codex's config. Notices go to stderr so `--quiet` callers
+/// (autoconfigure) still surface a substituted or unverifiable model.
+fn align_model_with_gateway(settings: &mut RelaySettings, probe_key: Option<String>) {
+    let saved = settings.codex.model.clone();
+    let Some(key) = probe_key else {
+        eprintln!(
+            "Relay could not verify that your gateway serves `{saved}` (no gateway credential during onboarding). If Codex fails, rerun with `relay onboard-codex --model <id>`."
+        );
+        return;
+    };
+    let gateway = settings.gateway.url.clone();
+    let models =
+        blocking::call(
+            move || async move { Ok(list_models(&check_client(), &gateway, &key).await) },
+        )
+        .ok()
+        .flatten();
+    match models {
+        Some(models) if !models.is_empty() => {
+            if models.iter().any(|model| model == &saved) {
+                return;
+            }
+            let chosen = preferred_codex_model(&models).to_owned();
+            eprintln!(
+                "Your gateway does not serve `{saved}`; Codex will use `{chosen}` from the gateway catalog. Override with `relay onboard-codex --model <id>`."
+            );
+            settings.codex.model = chosen;
+        }
+        _ => eprintln!(
+            "Relay could not read your gateway's model catalog; keeping `{saved}`. If Codex fails, rerun with `relay onboard-codex --model <id>`."
+        ),
+    }
+}
+
+fn preferred_codex_model(models: &[String]) -> &str {
+    let contains = |id: &&String, needle: &str| id.to_lowercase().contains(needle);
+    models
+        .iter()
+        .find(|id| contains(id, "codex"))
+        .or_else(|| models.iter().find(|id| contains(id, "gpt")))
+        .unwrap_or(&models[0])
+}
+
 pub fn print_token() -> Result<()> {
     let settings = load_settings()?;
     print_bearer(&settings, settings.codex.team.as_deref())
@@ -343,6 +398,65 @@ mod tests {
         rendered
             .parse()
             .expect("rendered config should be valid TOML")
+    }
+
+    #[test]
+    fn should_prefer_codex_capable_gateway_models() {
+        let catalog = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            preferred_codex_model(&catalog(&[
+                "text-embedding-3",
+                "gpt-4.1",
+                "openai/gpt-5.1-codex"
+            ])),
+            "openai/gpt-5.1-codex"
+        );
+        assert_eq!(
+            preferred_codex_model(&catalog(&["text-embedding-3", "gpt-4.1"])),
+            "gpt-4.1"
+        );
+        assert_eq!(
+            preferred_codex_model(&catalog(&["claude-sonnet-5-5"])),
+            "claude-sonnet-5-5"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_align_the_default_model_with_the_gateway_catalog() {
+        use crate::credential::test_support::serve_once;
+
+        // An unserved saved model is replaced with a served Codex-capable one.
+        let gateway = serve_once(
+            "200 OK",
+            r#"{"data":[{"id":"gpt-4.1"},{"id":"openai/gpt-5.1-codex"}]}"#,
+        )
+        .await;
+        let mut settings = settings_with_team(None);
+        settings.gateway.url = gateway;
+        align_model_with_gateway(&mut settings, Some("fixture-key".into()));
+        assert_eq!(settings.codex.model, "openai/gpt-5.1-codex");
+
+        // A served saved model is kept.
+        let gateway = serve_once("200 OK", r#"{"data":[{"id":"gpt-5-codex"}]}"#).await;
+        let mut settings = settings_with_team(None);
+        settings.gateway.url = gateway;
+        align_model_with_gateway(&mut settings, Some("fixture-key".into()));
+        assert_eq!(settings.codex.model, "gpt-5-codex");
+
+        // Without a credential or with an unreadable catalog, the saved model stays.
+        let mut settings = settings_with_team(None);
+        settings.gateway.url = "http://127.0.0.1:1".into();
+        align_model_with_gateway(&mut settings, None);
+        assert_eq!(settings.codex.model, "gpt-5-codex");
+        align_model_with_gateway(&mut settings, Some("fixture-key".into()));
+        assert_eq!(settings.codex.model, "gpt-5-codex");
+
+        // An empty catalog changes nothing.
+        let gateway = serve_once("200 OK", r#"{"data":[]}"#).await;
+        let mut settings = settings_with_team(None);
+        settings.gateway.url = gateway;
+        align_model_with_gateway(&mut settings, Some("fixture-key".into()));
+        assert_eq!(settings.codex.model, "gpt-5-codex");
     }
 
     #[test]
