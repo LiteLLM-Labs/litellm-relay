@@ -24,6 +24,7 @@ pub struct Claude {
     executable: PathBuf,
     home: PathBuf,
     grants: PathBuf,
+    conversations: Mutex<HashMap<Uuid, Grant>>,
     gateway: Url,
     runs: Mutex<HashMap<Uuid, Running>>,
     mutation: AsyncMutex<()>,
@@ -35,6 +36,7 @@ impl Claude {
             executable,
             home,
             grants,
+            conversations: Mutex::new(HashMap::new()),
             gateway,
             runs: Mutex::new(HashMap::new()),
             mutation: AsyncMutex::new(()),
@@ -51,7 +53,7 @@ impl Claude {
         if self.grants()?.iter().any(|grant| grant.id == id) {
             return Ok(());
         }
-        self.save(&Self::conversation(id, &self.transcript(id)?)?)
+        self.save(&self.conversation(id, self.transcript(id)?).await?)
     }
 
     fn summary(&self, grant: &Grant, external: bool) -> Session {
@@ -153,9 +155,9 @@ impl Claude {
         if external.is_some() {
             return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), error: Some("On your Mac, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
         }
-        let (_, stored, older) = match self.history(id) {
+        let (stored, older) = match self.history(id) {
             Ok(history) => history,
-            Err(error) if error.status == 404 => (grant.cwd.clone(), Vec::new(), false),
+            Err(error) if error.status == 404 => (Vec::new(), false),
             Err(error) => return Err(error),
         };
         let session = self.summary(&grant, false);

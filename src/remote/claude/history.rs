@@ -1,8 +1,9 @@
 use super::super::protocol::{redact, Failure, Message, Result};
 use super::{visible, Claude, Grant};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -102,21 +103,63 @@ impl Claude {
             })
             .collect::<Vec<_>>();
         paths.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
-        Ok(paths
-            .into_iter()
-            .filter_map(|(id, path, _)| {
-                let grant = grants
-                    .iter()
-                    .find(|grant| grant.id == id)
-                    .cloned()
-                    .or_else(|| Self::conversation(id, &path).ok())?;
-                Some(self.summary(&grant, false))
-            })
-            .take(20)
-            .collect())
+        let mut choices = Vec::new();
+        for (id, path, modified) in paths {
+            let grant = if let Some(grant) = grants.iter().find(|grant| grant.id == id) {
+                grant.clone()
+            } else {
+                match self.conversation(id, path).await {
+                    Ok(grant) => grant,
+                    Err(_) => continue,
+                }
+            };
+            let mut summary = self.summary(&grant, false);
+            summary.updated_at = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|modified| modified.as_secs() as i64)
+                .unwrap_or_default();
+            choices.push(summary);
+            if choices.len() == 20 {
+                break;
+            }
+        }
+        Ok(choices)
     }
 
-    pub(super) fn conversation(id: Uuid, path: &Path) -> Result<Grant> {
+    pub(super) async fn conversation(&self, id: Uuid, path: PathBuf) -> Result<Grant> {
+        if let Some(grant) = self
+            .conversations
+            .lock()
+            .expect("Claude conversations lock")
+            .get(&id)
+            .cloned()
+        {
+            return Ok(grant);
+        }
+        let (grant, complete) =
+            tokio::task::spawn_blocking(move || Self::read_conversation(id, &path))
+                .await
+                .map_err(|_| Failure::new(503, "Cannot read Claude conversation details."))??;
+        if complete {
+            self.conversations
+                .lock()
+                .expect("Claude conversations lock")
+                .insert(id, grant.clone());
+        }
+        Ok(grant)
+    }
+
+    fn read_conversation(id: Uuid, path: &Path) -> Result<(Grant, bool)> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Row {
+            cwd: Option<String>,
+            #[serde(rename = "type")]
+            kind: Option<String>,
+            is_meta: Option<bool>,
+            #[serde(default)]
+            message: Value,
+        }
         let file = std::fs::File::open(path)
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
         let updated_at = file
@@ -128,16 +171,15 @@ impl Claude {
             .unwrap_or_default();
         let mut cwd = None;
         let mut title = None;
-        for line in BufReader::new(file).lines() {
-            let line = line.map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
-            let Ok(row) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
+        let rows = serde_json::Deserializer::from_reader(BufReader::new(file)).into_iter::<Row>();
+        for row in rows {
+            let row =
+                row.map_err(|_| Failure::new(502, "Cannot read Claude conversation details."))?;
             if cwd.is_none() {
-                cwd = row["cwd"].as_str().map(str::to_owned);
+                cwd = row.cwd;
             }
-            if title.is_none() && row["type"] == "user" && row["isMeta"] != true {
-                title = visible(&row["message"], "", "user")
+            if title.is_none() && row.kind.as_deref() == Some("user") && row.is_meta != Some(true) {
+                title = visible(&row.message, "", "user")
                     .first()
                     .map(|message| message.text.chars().take(140).collect());
             }
@@ -145,14 +187,18 @@ impl Claude {
                 break;
             }
         }
-        Ok(Grant {
-            id,
-            cwd: cwd
-                .ok_or_else(|| Failure::new(502, "Claude transcript has no project folder."))?,
-            title: title.unwrap_or_else(|| "Claude conversation".into()),
-            model: None,
-            updated_at,
-        })
+        let complete = title.is_some();
+        Ok((
+            Grant {
+                id,
+                cwd: cwd
+                    .ok_or_else(|| Failure::new(502, "Claude transcript has no project folder."))?,
+                title: title.unwrap_or_else(|| "Claude conversation".into()),
+                model: None,
+                updated_at,
+            },
+            complete,
+        ))
     }
 
     pub(super) fn grants(&self) -> Result<Vec<Grant>> {
@@ -199,7 +245,7 @@ impl Claude {
             .ok_or_else(|| Failure::new(404, "Claude session not found."))
     }
 
-    pub(super) fn history(&self, id: Uuid) -> Result<(String, Vec<Message>, bool)> {
+    pub(super) fn history(&self, id: Uuid) -> Result<(Vec<Message>, bool)> {
         let path = self.transcript(id)?;
         let mut file = std::fs::File::open(&path)
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
@@ -207,7 +253,6 @@ impl Claude {
             .metadata()
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?
             .len();
-        let cwd = Self::conversation(id, &path)?.cwd;
         let offset = size.saturating_sub(4 * 1024 * 1024);
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
@@ -224,7 +269,7 @@ impl Claude {
                 transcript.append(&value);
                 transcript
             });
-        Ok((cwd, transcript.messages, offset > 0 || transcript.older))
+        Ok((transcript.messages, offset > 0 || transcript.older))
     }
 }
 

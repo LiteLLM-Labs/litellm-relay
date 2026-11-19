@@ -88,7 +88,6 @@ final class RemoteStore {
 
     func restore() async {
         guard configuration?.identity == nil, login == nil, !busy else { return }
-        restoring = true
         defer { restoring = false }
         guard let service = savedService,
               SessionVault.load(workspace: service.absoluteString) != nil else { return }
@@ -105,22 +104,24 @@ final class RemoteStore {
     func connect() async {
         guard let gateway = normalizedGateway(gatewayAddress) else { error = "Enter your LiteLLM gateway’s HTTPS address."; return }
         busy = true
+        defer { busy = false }
         error = nil
+        let override = serviceOverride
         let resolved: Result<URL, RemoteFailure> = if let service = savedService { .success(service) } else { await resolveService(gateway: gateway) }
         guard case .success(let url) = resolved else {
             if case .failure(let failure) = resolved { error = failure.message }
-            busy = false
             return
         }
         let normalized = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let token = SessionVault.load(workspace: normalized)
         hasSavedSession = token != nil
         let connection = RemoteTransport(baseURL: url, token: token, session: session)
-        switch await connection.request("/api/me", as: ServiceConfiguration.self) {
+        let result = await connection.request("/api/me", as: ServiceConfiguration.self)
+        guard normalizedGateway(gatewayAddress) == gateway, serviceOverride == override else { return }
+        switch result {
         case .success(let value):
             guard normalizedGateway(value.gateway) == gateway else {
                 error = "This remote service is connected to a different gateway. Check the address with your administrator."
-                busy = false
                 return
             }
             transport = connection
@@ -137,7 +138,6 @@ final class RemoteStore {
             if hasSavedSession { configuration = nil }
             error = failure.message
         }
-        busy = false
     }
 
     func startLogin() async {

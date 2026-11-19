@@ -932,6 +932,25 @@ for line in sys.stdin:
         .unwrap()
         .title;
     assert_eq!(phone_title, "Original context");
+    let transcript = project.join(format!("{existing}.jsonl"));
+    let original = std::fs::read_to_string(&transcript).unwrap();
+    let compacted = original
+        .lines()
+        .filter(|line| serde_json::from_str::<Value>(line).unwrap()["uuid"] != "original")
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&transcript, format!("{compacted}\n")).unwrap();
+    assert_eq!(
+        claude
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == format!("claude:{existing}"))
+            .unwrap()
+            .title,
+        phone_title
+    );
     std::fs::write(home.join("active.json"), "[]").unwrap();
     for _ in 0..20 {
         let file =

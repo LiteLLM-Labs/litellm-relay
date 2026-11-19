@@ -192,26 +192,29 @@ impl Claude {
                 "This Claude version does not support session discovery.",
             )
         })?;
-        Ok(active
-            .into_iter()
-            .filter(|session| session.pid.is_some())
-            .filter_map(|session| {
-                let id = session.session_id?;
-                Some(Grant {
-                    id,
-                    cwd: session.cwd,
-                    title: self
-                        .transcript(id)
-                        .and_then(|path| Self::conversation(id, &path))
-                        .map(|grant| grant.title)
-                        .unwrap_or_else(|_| {
-                            session.name.unwrap_or_else(|| "Claude session".into())
-                        }),
-                    model: None,
-                    updated_at: now_ms() / 1000,
-                })
-            })
-            .collect())
+        let mut grants = Vec::new();
+        for session in active.into_iter().filter(|session| session.pid.is_some()) {
+            let Some(id) = session.session_id else {
+                continue;
+            };
+            let title = match self.transcript(id) {
+                Ok(path) => self
+                    .conversation(id, path)
+                    .await
+                    .ok()
+                    .map(|grant| grant.title),
+                Err(_) => None,
+            };
+            grants.push(Grant {
+                id,
+                cwd: session.cwd,
+                title: title
+                    .unwrap_or_else(|| session.name.unwrap_or_else(|| "Claude session".into())),
+                model: None,
+                updated_at: now_ms() / 1000,
+            });
+        }
+        Ok(grants)
     }
 
     pub(super) async fn connection(&self, grant: &Grant) -> Result<(Url, bool)> {

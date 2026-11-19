@@ -65,6 +65,35 @@ final class RemoteTests: XCTestCase {
     }
 
     @MainActor
+    func testCanceledStartupKeepsReconnectFormVisibleOnForeground() async throws {
+        try await withSavedSession { defaults, workspace, token in
+            let store = RemoteStore(defaults: defaults, session: restoreSession(response: "pending"))
+            for initial in [true, false] {
+                let started = XCTestExpectation(description: "Restoration request started")
+                let observer = NotificationCenter.default.addObserver(
+                    forName: RestoreProtocol.started, object: nil, queue: nil
+                ) { notification in
+                    if (notification.object as? URL)?.absoluteString == workspace + "/api/me" { started.fulfill() }
+                }
+                let attempt = Task { await store.restore() }
+                let result = await XCTWaiter.fulfillment(of: [started], timeout: 5)
+                NotificationCenter.default.removeObserver(observer)
+                XCTAssertEqual(result, .completed)
+                XCTAssertEqual(store.restoring, initial)
+                if !initial { store.serviceOverride = "https://edited-service.example.test" }
+                attempt.cancel()
+                await attempt.value
+                XCTAssertFalse(store.restoring)
+                XCTAssertFalse(store.busy)
+            }
+            XCTAssertNil(store.error)
+            XCTAssertNil(store.configuration)
+            XCTAssertEqual(SessionVault.load(workspace: workspace), token)
+            XCTAssertEqual(defaults.string(forKey: "serviceOverride"), nil)
+        }
+    }
+
+    @MainActor
     private func withSavedSession(_ run: @MainActor (UserDefaults, String, String) async throws -> Void) async throws {
         let name = "restore-\(UUID().uuidString.lowercased())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -143,6 +172,7 @@ final class RemoteTests: XCTestCase {
 
 private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
     static let gateway = "https://gateway.example.test"
+    static let started = Notification.Name("RemoteRestoreRequestStarted")
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
@@ -150,6 +180,10 @@ private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         guard let url = request.url, url.path == "/api/me" else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+            return
+        }
+        if request.value(forHTTPHeaderField: "X-Test-Response") == "pending" {
+            NotificationCenter.default.post(name: Self.started, object: url)
             return
         }
         if request.value(forHTTPHeaderField: "X-Test-Response") == "offline" {
