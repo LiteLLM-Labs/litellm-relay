@@ -76,6 +76,68 @@ impl Transcript {
 }
 
 impl Claude {
+    pub async fn handoff_choices(&self) -> Result<Vec<super::Session>> {
+        let active = self.active().await?;
+        let projects = match std::fs::read_dir(self.home.join("projects")) {
+            Ok(projects) => projects,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(Failure::new(503, "Cannot read saved Claude conversations.")),
+        };
+        let mut paths = projects
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| std::fs::read_dir(entry.path()).ok())
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                if entry.path().extension()?.to_str()? != "jsonl" {
+                    return None;
+                }
+                let id = entry.path().file_stem()?.to_str()?.parse::<Uuid>().ok()?;
+                if active.iter().any(|grant| grant.id == id) {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((id, entry.path(), modified))
+            })
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+        Ok(paths
+            .into_iter()
+            .take(20)
+            .filter_map(|(id, path, modified)| {
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .ok()?
+                    .take(65_536)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                let rows = bytes
+                    .split(|byte| *byte == b'\n')
+                    .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+                    .collect::<Vec<_>>();
+                let cwd = rows.iter().find_map(|row| row["cwd"].as_str())?;
+                let title = rows
+                    .iter()
+                    .filter(|row| row["type"] == "user" && row["isMeta"] != true)
+                    .flat_map(|row| visible(&row["message"], "", "user"))
+                    .next()
+                    .map(|message| message.text.chars().take(140).collect())
+                    .unwrap_or_else(|| "Claude conversation".into());
+                let grant = Grant {
+                    id,
+                    cwd: cwd.into(),
+                    title,
+                    model: None,
+                    updated_at: modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()?
+                        .as_secs() as i64,
+                };
+                Some(self.summary(&grant, false))
+            })
+            .collect())
+    }
+
     pub(super) fn grants(&self) -> Result<Vec<Grant>> {
         let entries = match std::fs::read_dir(&self.grants) {
             Ok(entries) => entries,
@@ -98,7 +160,7 @@ impl Claude {
     }
 
     pub(super) fn grant(&self, id: Uuid) -> Result<Grant> {
-        self.grants()?.into_iter().find(|grant| grant.id == id).ok_or_else(|| Failure::new(409, "Finish the current turn, run /exit, then run relay remote handoff with the UUID from /status on your Mac."))
+        self.grants()?.into_iter().find(|grant| grant.id == id).ok_or_else(|| Failure::new(409, "On your Mac, finish the current turn, run /exit, then run relay remote handoff and choose this conversation."))
     }
 
     pub(super) fn save(&self, grant: &Grant) -> Result<()> {

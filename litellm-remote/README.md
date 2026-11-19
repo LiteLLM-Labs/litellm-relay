@@ -49,13 +49,13 @@ For a Relay-managed inference endpoint, inherited gateway keys are removed from 
 
 ## Existing Claude sessions
 
-Finish the current turn and all tools on the Mac. Note the original UUID in `/status`, run `/exit`, then hand over that saved conversation.
+Finish the current turn and all tools on the Mac. Run `/exit`, then open the conversation picker.
 
 ```sh
-relay remote handoff <session-uuid>
+relay remote handoff
 ```
 
-The phone continues the saved UUID. It does not transfer in-flight tools, process memory, or a simultaneous terminal attachment. New Claude sessions started from the phone do not need handoff. To return to the terminal, stop the turn, stop the connector, then run `claude --resume <session-uuid>`. Keep one writer per conversation. Codex uses its shared control process and needs no handoff.
+Choose your conversation by its title, project, and last-updated time. You do not need to find or copy a UUID. The phone continues the original saved conversation. Handoff does not transfer in-flight tools, process memory, or a simultaneous terminal attachment. New Claude sessions started from the phone do not need handoff. To return to the terminal, stop the turn, stop the connector, then run `claude --resume` and choose the conversation. Keep one writer per conversation. Codex uses its shared control process and needs no handoff.
 
 ## Mobile setup
 

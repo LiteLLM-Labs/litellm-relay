@@ -13,7 +13,11 @@ mod store;
 #[path = "../../litellm-remote/tests/remote.rs"]
 mod tests;
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    io::{BufRead, Write},
+    net::SocketAddr,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -36,7 +40,7 @@ pub enum Command {
         provider: String,
     },
     Handoff {
-        session: uuid::Uuid,
+        session: Option<uuid::Uuid>,
     },
     Serve {
         #[arg(long)]
@@ -48,6 +52,52 @@ pub enum Command {
         #[arg(long)]
         state: Option<PathBuf>,
     },
+}
+
+fn choose_handoff(
+    sessions: &[protocol::Session],
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<uuid::Uuid> {
+    anyhow::ensure!(
+        !sessions.is_empty(),
+        "No saved Claude conversations found. Exit Claude Code, then try again."
+    );
+    writeln!(
+        output,
+        "Choose a Claude conversation to continue on your phone."
+    )?;
+    for (index, session) in sessions.iter().enumerate() {
+        let label: String = format!("{} ({})", session.title, session.project)
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        let updated = jiff::Timestamp::from_second(session.updated_at)
+            .map(|timestamp| timestamp.to_string())
+            .unwrap_or_default();
+        writeln!(output, "{}. {label}  {updated}", index + 1)?;
+    }
+    loop {
+        write!(output, "Conversation number, or 0 to cancel ")?;
+        output.flush()?;
+        let mut line = String::new();
+        anyhow::ensure!(
+            input.read_line(&mut line)? > 0 && line.trim() != "0",
+            "Handoff canceled."
+        );
+        if let Some(session) = line
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|choice| choice.checked_sub(1))
+            .and_then(|index| sessions.get(index))
+        {
+            return protocol::split_session(&session.id)
+                .map(|(_, id)| id)
+                .map_err(|error| anyhow::anyhow!(error.error));
+        }
+        writeln!(output, "Choose one of the conversation numbers above.")?;
+    }
 }
 
 fn address(argument: Option<Url>, variable: &str) -> Result<Url> {
@@ -99,6 +149,24 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Handoff { session } => {
             let credentials = connector::load()?;
             let sessions = connector::sessions(&credentials, None, None, "litellm".into());
+            let session = match session {
+                Some(session) => session,
+                None => {
+                    let choices = sessions
+                        .claude
+                        .handoff_choices()
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error.error))?;
+                    tokio::task::spawn_blocking(move || {
+                        choose_handoff(
+                            &choices,
+                            &mut std::io::stdin().lock(),
+                            &mut std::io::stdout().lock(),
+                        )
+                    })
+                    .await??
+                }
+            };
             sessions
                 .claude
                 .handoff(session)

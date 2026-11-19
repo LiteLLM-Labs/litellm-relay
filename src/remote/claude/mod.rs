@@ -162,7 +162,7 @@ impl Claude {
             .grant(id)
             .or_else(|error| external.clone().ok_or(error))?;
         if external.is_some() {
-            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), error: Some("On your Mac, finish this turn, note its UUID in /status, run /exit, then run relay remote handoff with that UUID.".into()) });
+            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), error: Some("On your Mac, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
         }
         let (_, stored, older) = match self.history(id) {
             Ok(history) => history,

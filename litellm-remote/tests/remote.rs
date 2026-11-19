@@ -914,8 +914,33 @@ for line in sys.stdin:
     )
     .unwrap();
     assert_eq!(claude.handoff(existing).await.unwrap_err().status, 409);
+    assert!(!claude
+        .handoff_choices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|choice| choice.id == format!("claude:{existing}")));
     std::fs::write(home.join("active.json"), "[]").unwrap();
-    claude.handoff(existing).await.unwrap();
+    let choices = claude.handoff_choices().await.unwrap();
+    let choice = choices
+        .iter()
+        .position(|choice| choice.id == format!("claude:{existing}"))
+        .unwrap();
+    let mut output = Vec::new();
+    let selected = super::choose_handoff(
+        &choices,
+        &mut std::io::Cursor::new(format!("invalid\n{}\n", choice + 1)),
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(selected, existing);
+    let display = String::from_utf8(output).unwrap();
+    assert!(display.contains("Original context"));
+    assert!(!display.contains(&existing.to_string()));
+    assert!(
+        super::choose_handoff(&choices, &mut std::io::Cursor::new("0\n"), &mut Vec::new()).is_err()
+    );
+    claude.handoff(selected).await.unwrap();
     assert_eq!(
         claude.read(existing).await.unwrap().messages[0].text,
         "Original context"
