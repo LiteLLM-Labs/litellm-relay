@@ -520,8 +520,7 @@ impl Codex {
                 return Err(Failure::new(409, "This session changed provider."));
             }
         }
-        let mut params =
-            json!({"threadId":id,"input":[{"type":"text","text":text,"text_elements":[]}]});
+        let mut params = json!({"threadId":id,"approvalPolicy":"on-request","input":[{"type":"text","text":text,"text_elements":[]}]});
         if let Some(model) = &model {
             params["model"] = json!(model);
         }

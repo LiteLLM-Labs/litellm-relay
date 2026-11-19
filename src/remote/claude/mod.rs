@@ -330,6 +330,9 @@ pub fn visible(message: &Value, id: &str, role: &str) -> Vec<Message> {
         return Vec::new();
     }
     if let Some(text) = message["content"].as_str() {
+        if role == "user" && command_wrapper(text) {
+            return Vec::new();
+        }
         return vec![Message {
             id: id.into(),
             role: role.into(),
@@ -346,7 +349,7 @@ pub fn visible(message: &Value, id: &str, role: &str) -> Vec<Message> {
             .filter_map(|block| block["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        return if text.is_empty() {
+        return if text.is_empty() || command_wrapper(&text) {
             Vec::new()
         } else {
             vec![Message {
@@ -386,4 +389,30 @@ pub fn visible(message: &Value, id: &str, role: &str) -> Vec<Message> {
             }
         })
         .collect()
+}
+
+fn command_wrapper(text: &str) -> bool {
+    let text = text.trim();
+    if text.starts_with("<local-command-stdout>") && text.ends_with("</local-command-stdout>") {
+        return true;
+    }
+    let Some((command, rest)) = text
+        .strip_prefix("<command-name>")
+        .and_then(|text| text.split_once("</command-name>"))
+    else {
+        return false;
+    };
+    let Some((message, rest)) = rest
+        .trim_start()
+        .strip_prefix("<command-message>")
+        .and_then(|text| text.split_once("</command-message>"))
+    else {
+        return false;
+    };
+    !message.is_empty()
+        && command.strip_prefix('/') == Some(message)
+        && rest
+            .trim_start()
+            .strip_prefix("<command-args>")
+            .is_some_and(|args| args.ends_with("</command-args>"))
 }

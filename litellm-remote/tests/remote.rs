@@ -480,6 +480,28 @@ fn only_public_messages_are_exposed_and_credentials_are_redacted() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].text, "Visible [credential redacted]");
     assert_eq!(messages[1].role, "activity");
+    for text in [
+        "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>fixture-model</command-args>",
+        "<local-command-stdout>Set model to fixture-model</local-command-stdout>",
+    ] {
+        for content in [json!(text), json!([{"type":"text","text":text}])] {
+            assert!(claude::visible(&json!({"content":content}), "command", "user").is_empty());
+            assert_eq!(
+                claude::visible(&json!({"content":content}), "reply", "assistant")[0].text,
+                text
+            );
+        }
+    }
+    for text in [
+        "Please explain /model and how to select a gateway model.",
+        "<command-name>/model</command-name>",
+        "<local-command-stdout>example</local-command-stdout>\nPlease explain this snippet.",
+    ] {
+        assert_eq!(
+            claude::visible(&json!({"content":text}), "prompt", "user")[0].text,
+            text
+        );
+    }
     assert!(codex::visible(
         &json!({"id":"reasoning","type":"reasoning","text":"hidden"}),
         "turn"
@@ -515,14 +537,25 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
     let thread = Uuid::new_v4();
     let approvals = Arc::new(AtomicUsize::new(0));
     let accepted = approvals.clone();
+    let denials = Arc::new(AtomicUsize::new(0));
+    let declined = denials.clone();
+    let constrained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let enforced = constrained.clone();
     let mac = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         while let Some(Ok(Frame::Text(text))) = socket.next().await {
             let request: Value = serde_json::from_str(&text).unwrap();
             if request.get("method").is_none() {
-                assert_eq!(request["result"]["decision"], "accept");
-                accepted.fetch_add(1, Ordering::SeqCst);
+                match request["result"]["decision"].as_str().unwrap() {
+                    "accept" => {
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    "decline" => {
+                        declined.fetch_add(1, Ordering::SeqCst);
+                    }
+                    other => panic!("unexpected decision {other}"),
+                }
                 continue;
             }
             let result = match request["method"].as_str().unwrap() {
@@ -537,6 +570,26 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
                 "turn/start" => {
                     assert_eq!(request["params"]["model"], "fixture-model");
                     assert_eq!(request["params"]["input"][0]["text"], "Continue");
+                    let terminal_policy = "never";
+                    let policy = request["params"]["approvalPolicy"]
+                        .as_str()
+                        .unwrap_or(terminal_policy);
+                    if policy == "on-request" && enforced.load(Ordering::SeqCst) {
+                        socket.send(Frame::Text(json!({"id":request["id"],"error":{"code":-32600,"message":"Approval policy is restricted by your administrator."}}).to_string().into())).await.unwrap();
+                        continue;
+                    }
+                    if policy == "never" {
+                        socket.send(Frame::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":"turn","itemId":"answer","delta":"Permission was denied for the escalated command."}}).to_string().into())).await.unwrap();
+                        socket
+                            .send(Frame::Text(
+                                json!({"id":request["id"],"result":{"turn":{"id":"turn"}}})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
+                        continue;
+                    }
                     socket.send(Frame::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":"turn","itemId":"answer","delta":"Live answer"}}).to_string().into())).await.unwrap();
                     socket.send(Frame::Text(json!({"id":"permission-request","method":"item/commandExecution/requestApproval","params":{"threadId":thread,"turnId":"turn","itemId":"command","command":"pwd","availableDecisions":["accept","decline"]}}).to_string().into())).await.unwrap();
                     json!({"turn":{"id":"turn"}})
@@ -570,6 +623,13 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
         "turn"
     );
     let detail = codex.read(thread).await.unwrap();
+    assert_eq!(
+        detail.approvals.len(),
+        1,
+        "terminal policy silently denied the tool without a card"
+    );
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+    assert_eq!(denials.load(Ordering::SeqCst), 0);
     assert!(detail
         .messages
         .iter()
@@ -591,6 +651,27 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
         .is_err());
     assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    codex
+        .send(thread, "Continue".into(), Some("fixture-model".into()))
+        .await
+        .unwrap();
+    let pending = codex.read(thread).await.unwrap();
+    assert_eq!(pending.approvals.len(), 1);
+    let approval = Uuid::parse_str(&pending.approvals[0].id).unwrap();
+    codex
+        .approve(thread, approval, Decision::Decline)
+        .await
+        .unwrap();
+    assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
+    assert_eq!(denials.load(Ordering::SeqCst), 1);
+    constrained.store(true, Ordering::SeqCst);
+    let error = codex
+        .send(thread, "Continue".into(), Some("fixture-model".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 502);
+    assert!(error.error.contains("restricted by your administrator"));
+    assert!(codex.read(thread).await.unwrap().approvals.is_empty());
     mac.abort();
 }
 
