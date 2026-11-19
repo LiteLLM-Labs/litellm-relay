@@ -34,7 +34,8 @@ pub struct Thread {
     cwd: String,
     model_provider: String,
     model: Option<String>,
-    approval_policy: Option<String>,
+    // Granular experimental policies arrive as objects, so this stays untyped.
+    approval_policy: Option<Value>,
     can_accept_direct_input: Option<bool>,
     updated_at: i64,
     status: ThreadStatus,
@@ -527,7 +528,7 @@ impl Codex {
             json!({"threadId":id,"input":[{"type":"text","text":text,"text_elements":[]}]});
         // A resumed thread keeps its own approval policy; only "never" is lifted to
         // "on-request", because it would otherwise deny mobile tool requests with no card.
-        if policy.as_deref() == Some("never") {
+        if policy.as_ref().and_then(Value::as_str) == Some("never") {
             params["approvalPolicy"] = json!("on-request");
         }
         if let Some(model) = &model {

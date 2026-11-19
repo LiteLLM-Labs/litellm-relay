@@ -566,7 +566,13 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
                 "initialized" => continue,
                 "initialize" => json!({"userAgent":"fixture"}),
                 "thread/read" | "thread/resume" => {
-                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","approvalPolicy":saved_policy.lock().unwrap().clone(),"updatedAt":1,"status":{"type":"idle"}}})
+                    let policy = saved_policy.lock().unwrap().clone();
+                    let policy = if policy == "granular" {
+                        json!({"experimental":{"rules":[]}})
+                    } else {
+                        json!(policy)
+                    };
+                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","approvalPolicy":policy,"updatedAt":1,"status":{"type":"idle"}}})
                 }
                 "config/read" => {
                     json!({"config":{"model_providers":{"litellm":{"base_url":"https://gateway.example.test/v1"}}}})
@@ -701,6 +707,17 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
         .unwrap();
     assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
     assert_eq!(denials.load(Ordering::SeqCst), 2);
+    *thread_policy.lock().unwrap() = "granular".into();
+    codex
+        .send(thread, "Continue".into(), Some("fixture-model".into()))
+        .await
+        .expect("an object-form granular policy must still decode");
+    assert_eq!(
+        requested_policy.lock().unwrap().clone(),
+        Some(None),
+        "a granular object policy must not be overridden"
+    );
+    assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
     mac.abort();
 }
 

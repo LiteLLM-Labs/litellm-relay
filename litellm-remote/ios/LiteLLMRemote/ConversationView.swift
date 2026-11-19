@@ -334,16 +334,18 @@ private struct MessageView: View {
 // show the plain text until the parsed version is ready.
 private struct MarkdownText: View {
     let text: String
-    @State private var rendered: AttributedString?
+    @State private var rendered: RenderedMarkdown?
 
     var body: some View {
-        Text(rendered ?? AttributedString(text))
+        Text(rendered?.display(for: text) ?? AttributedString(text))
             .task(id: text) {
                 let source = text
                 let parsed = await Task.detached(priority: .userInitiated) {
                     MessageMarkdown.parse(source)
                 }.value
-                if !Task.isCancelled, let parsed { rendered = parsed }
+                if !Task.isCancelled, let parsed {
+                    rendered = RenderedMarkdown(source: source, value: parsed)
+                }
             }
     }
 }

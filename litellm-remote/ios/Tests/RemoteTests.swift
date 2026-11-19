@@ -184,6 +184,15 @@ final class RemoteTests: XCTestCase {
                         "pathological markup must still return a usable value")
     }
 
+    func testCachedMarkdownNeverShowsForNewerStreamedText() throws {
+        let parsed = try XCTUnwrap(MessageMarkdown.parse("**bold** start"))
+        let cached = RenderedMarkdown(source: "**bold** start", value: parsed)
+        XCTAssertEqual(cached.display(for: "**bold** start"), parsed)
+        let grown = cached.display(for: "**bold** start and more")
+        XCTAssertEqual(String(grown.characters), "**bold** start and more",
+                       "newer text must render plainly instead of showing the stale parse")
+    }
+
     func testTeamSelectionAndPaginationPreserveOpaqueValues() {
         let team = "engineering & operations + / # ?"
         let teamPath = queryPath("/api/auth/poll", name: "team", value: team)

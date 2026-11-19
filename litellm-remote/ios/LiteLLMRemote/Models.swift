@@ -126,6 +126,17 @@ enum MessageMarkdown {
     }
 }
 
+struct RenderedMarkdown: Equatable, Sendable {
+    let source: String
+    let value: AttributedString
+
+    // A cached parse is only valid for the text it came from; anything newer
+    // renders as plain text until its own parse lands.
+    func display(for text: String) -> AttributedString {
+        source == text ? value : AttributedString(text)
+    }
+}
+
 struct RemoteFailure: Error, LocalizedError, Sendable {
     let message: String
     let status: Int?
