@@ -34,6 +34,8 @@ relay onboard-codex \
   --model gpt-5-codex
 ```
 
+An explicit `--model` is written as given. Without it, Relay checks its saved or default model against the gateway’s catalog when a credential is available during onboarding: a served model is kept, and an unserved one is replaced with a served model (preferring Codex-capable IDs) with a notice. When no credential is available yet, the saved model is written unchecked and the notice names the `--model` override.
+
 The `--oidc-*` flags are the same ones `relay onboard` takes (see [Claude Code](claude-code.md#commands)); the IdP session is shared, so a developer who already signed in for Claude Code is not asked again.
 
 This writes `~/.codex/config.toml`:
