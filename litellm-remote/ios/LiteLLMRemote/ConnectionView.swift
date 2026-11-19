@@ -49,14 +49,14 @@ struct ConnectionView: View {
             TextField("gateway.your-company.com", text: $store.gatewayAddress)
                 .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                 .font(.system(size: 16)).padding(18)
-                .background(.white, in: RoundedRectangle(cornerRadius: 15))
+                .background(Palette.surface, in: RoundedRectangle(cornerRadius: 15))
                 .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Palette.border))
                 .accessibilityIdentifier("workspaceAddress")
                 .onSubmit { Task { await store.connect() } }
             DisclosureGroup("Advanced") {
                 TextField("Remote-service address", text: $store.serviceOverride)
                     .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .font(.subheadline).padding(15).background(.white, in: RoundedRectangle(cornerRadius: 12))
+                    .font(.subheadline).padding(15).background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
                     .accessibilityIdentifier("remoteServiceAddress")
             }
             .font(.caption).foregroundStyle(Palette.secondary).padding(.vertical, 5)
@@ -87,7 +87,7 @@ struct ConnectionView: View {
                     Spacer()
                     Button("Copy code", systemImage: "doc.on.doc") { UIPasteboard.general.string = login.code }.labelStyle(.iconOnly)
                 }
-                .padding(20).background(.white, in: RoundedRectangle(cornerRadius: 16))
+                .padding(20).background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
                 Text("Enter this code on the sign-in page, then return here.")
                     .font(.subheadline).foregroundStyle(Palette.secondary)
                 if login.verificationUrl.scheme == "https" {

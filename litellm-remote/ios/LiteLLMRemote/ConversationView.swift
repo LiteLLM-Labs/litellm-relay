@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SessionView: View {
     let store: RemoteStore
@@ -33,7 +34,7 @@ struct SessionView: View {
                 Text(session.activity).font(.system(size: 11, weight: .medium))
             }
             .foregroundStyle(Palette.secondary).padding(.horizontal, 22).padding(.vertical, 13)
-            .background(.white)
+            .background(Palette.surface)
             if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError { InlineError(text: error).padding(.horizontal, 18).padding(.top, 8) }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -46,7 +47,7 @@ struct SessionView: View {
                                     .font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
                             }
                             .padding(20).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.white, in: RoundedRectangle(cornerRadius: 18))
+                            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18))
                         } else if detail?.messages.isEmpty == true {
                             EmptyWorkspace(title: "What are we building?", text: "Send a message to start working in \(session.project).", symbol: "terminal")
                         }
@@ -63,7 +64,7 @@ struct SessionView: View {
                 .onChange(of: detail?.messages.last?.id) {
                     if !followed { proxy.scrollTo("latest", anchor: .bottom); followed = true }
                 }
-                .onChange(of: scrollRequest) { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("latest", anchor: .bottom) } }
+                .onChange(of: scrollRequest) { proxy.scrollTo("latest", anchor: .bottom) }
             }
         }
         .background(Palette.background)
@@ -145,7 +146,7 @@ struct SessionView: View {
                 .disabled(sending || !session.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 32000)
             }
             }
-            .background(.white, in: RoundedRectangle(cornerRadius: 19))
+            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 19))
             .overlay(RoundedRectangle(cornerRadius: 19).strokeBorder(Palette.border))
             HStack(spacing: 5) {
                 Image(systemName: "lock.shield").font(.system(size: 9))
@@ -192,13 +193,18 @@ struct SessionView: View {
             .disabled(deciding)
             .controlSize(.large)
         }
-        .padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.white, in: RoundedRectangle(cornerRadius: 17))
+        .padding(18).frame(maxWidth: .infinity, alignment: .leading).background(Palette.surface, in: RoundedRectangle(cornerRadius: 17))
         .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(Palette.warning.opacity(0.3)))
     }
 
     private func update() async {
         switch await store.detail(id: session.id, deviceId: route.deviceId) {
-        case .success(let value): if !Task.isCancelled { detail = value; loadError = nil }
+        case .success(let value):
+            guard !Task.isCancelled else { return }
+            // Polling returns identical payloads most of the time; skipping those
+            // keeps the message list from re-rendering every two seconds.
+            if detail != value { detail = value }
+            loadError = nil
         case .failure(let failure): if !Task.isCancelled && failure.status != 499 { loadError = failure.message }
         }
     }
@@ -259,22 +265,28 @@ private struct MessageView: View {
     let message: SessionMessage
     let agentName: String
     @State private var expanded = false
+
+    private var visibleText: String {
+        expanded ? message.text : String(message.text.prefix(8000))
+    }
+
     var body: some View {
         if message.role == "activity" {
             DisclosureGroup {
-                Text(message.text).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).padding(.top, 8)
+                Text(message.text).font(.system(size: 11, design: .monospaced)).padding(.top, 8)
             } label: {
-                Label(message.text.components(separatedBy: .newlines).first ?? "Activity", systemImage: "terminal")
+                Label(String(message.text.prefix(while: { !$0.isNewline })), systemImage: "terminal")
                     .font(.system(size: 11, design: .monospaced)).lineLimit(1)
             }
             .foregroundStyle(Palette.secondary).padding(13)
             .background(Palette.border.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+            .contextMenu { copyButton }
         } else if message.role == "user" {
             HStack(alignment: .top, spacing: 0) {
                 Spacer(minLength: 48)
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(expanded ? message.text : String(message.text.prefix(8000)))
-                        .font(.system(size: 15)).lineSpacing(4).textSelection(.enabled)
+                    Text(visibleText)
+                        .font(.system(size: 15)).lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
                     if message.text.count > 8000 && !expanded {
                         Button("Show full message") { expanded = true }.font(.caption)
@@ -285,6 +297,7 @@ private struct MessageView: View {
                 .background(Palette.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 20))
                 .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.accent.opacity(0.1)))
                 .layoutPriority(1)
+                .contextMenu { copyButton }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         } else {
@@ -294,14 +307,43 @@ private struct MessageView: View {
                         .background(.white, in: RoundedRectangle(cornerRadius: 10))
                     Text(agentName).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.ink)
                 }
-                Text(.init(expanded ? message.text : String(message.text.prefix(8000))))
-                    .font(.system(size: 15)).lineSpacing(7).textSelection(.enabled).tint(Palette.accent)
+                MarkdownText(text: visibleText)
+                    .font(.system(size: 15)).lineSpacing(7).tint(Palette.accent)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.text.count > 8000 && !expanded { Button("Show full message") { expanded = true }.font(.caption) }
             }
             .padding(17).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.white, in: RoundedRectangle(cornerRadius: 20))
+            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Palette.border.opacity(0.7)))
+            .contextMenu { copyButton }
         }
+    }
+
+    private var copyButton: some View {
+        Button {
+            UIPasteboard.general.string = message.text
+        } label: {
+            Label("Copy message", systemImage: "doc.on.doc")
+        }
+    }
+}
+
+// Parsing markdown inside `body` re-runs on every poll and long selectable text
+// rebuilds its selection machinery on each change; both stalled the main thread
+// on long streamed turns. Parse once per text value, off the main actor, and
+// show the plain text until the parsed version is ready.
+private struct MarkdownText: View {
+    let text: String
+    @State private var rendered: AttributedString?
+
+    var body: some View {
+        Text(rendered ?? AttributedString(text))
+            .task(id: text) {
+                let source = text
+                let parsed = await Task.detached(priority: .userInitiated) {
+                    MessageMarkdown.parse(source)
+                }.value
+                if !Task.isCancelled, let parsed { rendered = parsed }
+            }
     }
 }

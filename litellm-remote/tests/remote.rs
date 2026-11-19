@@ -541,6 +541,10 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
     let declined = denials.clone();
     let constrained = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let enforced = constrained.clone();
+    let thread_policy = Arc::new(std::sync::Mutex::new("never".to_string()));
+    let saved_policy = thread_policy.clone();
+    let requested_policy = Arc::new(std::sync::Mutex::new(None::<Option<String>>));
+    let observed_policy = requested_policy.clone();
     let mac = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -562,7 +566,7 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
                 "initialized" => continue,
                 "initialize" => json!({"userAgent":"fixture"}),
                 "thread/read" | "thread/resume" => {
-                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","updatedAt":1,"status":{"type":"idle"}}})
+                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","approvalPolicy":saved_policy.lock().unwrap().clone(),"updatedAt":1,"status":{"type":"idle"}}})
                 }
                 "config/read" => {
                     json!({"config":{"model_providers":{"litellm":{"base_url":"https://gateway.example.test/v1"}}}})
@@ -570,10 +574,11 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
                 "turn/start" => {
                     assert_eq!(request["params"]["model"], "fixture-model");
                     assert_eq!(request["params"]["input"][0]["text"], "Continue");
-                    let terminal_policy = "never";
-                    let policy = request["params"]["approvalPolicy"]
+                    let requested = request["params"]["approvalPolicy"]
                         .as_str()
-                        .unwrap_or(terminal_policy);
+                        .map(str::to_owned);
+                    *observed_policy.lock().unwrap() = Some(requested.clone());
+                    let policy = requested.unwrap_or_else(|| saved_policy.lock().unwrap().clone());
                     if policy == "on-request" && enforced.load(Ordering::SeqCst) {
                         socket.send(Frame::Text(json!({"id":request["id"],"error":{"code":-32600,"message":"Approval policy is restricted by your administrator."}}).to_string().into())).await.unwrap();
                         continue;
@@ -621,6 +626,11 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
             .await
             .unwrap()["turnId"],
         "turn"
+    );
+    assert_eq!(
+        requested_policy.lock().unwrap().clone(),
+        Some(Some("on-request".into())),
+        "a never-policy thread must request interactive approvals"
     );
     let detail = codex.read(thread).await.unwrap();
     assert_eq!(
@@ -672,6 +682,25 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
     assert_eq!(error.status, 502);
     assert!(error.error.contains("restricted by your administrator"));
     assert!(codex.read(thread).await.unwrap().approvals.is_empty());
+    *thread_policy.lock().unwrap() = "untrusted".into();
+    codex
+        .send(thread, "Continue".into(), Some("fixture-model".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        requested_policy.lock().unwrap().clone(),
+        Some(None),
+        "a stricter resumed policy must not be overridden"
+    );
+    let strict = codex.read(thread).await.unwrap();
+    assert_eq!(strict.approvals.len(), 1);
+    let approval = Uuid::parse_str(&strict.approvals[0].id).unwrap();
+    codex
+        .approve(thread, approval, Decision::Decline)
+        .await
+        .unwrap();
+    assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
+    assert_eq!(denials.load(Ordering::SeqCst), 2);
     mac.abort();
 }
 
@@ -842,6 +871,27 @@ for line in sys.stdin:
     elif value['type'] == 'user':
         with open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], 'deliveries.jsonl'), 'a') as log:
             log.write(json.dumps({'pid':os.getpid(),'text':value['message']['content']}) + '\n')
+        if value['message']['content'] == 'Stream blocks':
+            emit({'type':'system','subtype':'init','session_id':session,'model':'fixture-model'})
+            emit({'type':'stream_event','event':{'type':'message_start','message':{'id':'blocks'}}})
+            for piece in ['First ', 'part']:
+                emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'text_delta','text':piece}}})
+            second = 'Second block ' + 'x' * 40000 + ' sk-aaaaaaaaaa'
+            for start in range(0, len(second), 64):
+                emit({'type':'stream_event','event':{'type':'content_block_delta','index':3,'delta':{'type':'text_delta','text':second[start:start + 64]}}})
+            emit({'type':'stream_event','event':{'type':'content_block_delta','index':3,'delta':{'type':'text_delta','text':'aaaaaaaaaa done'}}})
+            second += 'aaaaaaaaaa done'
+            (home / 'streamed').touch()
+            while not (home / 'complete-stream').exists():
+                time.sleep(0.01)
+            reply = {'type':'assistant','uuid':'blocks-complete','message':{'id':'blocks','content':[{'type':'text','text':'First part'},{'type':'tool_use','id':'blocks-tool','name':'Edit','input':{'file_path':'fixture.txt'}},{'type':'text','text':second}]}}
+            project = home / 'projects' / 'fixture'
+            project.mkdir(parents=True, exist_ok=True)
+            with (project / (session + '.jsonl')).open('a') as transcript:
+                transcript.write(json.dumps(reply) + '\n')
+            emit(reply)
+            emit({'type':'result','subtype':'success','session_id':session})
+            continue
         reported = '00000000-0000-4000-8000-000000000001' if value['message']['content'] == 'Mismatch' else session
         emit({'type':'system','subtype':'init','session_id':reported,'model':'fixture-model'})
         emit({'type':'stream_event','event':{'type':'message_start','message':{'id':'reply'}}})
@@ -1185,4 +1235,69 @@ for line in sys.stdin:
         .send(startup_id, "Retry after process exit".into(), None)
         .await
         .unwrap();
+    let fresh = claude::Claude::new(
+        script.clone(),
+        home.clone(),
+        directory.0.join("grants"),
+        Url::parse("https://gateway.example.test").unwrap(),
+    );
+    let streaming = fresh.create(cwd.into()).unwrap();
+    let (_, streaming_id) = protocol::split_session(&streaming.id).unwrap();
+    fresh
+        .send(streaming_id, "Stream blocks".into(), None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !home.join("streamed").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut streamed = fresh.read(streaming_id).await.unwrap();
+    for _ in 0..200 {
+        if streamed
+            .messages
+            .iter()
+            .any(|message| message.text.ends_with("] done"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        streamed = fresh.read(streaming_id).await.unwrap();
+    }
+    assert_eq!(streamed.session.status, "working");
+    let live = streamed
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect::<Vec<_>>();
+    assert_eq!(live.len(), 2, "each streamed text block is one reply row");
+    assert_eq!(live[0].text, "First part");
+    assert!(live[1].text.starts_with("Second block"));
+    assert!(live[1].text.ends_with("[credential redacted] done"));
+    assert!(!live[1].text.contains("sk-a"));
+    std::fs::write(home.join("complete-stream"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fresh.read(streaming_id).await.unwrap().session.status == "working" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let saved = fresh.read(streaming_id).await.unwrap();
+    let replies = saved
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 2, "completion replaces streamed rows");
+    assert_eq!(replies[0].text, "First part");
+    assert!(replies[1].text.starts_with("Second block"));
+    assert!(replies[1].text.ends_with("[credential redacted] done"));
+    assert!(!replies[1].text.contains("sk-a"));
+    assert!(saved
+        .messages
+        .iter()
+        .any(|message| message.role == "activity"));
 }

@@ -62,7 +62,7 @@ struct SessionPage: Decodable, Sendable {
     let warnings: [String]?
 }
 
-struct SessionMessage: Decodable, Identifiable, Sendable {
+struct SessionMessage: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let role: String
     let text: String
@@ -79,7 +79,7 @@ struct ModelPage: Decodable, Sendable {
     let nextCursor: String?
 }
 
-struct SessionDetail: Decodable, Sendable {
+struct SessionDetail: Decodable, Equatable, Sendable {
     let session: CodingSession
     let messages: [SessionMessage]
     let olderMessages: Bool
@@ -87,7 +87,7 @@ struct SessionDetail: Decodable, Sendable {
     let approvals: [SessionApproval]
 }
 
-struct SessionApproval: Decodable, Identifiable, Sendable {
+struct SessionApproval: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let text: String
@@ -112,6 +112,19 @@ struct LoginPoll: Decodable, Sendable {
 }
 
 struct EmptyReply: Decodable, Sendable {}
+
+enum MessageMarkdown {
+    static func parse(_ text: String) -> AttributedString? {
+        try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                allowsExtendedAttributes: false,
+                interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                failurePolicy: .returnPartiallyParsedIfPossible
+            )
+        )
+    }
+}
 
 struct RemoteFailure: Error, LocalizedError, Sendable {
     let message: String

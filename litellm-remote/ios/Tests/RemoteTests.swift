@@ -157,6 +157,33 @@ final class RemoteTests: XCTestCase {
         XCTAssertNotEqual(page.sessions[0].agentName, page.sessions[1].agentName)
     }
 
+    func testIdenticalPollsCompareEqualSoTheViewSkipsRedundantUpdates() throws {
+        let payload = """
+        {"session":{"id":"claude:session","agent":"claude","title":"Task","project":"repo","cwd":"/repo","status":"working","canSend":false,"canStop":true,"updatedAt":1},
+         "messages":[{"id":"turn","role":"user","text":"Start"},{"id":"reply/0","role":"assistant","text":"Streaming"}],
+         "olderMessages":false,"approvals":[]}
+        """
+        let first = try JSONDecoder().decode(SessionDetail.self, from: Data(payload.utf8))
+        let second = try JSONDecoder().decode(SessionDetail.self, from: Data(payload.utf8))
+        XCTAssertEqual(first, second)
+        let grown = payload.replacingOccurrences(of: "Streaming", with: "Streaming more")
+        let changed = try JSONDecoder().decode(SessionDetail.self, from: Data(grown.utf8))
+        XCTAssertNotEqual(first, changed)
+        XCTAssertEqual(first.messages.map(\.id), changed.messages.map(\.id),
+                       "a growing streamed reply must keep its row identity instead of adding a row")
+    }
+
+    func testMarkdownParsingHandlesLongCodeHeavyRepliesOffTheRenderPath() throws {
+        let code = String(repeating: "let value_\(UUID().uuidString.prefix(4)) = items[0] * 2 // 100% _load_\n", count: 400)
+        let reply = "Result:\n\n`inline` **bold** and a block:\n" + code
+        let parsed = try XCTUnwrap(MessageMarkdown.parse(reply))
+        XCTAssertTrue(String(parsed.characters).contains("inline"))
+        XCTAssertTrue(String(MessageMarkdown.parse("line one\nline two").map { String($0.characters) } ?? "").contains("line one\nline two"),
+                      "inline parsing must preserve newlines between lines")
+        XCTAssertNotNil(MessageMarkdown.parse(String(repeating: "** _ ` [ ] ( ) %@ %d ", count: 1600)),
+                        "pathological markup must still return a usable value")
+    }
+
     func testTeamSelectionAndPaginationPreserveOpaqueValues() {
         let team = "engineering & operations + / # ?"
         let teamPath = queryPath("/api/auth/poll", name: "team", value: team)

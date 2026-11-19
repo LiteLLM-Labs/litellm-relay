@@ -3,6 +3,7 @@ use super::{visible, Claude, Grant};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
@@ -13,6 +14,7 @@ pub(super) struct Transcript {
     pub(super) messages: Vec<Message>,
     block: String,
     text_blocks: usize,
+    ordinals: HashMap<u64, usize>,
     older: bool,
 }
 
@@ -23,12 +25,23 @@ impl Transcript {
             .iter_mut()
             .find(|value| value.id == message.id)
         {
-            previous.text = if append {
-                format!("{}{}", previous.text, message.text)
+            if append {
+                if previous.text.len() >= 256_000 {
+                    return;
+                }
+                // Secrets can split across deltas, so each append re-scans a bounded
+                // tail instead of the whole accumulated text; the completed message
+                // replaces this row with a fully redacted pass.
+                let mut start = previous.text.len().saturating_sub(4096);
+                while !previous.text.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let window = format!("{}{}", &previous.text[start..], message.text);
+                previous.text.truncate(start);
+                previous.text.push_str(&redact(&window));
             } else {
-                message.text
-            };
-            previous.text = redact(&previous.text).chars().take(256_000).collect();
+                previous.text = redact(&message.text).chars().take(256_000).collect();
+            }
             return;
         }
         self.messages.push(Message {
@@ -48,6 +61,7 @@ impl Transcript {
         if role == "assistant" && self.block != block {
             self.block = block.into();
             self.text_blocks = 0;
+            self.ordinals.clear();
         }
         for mut message in visible(&value["message"], id, role) {
             if role == "assistant" && message.role == "assistant" {
@@ -62,11 +76,17 @@ impl Transcript {
         if event["type"] == "message_start" {
             self.block = event["message"]["id"].as_str().unwrap_or("").into();
             self.text_blocks = 0;
+            self.ordinals.clear();
         }
         if event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta" {
+            // Content indexes count every block, while saved rows number text blocks
+            // only, so each streamed text block maps to its text-only ordinal.
+            let index = event["index"].as_u64().unwrap_or(0);
+            let next = self.ordinals.len();
+            let ordinal = *self.ordinals.entry(index).or_insert(next);
             self.message(
                 Message {
-                    id: format!("{}/{}", self.block, self.text_blocks),
+                    id: format!("{}/{ordinal}", self.block),
                     role: "assistant".into(),
                     text: event["delta"]["text"].as_str().unwrap_or("").into(),
                 },

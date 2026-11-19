@@ -39,7 +39,7 @@ struct DevicesView: View {
                                 }
                             }
                         }
-                        .padding(20).background(.white, in: RoundedRectangle(cornerRadius: 20))
+                        .padding(20).background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))
                     }
                     Button { showingSetup = true } label: {
                         Label("Connect a device", systemImage: "plus").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(12)
@@ -85,18 +85,18 @@ struct AccountView: View {
                             Text("SSO").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.secondary)
                         }
                     }
-                    .padding(22).background(.white, in: RoundedRectangle(cornerRadius: 20))
+                    .padding(22).background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))
                     VStack(alignment: .leading, spacing: 14) {
                         Text("CONNECTED GATEWAY").font(.system(size: 10, weight: .semibold)).tracking(1.3).foregroundStyle(Palette.secondary)
                         Text(URL(string: store.configuration?.gateway ?? "")?.host ?? "LiteLLM").font(.subheadline.weight(.medium))
                         Text("Inference runs through your gateway. Your provider credentials never need to be on this phone.")
                             .font(.caption).foregroundStyle(Palette.secondary).lineSpacing(4)
                     }
-                    .padding(22).background(.white, in: RoundedRectangle(cornerRadius: 20))
+                    .padding(22).background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))
                     if let error = store.error { InlineError(text: error) }
                     Button("Sign out", role: .destructive) { Task { await store.signOut() } }
                         .font(.subheadline.weight(.medium)).frame(maxWidth: .infinity).padding(16)
-                        .background(.white, in: RoundedRectangle(cornerRadius: 15))
+                        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 15))
                     Text("LiteLLM Remote · Preview")
                         .font(.system(size: 11)).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity).padding(.top, 12)
                 }

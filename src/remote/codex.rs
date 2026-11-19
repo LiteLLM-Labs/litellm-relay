@@ -34,6 +34,7 @@ pub struct Thread {
     cwd: String,
     model_provider: String,
     model: Option<String>,
+    approval_policy: Option<String>,
     can_accept_direct_input: Option<bool>,
     updated_at: i64,
     status: ThreadStatus,
@@ -504,6 +505,7 @@ impl Codex {
             .expect("Codex event lock")
             .tracked
             .insert(id.to_string());
+        let mut policy = None;
         if !self
             .drafts
             .lock()
@@ -519,8 +521,15 @@ impl Codex {
             if resumed.thread.model_provider != self.provider {
                 return Err(Failure::new(409, "This session changed provider."));
             }
+            policy = resumed.thread.approval_policy;
         }
-        let mut params = json!({"threadId":id,"approvalPolicy":"on-request","input":[{"type":"text","text":text,"text_elements":[]}]});
+        let mut params =
+            json!({"threadId":id,"input":[{"type":"text","text":text,"text_elements":[]}]});
+        // A resumed thread keeps its own approval policy; only "never" is lifted to
+        // "on-request", because it would otherwise deny mobile tool requests with no card.
+        if policy.as_deref() == Some("never") {
+            params["approvalPolicy"] = json!("on-request");
+        }
         if let Some(model) = &model {
             params["model"] = json!(model);
         }

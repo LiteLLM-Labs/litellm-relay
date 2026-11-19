@@ -55,7 +55,7 @@ struct SessionsView: View {
                                 Spacer()
                                 ConnectionBadge(online: device.online)
                             }
-                            .font(.caption).padding(15).background(.white, in: RoundedRectangle(cornerRadius: 14))
+                            .font(.caption).padding(15).background(Palette.surface, in: RoundedRectangle(cornerRadius: 14))
                         }
                         .tint(Palette.ink)
                     }
@@ -147,7 +147,7 @@ private struct SessionRow: View {
             .font(.system(size: 10, weight: .medium))
         }
         .padding(19).frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white, in: RoundedRectangle(cornerRadius: 18))
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(session.status == "working" ? Palette.accent.opacity(0.15) : Palette.border.opacity(0.5)))
     }
 }
