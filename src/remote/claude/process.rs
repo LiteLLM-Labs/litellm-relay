@@ -196,10 +196,17 @@ impl Claude {
             .into_iter()
             .filter(|session| session.pid.is_some())
             .filter_map(|session| {
+                let id = session.session_id?;
                 Some(Grant {
-                    id: session.session_id?,
+                    id,
                     cwd: session.cwd,
-                    title: session.name.unwrap_or_else(|| "Claude session".into()),
+                    title: self
+                        .transcript(id)
+                        .and_then(|path| Self::conversation(id, &path))
+                        .map(|grant| grant.title)
+                        .unwrap_or_else(|_| {
+                            session.name.unwrap_or_else(|| "Claude session".into())
+                        }),
                     model: None,
                     updated_at: now_ms() / 1000,
                 })

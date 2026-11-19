@@ -4,17 +4,15 @@ import Observation
 actor RemoteTransport {
     private let baseURL: URL
     private let session: URLSession
-    private var token: String?
+    private let token: String?
 
-    init(baseURL: URL, token: String?) {
+    init(baseURL: URL, token: String?, session: URLSession? = nil) {
         self.baseURL = baseURL
         self.token = token
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: configuration)
+        self.session = session ?? URLSession(configuration: configuration)
     }
-
-    func authenticate(_ token: String?) { self.token = token }
 
     func request<Value: Decodable & Sendable>(
         _ path: String, method: String = "GET", body: [String: String] = [:], as type: Value.Type
@@ -67,33 +65,57 @@ final class RemoteStore {
     var login: LoginStart?
     var teams: [LoginTeam] = []
     var busy = false
+    var restoring: Bool
+    var hasSavedSession = false
     var loading = false
     var error: String?
     private var transport: RemoteTransport?
+    private let defaults: UserDefaults
+    private let session: URLSession?
 
-    init() {
-        self.address = UserDefaults.standard.string(forKey: "workspaceAddress")
+    init(defaults: UserDefaults = .standard, session: URLSession? = nil) {
+        self.defaults = defaults
+        self.session = session
+        self.address = defaults.string(forKey: "workspaceAddress")
             ?? ""
-        self.gatewayAddress = UserDefaults.standard.string(forKey: "gatewayAddress") ?? ""
-        self.serviceOverride = UserDefaults.standard.string(forKey: "serviceOverride") ?? ""
+        let gateway = defaults.string(forKey: "gatewayAddress") ?? ""
+        self.gatewayAddress = gateway
+        self.serviceOverride = defaults.string(forKey: "serviceOverride") ?? ""
+        self.restoring = !gateway.isEmpty
     }
 
     var selectedDevice: RegisteredDevice? { devices.first { $0.id == selectedDeviceId } }
 
-    func restore() async { if normalizedGateway(gatewayAddress) != nil && !gatewayAddress.isEmpty { await connect() } }
+    func restore() async {
+        guard configuration?.identity == nil, login == nil, !busy else { return }
+        restoring = true
+        defer { restoring = false }
+        guard let service = savedService,
+              SessionVault.load(workspace: service.absoluteString) != nil else { return }
+        await connect()
+    }
+
+    private var savedService: URL? {
+        guard let gateway = normalizedGateway(gatewayAddress),
+              gateway == normalizedGateway(defaults.string(forKey: "gatewayAddress") ?? ""),
+              serviceOverride == (defaults.string(forKey: "serviceOverride") ?? "") else { return nil }
+        return serviceAddress(address)
+    }
 
     func connect() async {
         guard let gateway = normalizedGateway(gatewayAddress) else { error = "Enter your LiteLLM gateway’s HTTPS address."; return }
         busy = true
         error = nil
-        let resolved = await resolveService(gateway: gateway)
+        let resolved: Result<URL, RemoteFailure> = if let service = savedService { .success(service) } else { await resolveService(gateway: gateway) }
         guard case .success(let url) = resolved else {
             if case .failure(let failure) = resolved { error = failure.message }
             busy = false
             return
         }
         let normalized = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let connection = RemoteTransport(baseURL: url, token: SessionVault.load(workspace: normalized))
+        let token = SessionVault.load(workspace: normalized)
+        hasSavedSession = token != nil
+        let connection = RemoteTransport(baseURL: url, token: token, session: session)
         switch await connection.request("/api/me", as: ServiceConfiguration.self) {
         case .success(let value):
             guard normalizedGateway(value.gateway) == gateway else {
@@ -104,10 +126,16 @@ final class RemoteStore {
             transport = connection
             configuration = value
             address = normalized
-            UserDefaults.standard.set(address, forKey: "workspaceAddress")
-            UserDefaults.standard.set(gateway.absoluteString, forKey: "gatewayAddress")
-            UserDefaults.standard.set(serviceOverride, forKey: "serviceOverride")
-        case .failure(let failure): error = failure.message
+            if value.identity == nil {
+                hasSavedSession = false
+                if token != nil { SessionVault.remove(workspace: normalized) }
+            }
+            defaults.set(address, forKey: "workspaceAddress")
+            defaults.set(gateway.absoluteString, forKey: "gatewayAddress")
+            defaults.set(serviceOverride, forKey: "serviceOverride")
+        case .failure(let failure):
+            if hasSavedSession { configuration = nil }
+            error = failure.message
         }
         busy = false
     }
@@ -139,22 +167,13 @@ final class RemoteStore {
             if value.status == "teams" { teams = value.teams ?? []; return }
             guard value.status == "ready", let token = value.token else { return }
             guard SessionVault.save(token, workspace: address) else { error = "Couldn’t securely save your sign-in. Please try again."; return }
-            await transport.authenticate(token)
-            await reloadIdentity()
+            hasSavedSession = true
+            await connect()
             self.login = nil
             teams = []
         case .failure(let failure):
             if failure.status == 410 { self.login = nil }
             error = failure.message
-        }
-    }
-
-    private func reloadIdentity() async {
-        guard let transport else { return }
-        switch await transport.request("/api/me", as: ServiceConfiguration.self) {
-        case .success(let value):
-            configuration = value
-        case .failure(let failure): error = failure.message
         }
     }
 
@@ -248,6 +267,7 @@ final class RemoteStore {
 
     func disconnect() {
         SessionVault.remove(workspace: address)
+        hasSavedSession = false
         transport = nil
         configuration = nil
         selectedDeviceId = nil
@@ -268,8 +288,8 @@ final class RemoteStore {
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
-        let discovery = URLSession(configuration: configuration)
-        defer { discovery.invalidateAndCancel() }
+        let discovery = session ?? URLSession(configuration: configuration)
+        defer { if session == nil { discovery.invalidateAndCancel() } }
         do {
             let (data, response) = try await discovery.data(from: gateway.appendingPathComponent(".well-known/litellm-remote.json"))
             guard (response as? HTTPURLResponse)?.statusCode == 200,

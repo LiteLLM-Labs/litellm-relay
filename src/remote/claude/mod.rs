@@ -51,18 +51,7 @@ impl Claude {
         if self.grants()?.iter().any(|grant| grant.id == id) {
             return Ok(());
         }
-        let (cwd, messages, _) = self.history(id)?;
-        self.save(&Grant {
-            id,
-            cwd,
-            title: messages
-                .iter()
-                .find(|message| message.role == "user")
-                .map(|message| message.text.chars().take(140).collect())
-                .unwrap_or_else(|| "Claude session".into()),
-            model: None,
-            updated_at: now_ms() / 1000,
-        })
+        self.save(&Self::conversation(id, &self.transcript(id)?)?)
     }
 
     fn summary(&self, grant: &Grant, external: bool) -> Session {

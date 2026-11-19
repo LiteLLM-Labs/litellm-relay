@@ -2,7 +2,7 @@ use super::super::protocol::{redact, Failure, Message, Result};
 use super::{visible, Claude, Grant};
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -78,6 +78,7 @@ impl Transcript {
 impl Claude {
     pub async fn handoff_choices(&self) -> Result<Vec<super::Session>> {
         let active = self.active().await?;
+        let grants = self.grants()?;
         let projects = match std::fs::read_dir(self.home.join("projects")) {
             Ok(projects) => projects,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -103,39 +104,55 @@ impl Claude {
         paths.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
         Ok(paths
             .into_iter()
-            .take(20)
-            .filter_map(|(id, path, modified)| {
-                let mut bytes = Vec::new();
-                std::fs::File::open(path)
-                    .ok()?
-                    .take(65_536)
-                    .read_to_end(&mut bytes)
-                    .ok()?;
-                let rows = bytes
-                    .split(|byte| *byte == b'\n')
-                    .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-                    .collect::<Vec<_>>();
-                let cwd = rows.iter().find_map(|row| row["cwd"].as_str())?;
-                let title = rows
+            .filter_map(|(id, path, _)| {
+                let grant = grants
                     .iter()
-                    .filter(|row| row["type"] == "user" && row["isMeta"] != true)
-                    .flat_map(|row| visible(&row["message"], "", "user"))
-                    .next()
-                    .map(|message| message.text.chars().take(140).collect())
-                    .unwrap_or_else(|| "Claude conversation".into());
-                let grant = Grant {
-                    id,
-                    cwd: cwd.into(),
-                    title,
-                    model: None,
-                    updated_at: modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()?
-                        .as_secs() as i64,
-                };
+                    .find(|grant| grant.id == id)
+                    .cloned()
+                    .or_else(|| Self::conversation(id, &path).ok())?;
                 Some(self.summary(&grant, false))
             })
+            .take(20)
             .collect())
+    }
+
+    pub(super) fn conversation(id: Uuid, path: &Path) -> Result<Grant> {
+        let file = std::fs::File::open(path)
+            .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
+        let updated_at = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|modified| modified.as_secs() as i64)
+            .unwrap_or_default();
+        let mut cwd = None;
+        let mut title = None;
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
+            let Ok(row) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if cwd.is_none() {
+                cwd = row["cwd"].as_str().map(str::to_owned);
+            }
+            if title.is_none() && row["type"] == "user" && row["isMeta"] != true {
+                title = visible(&row["message"], "", "user")
+                    .first()
+                    .map(|message| message.text.chars().take(140).collect());
+            }
+            if cwd.is_some() && title.is_some() {
+                break;
+            }
+        }
+        Ok(Grant {
+            id,
+            cwd: cwd
+                .ok_or_else(|| Failure::new(502, "Claude transcript has no project folder."))?,
+            title: title.unwrap_or_else(|| "Claude conversation".into()),
+            model: None,
+            updated_at,
+        })
     }
 
     pub(super) fn grants(&self) -> Result<Vec<Grant>> {
@@ -184,22 +201,13 @@ impl Claude {
 
     pub(super) fn history(&self, id: Uuid) -> Result<(String, Vec<Message>, bool)> {
         let path = self.transcript(id)?;
-        let mut file = std::fs::File::open(path)
+        let mut file = std::fs::File::open(&path)
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
         let size = file
             .metadata()
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?
             .len();
-        let mut prefix = Vec::new();
-        Read::by_ref(&mut file)
-            .take(65_536)
-            .read_to_end(&mut prefix)
-            .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
-        let cwd = prefix
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-            .find_map(|value| value["cwd"].as_str().map(str::to_owned))
-            .ok_or_else(|| Failure::new(502, "Claude transcript has no project folder."))?;
+        let cwd = Self::conversation(id, &path)?.cwd;
         let offset = size.saturating_sub(4 * 1024 * 1024);
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;

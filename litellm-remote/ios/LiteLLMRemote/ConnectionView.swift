@@ -64,14 +64,14 @@ struct ConnectionView: View {
                 HStack {
                     Spacer()
                     if store.busy { ProgressView().tint(.white) }
-                    else { Text("Continue").fontWeight(.semibold); Image(systemName: "arrow.right") }
+                    else { Text(store.hasSavedSession ? "Reconnect" : "Continue").fontWeight(.semibold); Image(systemName: "arrow.right") }
                     Spacer()
                 }
                 .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent).foregroundStyle(.white).controlSize(.large).buttonBorderShape(.roundedRectangle(radius: 15))
             .disabled(store.busy || store.gatewayAddress.isEmpty).accessibilityIdentifier("connectButton")
-            Text("Connect to your own gateway. Sign in with your work account.")
+            Text(store.hasSavedSession ? "Your sign-in is saved. Reconnect to continue." : "Connect to your own gateway. Sign in with your work account.")
                 .font(.caption).foregroundStyle(Palette.secondary).padding(.top, 4)
         }
     }

@@ -903,14 +903,17 @@ for line in sys.stdin:
         Some("fixture-model")
     );
     let existing = Uuid::new_v4();
-    std::fs::write(project.join(format!("{existing}.jsonl")), format!("{}\n{}\n{}\n",
+    std::fs::write(project.join(format!("{existing}.jsonl")), format!("{}\n{}\n{}\n{}\n{}\n{}\n",
+        json!({"type":"file-history-snapshot","snapshot":"x".repeat(70_000)}),
+        json!({"type":"user","cwd":cwd,"isMeta":true,"message":{"content":"Hidden setup"}}),
         json!({"type":"user","cwd":cwd,"uuid":"original","message":{"content":"Original context"}}),
+        json!({"type":"file-history-snapshot","snapshot":"x".repeat(4 * 1024 * 1024)}),
         json!({"type":"assistant","uuid":"chunk-a","message":{"id":"multi-block","content":[{"type":"text","text":"Repeated on purpose"}]}}),
         json!({"type":"assistant","uuid":"chunk-b","message":{"id":"multi-block","content":[{"type":"text","text":"Repeated on purpose"}]}}),
     )).unwrap();
     std::fs::write(
         home.join("active.json"),
-        json!([{"sessionId":existing,"pid":1,"cwd":cwd}]).to_string(),
+        json!([{"sessionId":existing,"pid":1,"cwd":cwd,"name":"Different CLI label"}]).to_string(),
     )
     .unwrap();
     assert_eq!(claude.handoff(existing).await.unwrap_err().status, 409);
@@ -920,12 +923,31 @@ for line in sys.stdin:
         .unwrap()
         .iter()
         .any(|choice| choice.id == format!("claude:{existing}")));
+    let phone_title = claude
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == format!("claude:{existing}"))
+        .unwrap()
+        .title;
+    assert_eq!(phone_title, "Original context");
     std::fs::write(home.join("active.json"), "[]").unwrap();
+    for _ in 0..20 {
+        let file =
+            std::fs::File::create(project.join(format!("{}.jsonl", Uuid::new_v4()))).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(10)),
+        )
+        .unwrap();
+    }
     let choices = claude.handoff_choices().await.unwrap();
     let choice = choices
         .iter()
         .position(|choice| choice.id == format!("claude:{existing}"))
         .unwrap();
+    assert_eq!(choices[choice].title, phone_title);
     let mut output = Vec::new();
     let selected = super::choose_handoff(
         &choices,
@@ -942,13 +964,14 @@ for line in sys.stdin:
     );
     claude.handoff(selected).await.unwrap();
     assert_eq!(
-        claude.read(existing).await.unwrap().messages[0].text,
-        "Original context"
+        claude.read(existing).await.unwrap().session.title,
+        phone_title
     );
     let repeated = claude.read(existing).await.unwrap();
-    assert_eq!(repeated.messages.len(), 3);
-    assert_eq!(repeated.messages[1].text, repeated.messages[2].text);
-    assert_ne!(repeated.messages[1].id, repeated.messages[2].id);
+    assert!(repeated.older_messages);
+    assert_eq!(repeated.messages.len(), 2);
+    assert_eq!(repeated.messages[0].text, repeated.messages[1].text);
+    assert_ne!(repeated.messages[0].id, repeated.messages[1].id);
     claude
         .send(existing, "Resume original".into(), None)
         .await

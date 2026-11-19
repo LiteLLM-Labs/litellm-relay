@@ -3,13 +3,17 @@ import SwiftUI
 @main
 struct LiteLLMRemoteApp: App {
     @State private var store = RemoteStore()
-    @State private var restored = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            Group {
+            VStack(spacing: 0) {
                 if store.configuration?.identity != nil {
                     WorkspaceView(store: store)
+                } else if store.restoring {
+                    ProgressView("Restoring your session")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Palette.background)
                 } else {
                     ConnectionView(store: store)
                 }
@@ -17,10 +21,9 @@ struct LiteLLMRemoteApp: App {
             .preferredColorScheme(.light)
             .foregroundStyle(Palette.ink)
             .tint(Palette.accent)
-            .task {
-                guard !restored else { return }
-                restored = true
-                await store.restore()
+            .task { await store.restore() }
+            .onChange(of: scenePhase) {
+                if scenePhase == .active { Task { await store.restore() } }
             }
         }
     }
