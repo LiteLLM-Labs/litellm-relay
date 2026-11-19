@@ -903,7 +903,7 @@ for line in sys.stdin:
         Some("fixture-model")
     );
     let existing = Uuid::new_v4();
-    std::fs::write(project.join(format!("{existing}.jsonl")), format!("{}\n{}\n{}\n{}\n{}\n{}\n",
+    std::fs::write(project.join(format!("{existing}.jsonl")), format!("not json\n{{\"type\":\"file-history-snapshot\",\"snapshot\":\"truncated\n{}\n{}\n{{\"type\":\"user\",\"message\":\n{}\n{}\n{}\n{}\n",
         json!({"type":"file-history-snapshot","snapshot":"x".repeat(70_000)}),
         json!({"type":"user","cwd":cwd,"isMeta":true,"message":{"content":"Hidden setup"}}),
         json!({"type":"user","cwd":cwd,"uuid":"original","message":{"content":"Original context"}}),
@@ -911,6 +911,13 @@ for line in sys.stdin:
         json!({"type":"assistant","uuid":"chunk-a","message":{"id":"multi-block","content":[{"type":"text","text":"Repeated on purpose"}]}}),
         json!({"type":"assistant","uuid":"chunk-b","message":{"id":"multi-block","content":[{"type":"text","text":"Repeated on purpose"}]}}),
     )).unwrap();
+    assert!(reopened
+        .handoff_choices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|choice| choice.id == format!("claude:{existing}")
+            && choice.title == "Original context"));
     std::fs::write(
         home.join("active.json"),
         json!([{"sessionId":existing,"pid":1,"cwd":cwd,"name":"Different CLI label"}]).to_string(),
@@ -936,7 +943,9 @@ for line in sys.stdin:
     let original = std::fs::read_to_string(&transcript).unwrap();
     let compacted = original
         .lines()
-        .filter(|line| serde_json::from_str::<Value>(line).unwrap()["uuid"] != "original")
+        .filter(|line| {
+            !serde_json::from_str::<Value>(line).is_ok_and(|row| row["uuid"] == "original")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&transcript, format!("{compacted}\n")).unwrap();

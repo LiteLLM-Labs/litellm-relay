@@ -34,7 +34,7 @@ relay onboard-codex \
   --model "$CODEX_GATEWAY_MODEL"
 ```
 
-Set `CODEX_GATEWAY_MODEL` to an exact model ID served by your gateway. Relay preserves an existing model, but a fresh configuration requires `--model` rather than assuming an upstream default exists on your gateway.
+Set `CODEX_GATEWAY_MODEL` to an exact model ID served by your gateway. The `--model` flag updates Relay’s saved Codex model. Without it, Relay uses its saved or default model, which your gateway may not serve.
 
 The `--oidc-*` flags are the same ones `relay onboard` takes (see [Claude Code](claude-code.md#commands)); the IdP session is shared, so a developer who already signed in for Claude Code is not asked again.
 

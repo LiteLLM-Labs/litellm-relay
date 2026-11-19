@@ -3,7 +3,7 @@ use super::{visible, Claude, Grant};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -171,10 +171,24 @@ impl Claude {
             .unwrap_or_default();
         let mut cwd = None;
         let mut title = None;
-        let rows = serde_json::Deserializer::from_reader(BufReader::new(file)).into_iter::<Row>();
-        for row in rows {
-            let row =
-                row.map_err(|_| Failure::new(502, "Cannot read Claude conversation details."))?;
+        let mut reader = BufReader::new(file);
+        loop {
+            let length = reader
+                .skip_until(b'\n')
+                .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
+            if length == 0 {
+                break;
+            }
+            reader
+                .seek_relative(-(length as i64))
+                .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
+            let mut record = reader.by_ref().take(length as u64);
+            let row = serde_json::from_reader::<_, Row>(&mut record);
+            std::io::copy(&mut record, &mut std::io::sink())
+                .map_err(|_| Failure::new(503, "Cannot read Claude history."))?;
+            let Ok(row) = row else {
+                continue;
+            };
             if cwd.is_none() {
                 cwd = row.cwd;
             }
