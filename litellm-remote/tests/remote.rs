@@ -565,14 +565,18 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
             let result = match request["method"].as_str().unwrap() {
                 "initialized" => continue,
                 "initialize" => json!({"userAgent":"fixture"}),
-                "thread/read" | "thread/resume" => {
+                "thread/read" => {
+                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","updatedAt":1,"status":{"type":"idle"}}})
+                }
+                // Real thread/resume puts AskForApproval beside `thread`, never inside it.
+                "thread/resume" => {
                     let policy = saved_policy.lock().unwrap().clone();
                     let policy = if policy == "granular" {
-                        json!({"experimental":{"rules":[]}})
+                        json!({"granular":{"sandbox_approval":true,"rules":true,"skill_approval":false,"request_permissions":false,"mcp_elicitations":false}})
                     } else {
                         json!(policy)
                     };
-                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","approvalPolicy":policy,"updatedAt":1,"status":{"type":"idle"}}})
+                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","updatedAt":1,"status":{"type":"idle"}},"model":"fixture-model","modelProvider":"litellm","approvalPolicy":policy,"serviceTier":null,"sandbox":"workspace-write"})
                 }
                 "config/read" => {
                     json!({"config":{"model_providers":{"litellm":{"base_url":"https://gateway.example.test/v1"}}}})
@@ -718,6 +722,138 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
         "a granular object policy must not be overridden"
     );
     assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
+    mac.abort();
+}
+
+#[tokio::test]
+async fn codex_stop_then_send_shows_the_new_turn_instead_of_interrupted_live_text() {
+    let directory = Directory::new();
+    let path = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    struct SocketFile(PathBuf);
+    impl Drop for SocketFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _file = SocketFile(path.clone());
+    let thread = Uuid::new_v4();
+    let phase = Arc::new(AtomicUsize::new(0));
+    let stage = phase.clone();
+    let mac = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(Frame::Text(text))) = socket.next().await {
+            let request: Value = serde_json::from_str(&text).unwrap();
+            if request.get("method").is_none() {
+                continue;
+            }
+            let result = match request["method"].as_str().unwrap() {
+                "initialized" => continue,
+                "initialize" => json!({"userAgent":"fixture"}),
+                "thread/read" => {
+                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","updatedAt":1,"status":{"type":"idle"}}})
+                }
+                "thread/resume" => {
+                    json!({"thread":{"id":thread,"cwd":directory.0.to_str().unwrap(),"preview":"Fixture session","modelProvider":"litellm","updatedAt":1,"status":{"type":"idle"}},"approvalPolicy":"on-request","model":"fixture-model","modelProvider":"litellm"})
+                }
+                "config/read" => {
+                    json!({"config":{"model_providers":{"litellm":{"base_url":"https://gateway.example.test/v1"}}}})
+                }
+                "turn/start" => {
+                    let fresh = stage.load(Ordering::SeqCst) > 0;
+                    let turn = if fresh { "new-turn" } else { "old-turn" };
+                    let item = if fresh { "fresh" } else { "draft" };
+                    let delta = if fresh {
+                        "fresh output"
+                    } else {
+                        "stale draft output"
+                    };
+                    socket.send(Frame::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":turn,"itemId":item,"delta":delta}}).to_string().into())).await.unwrap();
+                    if fresh {
+                        stage.store(2, Ordering::SeqCst);
+                    }
+                    json!({"turn":{"id":turn}})
+                }
+                "thread/turns/list" => {
+                    let finalized = json!({"id":"old-turn","status":"completed","items":[
+                        {"type":"userMessage","id":"input","content":[{"type":"text","text":"First"}]},
+                        {"type":"agentMessage","id":"draft","text":"finalized partial"}
+                    ]});
+                    match stage.load(Ordering::SeqCst) {
+                        0 => {
+                            json!({"data":[{"id":"old-turn","status":"inProgress","items":[{"type":"userMessage","id":"input","content":[{"type":"text","text":"First"}]}]}],"nextCursor":null})
+                        }
+                        1 => json!({"data":[finalized],"nextCursor":null}),
+                        _ => json!({"data":[
+                            {"id":"new-turn","status":"inProgress","items":[{"type":"userMessage","id":"input","content":[{"type":"text","text":"Second"}]}]},
+                            finalized
+                        ],"nextCursor":null}),
+                    }
+                }
+                "turn/interrupt" => {
+                    stage.store(1, Ordering::SeqCst);
+                    socket.send(Frame::Text(json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":"old-turn","status":"interrupted"}}}).to_string().into())).await.unwrap();
+                    json!({})
+                }
+                other => panic!("unexpected RPC {other}"),
+            };
+            socket
+                .send(Frame::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    let codex = codex::Codex::new(
+        path,
+        "litellm".into(),
+        Url::parse("https://gateway.example.test").unwrap(),
+    );
+    codex
+        .send(thread, "First".into(), Some("fixture-model".into()))
+        .await
+        .unwrap();
+    let streaming = codex.read(thread).await.unwrap();
+    assert!(
+        streaming
+            .messages
+            .iter()
+            .any(|message| message.text == "stale draft output"),
+        "the in-progress turn is visible while it streams"
+    );
+    assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
+    assert_eq!(phase.load(Ordering::SeqCst), 1);
+    codex
+        .send(thread, "Second".into(), Some("fixture-model".into()))
+        .await
+        .unwrap();
+    let continued = codex.read(thread).await.unwrap();
+    assert_eq!(continued.session.status, "ready");
+    assert!(
+        continued
+            .messages
+            .iter()
+            .any(|message| message.text == "fresh output"),
+        "the turn after Stop must show its own output"
+    );
+    assert!(
+        continued
+            .messages
+            .iter()
+            .any(|message| message.text == "finalized partial"),
+        "the interrupted turn keeps the text Codex saved"
+    );
+    assert!(
+        continued
+            .messages
+            .iter()
+            .all(|message| message.text != "stale draft output"),
+        "interrupted live text must not stay after Stop"
+    );
     mac.abort();
 }
 

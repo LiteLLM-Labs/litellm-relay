@@ -34,7 +34,9 @@ pub struct Thread {
     cwd: String,
     model_provider: String,
     model: Option<String>,
-    // Granular experimental policies arrive as objects, so this stays untyped.
+    // Present only so an object-form policy cannot fail thread/read or thread/list.
+    // thread/resume carries the policy beside `thread`; that is what `send` reads.
+    #[allow(dead_code)]
     approval_policy: Option<Value>,
     can_accept_direct_input: Option<bool>,
     updated_at: i64,
@@ -94,6 +96,16 @@ impl Thread {
 struct ThreadReply {
     thread: Thread,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResumeReply {
+    thread: Thread,
+    // AskForApproval is either a string or the experimental granular object.
+    // thread/resume sends it next to `thread`, not inside the thread object.
+    #[serde(default)]
+    approval_policy: Option<Value>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Page<T> {
@@ -132,6 +144,9 @@ struct Events {
     changes: HashMap<String, String>,
     live: HashMap<String, Live>,
     tracked: HashSet<String>,
+    // Turns Codex has finished or interrupted. Later deltas for them are ignored
+    // so a stopped turn cannot put its partial stream back on screen.
+    finished: HashSet<String>,
 }
 
 impl Events {
@@ -141,7 +156,13 @@ impl Events {
         let thread = params["threadId"].as_str().unwrap_or("");
         let item = params["itemId"].as_str().unwrap_or("");
         match method {
-            "item/agentMessage/delta" if self.tracked.contains(thread) => {
+            "item/agentMessage/delta"
+                if self.tracked.contains(thread)
+                    && !self.finished.contains(&format!(
+                        "{thread}/{}",
+                        params["turnId"].as_str().unwrap_or("")
+                    )) =>
+            {
                 let key = format!(
                     "{thread}/{}/{item}",
                     params["turnId"].as_str().unwrap_or("")
@@ -202,10 +223,9 @@ impl Events {
             "serverRequest/resolved" => self
                 .approvals
                 .retain(|_, approval| approval.request != params["requestId"]),
-            "turn/completed" => self.approvals.retain(|_, approval| {
-                approval.thread != thread
-                    || approval.turn != params["turn"]["id"].as_str().unwrap_or("")
-            }),
+            "turn/completed" => {
+                self.finish_turn(thread, params["turn"]["id"].as_str().unwrap_or(""));
+            }
             "item/completed" => {
                 self.changes.remove(&format!(
                     "{thread}/{}",
@@ -269,6 +289,20 @@ impl Events {
             },
         );
         None
+    }
+
+    fn finish_turn(&mut self, thread: &str, turn: &str) {
+        if thread.is_empty() || turn.is_empty() {
+            return;
+        }
+        if self.finished.len() >= 256 {
+            self.finished.clear();
+        }
+        self.finished.insert(format!("{thread}/{turn}"));
+        self.live
+            .retain(|_, live| live.thread != thread || live.turn != turn);
+        self.approvals
+            .retain(|_, approval| approval.thread != thread || approval.turn != turn);
     }
 }
 
@@ -514,7 +548,7 @@ impl Codex {
             .contains_key(&id)
         {
             let resumed = rpc
-                .request::<ThreadReply>(
+                .request::<ResumeReply>(
                     "thread/resume",
                     json!({"threadId":id,"modelProvider":&self.provider,"excludeTurns":true}),
                 )
@@ -522,7 +556,7 @@ impl Codex {
             if resumed.thread.model_provider != self.provider {
                 return Err(Failure::new(409, "This session changed provider."));
             }
-            policy = resumed.thread.approval_policy;
+            policy = resumed.approval_policy;
         }
         let mut params =
             json!({"threadId":id,"input":[{"type":"text","text":text,"text_elements":[]}]});
@@ -693,6 +727,13 @@ impl Codex {
         let _: Value = rpc
             .request("turn/interrupt", json!({"threadId":id,"turnId":turn.id}))
             .await?;
+        // The interrupt reply does not include the finalized items. Drop the
+        // partial stream now so the next read uses the saved turn, including
+        // when the turn/completed notification was lost.
+        self.events
+            .lock()
+            .expect("Codex event lock")
+            .finish_turn(&id.to_string(), &turn.id);
         Ok(json!({"stopped":true}))
     }
 }
