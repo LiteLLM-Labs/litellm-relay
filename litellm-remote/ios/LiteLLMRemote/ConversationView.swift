@@ -62,9 +62,9 @@ struct SessionView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: detail?.messages.last?.id) {
-                    if !followed { proxy.scrollTo("latest", anchor: .bottom); followed = true }
+                    if !followed { scrollToLatest(proxy); followed = true }
                 }
-                .onChange(of: scrollRequest) { proxy.scrollTo("latest", anchor: .bottom) }
+                .onChange(of: scrollRequest) { scrollToLatest(proxy) }
             }
         }
         .background(Palette.background)
@@ -74,7 +74,7 @@ struct SessionView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 if session.canStop {
                     Button { Task { await stopTurn() } } label: {
-                        if stopping { ProgressView() }
+                        if stopping { ProgressView().controlSize(.small).frame(width: 18, height: 18) }
                         else { Label("Stop", systemImage: "stop.fill").labelStyle(.titleAndIcon).font(.caption.weight(.semibold)) }
                     }
                     .disabled(stopping).accessibilityLabel("Stop current turn")
@@ -259,6 +259,18 @@ struct SessionView: View {
         await update()
         deciding = false
     }
+
+    // ScrollViewProxy.scrollTo animates by default. An in-flight animation
+    // against a LazyVStack whose height is still changing (Stop, or a send
+    // that replaces the streamed turn) retriggers layout until the process
+    // is killed.
+    private func scrollToLatest(_ proxy: ScrollViewProxy) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            proxy.scrollTo("latest", anchor: .bottom)
+        }
+    }
 }
 
 private struct MessageView: View {
@@ -328,24 +340,27 @@ private struct MessageView: View {
     }
 }
 
-// Parsing markdown inside `body` re-runs on every poll and long selectable text
-// rebuilds its selection machinery on each change; both stalled the main thread
-// on long streamed turns. Parse once per text value, off the main actor, and
-// show the plain text until the parsed version is ready.
+// Parsing markdown inside `body` stalled the main thread on long streamed turns.
+// Show plain text until a parse for this exact string exists. Parses run one at
+// a time off the main actor; a newer poll supersedes ones that have not started,
+// so Stop during a long stream does not leave a pile of user-initiated parses running.
 private struct MarkdownText: View {
     let text: String
     @State private var rendered: RenderedMarkdown?
 
     var body: some View {
-        Text(rendered?.display(for: text) ?? AttributedString(text))
-            .task(id: text) {
-                let source = text
-                let parsed = await Task.detached(priority: .userInitiated) {
-                    MessageMarkdown.parse(source)
-                }.value
-                if !Task.isCancelled, let parsed {
-                    rendered = RenderedMarkdown(source: source, value: parsed)
-                }
+        Group {
+            if let rendered, rendered.source == text {
+                Text(rendered.value)
+            } else {
+                Text(verbatim: text)
             }
+        }
+        .task(id: text) {
+            let source = text
+            guard let parsed = await MarkdownQueue.shared.parse(source) else { return }
+            guard !Task.isCancelled, source == text else { return }
+            rendered = RenderedMarkdown(source: source, value: parsed)
+        }
     }
 }

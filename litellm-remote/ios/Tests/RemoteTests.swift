@@ -184,6 +184,17 @@ final class RemoteTests: XCTestCase {
                         "pathological markup must still return a usable value")
     }
 
+    func testMarkdownQueueCompletesSupersededParses() async {
+        async let earlier = MarkdownQueue.shared.parse("alpha")
+        async let later = MarkdownQueue.shared.parse("beta")
+        let (first, second) = await (earlier, later)
+        XCTAssertTrue(String(second?.characters ?? "").contains("beta"))
+        if let first {
+            let text = String(first.characters)
+            XCTAssertTrue(text.contains("alpha") || text.contains("beta"))
+        }
+    }
+
     func testCachedMarkdownNeverShowsForNewerStreamedText() throws {
         let parsed = try XCTUnwrap(MessageMarkdown.parse("**bold** start"))
         let cached = RenderedMarkdown(source: "**bold** start", value: parsed)

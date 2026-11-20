@@ -126,6 +126,61 @@ enum MessageMarkdown {
     }
 }
 
+// One markdown parse at a time. Each streamed poll used to start another
+// unstructured task at user-initiated priority, and cancelling the view task
+// did not cancel that work, so a long turn could fill the process until Stop
+// could no longer run.
+actor MarkdownQueue {
+    static let shared = MarkdownQueue()
+
+    private struct Waiter {
+        let text: String
+        let continuation: CheckedContinuation<AttributedString?, Never>
+
+        consuming func finish(_ value: AttributedString?) {
+            continuation.resume(returning: value)
+        }
+    }
+
+    private var waiters: [Waiter] = []
+    private var pumping = false
+
+    func parse(_ text: String) async -> AttributedString? {
+        await withCheckedContinuation { continuation in
+            waiters.append(Waiter(text: text, continuation: continuation))
+            guard !pumping else { return }
+            pumping = true
+            Task { await self.pump() }
+        }
+    }
+
+    private func pump() async {
+        while true {
+            guard let newest = waiters.last?.text else {
+                pumping = false
+                if waiters.isEmpty { return }
+                pumping = true
+                continue
+            }
+            var skipped: [Waiter] = []
+            var cohort: [Waiter] = []
+            for waiter in waiters {
+                if waiter.text == newest { cohort.append(waiter) } else { skipped.append(waiter) }
+            }
+            waiters.removeAll()
+            while let waiter = skipped.popLast() {
+                waiter.finish(nil)
+            }
+            let parsed = await Task.detached(priority: .utility) {
+                MessageMarkdown.parse(newest)
+            }.value
+            while let waiter = cohort.popLast() {
+                waiter.finish(parsed)
+            }
+        }
+    }
+}
+
 struct RenderedMarkdown: Equatable, Sendable {
     let source: String
     let value: AttributedString
