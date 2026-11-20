@@ -193,6 +193,34 @@ final class RemoteTests: XCTestCase {
                        "newer text must render plainly instead of showing the stale parse")
     }
 
+    func testAttachmentsTravelAsFencedBlocksWithSizeLimits() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("attach-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let source = directory.appendingPathComponent("proxy.rs")
+        try "fn main() {}\n".write(to: source, atomically: true, encoding: .utf8)
+        let attachment = try DraftAttachment.read(url: source).get()
+        XCTAssertEqual(attachment.name, "proxy.rs")
+
+        let composed = DraftAttachment.compose(draft: "fix this", attachments: [attachment])
+        XCTAssertEqual(composed, "fix this\n\n<attached-file name=\"proxy.rs\">\nfn main() {}\n\n</attached-file>")
+        XCTAssertEqual(DraftAttachment.compose(draft: "  just text  ", attachments: []), "just text")
+        XCTAssertTrue(DraftAttachment.compose(draft: "", attachments: [attachment]).hasPrefix("<attached-file"))
+
+        let oversized = directory.appendingPathComponent("big.log")
+        try String(repeating: "x", count: 25_000).write(to: oversized, atomically: true, encoding: .utf8)
+        guard case .failure(let failure) = DraftAttachment.read(url: oversized) else {
+            return XCTFail("an oversized file must be refused")
+        }
+        XCTAssertTrue(failure.message.contains("big.log"))
+
+        let binary = directory.appendingPathComponent("photo.bin")
+        try Data([0xFF, 0xD8, 0xFF, 0x00, 0x80]).write(to: binary)
+        XCTAssertThrowsError(try DraftAttachment.read(url: binary).get())
+    }
+
     func testTeamSelectionAndPaginationPreserveOpaqueValues() {
         let team = "engineering & operations + / # ?"
         let teamPath = queryPath("/api/auth/poll", name: "team", value: team)

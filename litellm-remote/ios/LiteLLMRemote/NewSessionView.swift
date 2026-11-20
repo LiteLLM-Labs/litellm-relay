@@ -65,7 +65,7 @@ struct NewSessionView: View {
             }
             .disabled(creating)
             .scrollContentBackground(.hidden)
-            .background(Palette.background)
+            .background(Palette.canvas)
             .navigationTitle("New session")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }

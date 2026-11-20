@@ -34,7 +34,7 @@ struct SessionsView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 7) {
                             Text("Sessions").font(.system(size: 35, weight: .bold)).tracking(-1.4)
-                            Text("Pick up where you left off.").font(.subheadline).foregroundStyle(Palette.secondary)
+                            Text("Pick up where you left off.").font(.subheadline).foregroundStyle(Palette.inkSoft)
                         }
                         Spacer()
                         Button { showingNewSession = true } label: {
@@ -51,7 +51,7 @@ struct SessionsView: View {
                             HStack(spacing: 9) {
                                 Image(systemName: "laptopcomputer").foregroundStyle(Palette.ink)
                                 Text(device.name).fontWeight(.medium).lineLimit(1)
-                                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.secondary)
+                                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Palette.inkSoft)
                                 Spacer()
                                 ConnectionBadge(online: device.online)
                             }
@@ -61,9 +61,9 @@ struct SessionsView: View {
                     }
                     if !store.sessions.isEmpty {
                         HStack(spacing: 10) {
-                            Image(systemName: "magnifyingglass").foregroundStyle(Palette.secondary)
+                            Image(systemName: "magnifyingglass").foregroundStyle(Palette.inkSoft)
                             TextField("Search sessions", text: $search).font(.subheadline).autocorrectionDisabled()
-                            if !search.isEmpty { Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.secondary) }.accessibilityLabel("Clear search") }
+                            if !search.isEmpty { Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.inkSoft) }.accessibilityLabel("Clear search") }
                         }
                         .padding(14).background(Palette.border.opacity(0.42), in: RoundedRectangle(cornerRadius: 13))
                     }
@@ -83,13 +83,13 @@ struct SessionsView: View {
                 }
                 .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 28)
             }
-            .background(Palette.background)
+            .background(Palette.canvas)
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { BrandMark(size: 34) }
                 ToolbarItem(placement: .topBarTrailing) {
                     Text("\(store.devices.filter(\.online).count) connected")
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.inkSoft)
                 }
             }
             .navigationDestination(for: SessionRoute.self) { SessionView(store: store, route: $0) }
@@ -126,7 +126,7 @@ struct SessionsView: View {
 
 private struct SessionRow: View {
     let session: CodingSession
-    private var color: Color { session.needsAttention ? Palette.warning : session.status == "working" ? Palette.accent : Palette.secondary }
+    private var color: Color { session.needsAttention ? Palette.warn : session.status == "working" ? Palette.accent : Palette.inkSoft }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 7) {
@@ -135,14 +135,14 @@ private struct SessionRow: View {
                 Spacer(minLength: 6)
                 Text(session.updatedDate, style: .relative).font(.system(size: 10))
             }
-            .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+            .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.inkSoft)
             Text(session.title).font(.system(size: 16, weight: .semibold)).tracking(-0.3).lineSpacing(4).lineLimit(2).foregroundStyle(Palette.ink)
             HStack(spacing: 6) {
                 Circle().fill(color).frame(width: 5, height: 5)
                 Text(session.activity).foregroundStyle(color)
                 Spacer()
-                Text(session.agentName).foregroundStyle(Palette.secondary.opacity(0.75))
-                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.secondary.opacity(0.5))
+                Text(session.agentName).foregroundStyle(Palette.inkSoft.opacity(0.75))
+                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.inkSoft.opacity(0.5))
             }
             .font(.system(size: 10, weight: .medium))
         }

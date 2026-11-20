@@ -14,7 +14,7 @@ struct LiteLLMRemoteApp: App {
                 } else if store.restoring {
                     ProgressView("Restoring your session")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Palette.background)
+                        .background(Palette.canvas)
                 } else {
                     ConnectionView(store: store)
                 }
@@ -29,15 +29,21 @@ struct LiteLLMRemoteApp: App {
     }
 }
 
+// The LiteLLM Remote design language. Every color, distance, radius, and font
+// in the app resolves through these four enums; view code never uses literals.
+// The schematic lives in litellm-remote/DESIGN.md.
+
 enum Palette {
-    static let background = adaptive(light: (0.967, 0.972, 0.984), dark: (0.051, 0.059, 0.082))
-    static let surface = adaptive(light: (1, 1, 1), dark: (0.102, 0.114, 0.149))
-    static let accent = adaptive(light: (1 / 255, 23 / 255, 190 / 255), dark: (0.35, 0.42, 1))
-    static let ink = adaptive(light: (0.067, 0.094, 0.153), dark: (0.92, 0.93, 0.96))
-    static let secondary = adaptive(light: (0.42, 0.45, 0.50), dark: (0.62, 0.65, 0.71))
-    static let border = adaptive(light: (0.89, 0.90, 0.92), dark: (0.23, 0.25, 0.31))
-    static let success = adaptive(light: (0.09, 0.50, 0.24), dark: (0.37, 0.80, 0.52))
-    static let warning = adaptive(light: (0.65, 0.34, 0.06), dark: (0.95, 0.65, 0.33))
+    static let canvas = adaptive(light: (0.969, 0.973, 0.984), dark: (0.043, 0.051, 0.071))
+    static let surface = adaptive(light: (1, 1, 1), dark: (0.090, 0.102, 0.129))
+    static let raised = adaptive(light: (0.933, 0.941, 0.961), dark: (0.137, 0.157, 0.208))
+    static let border = adaptive(light: (0.890, 0.902, 0.925), dark: (0.169, 0.188, 0.235))
+    static let ink = adaptive(light: (0.067, 0.094, 0.169), dark: (0.925, 0.933, 0.957))
+    static let inkSoft = adaptive(light: (0.365, 0.396, 0.455), dark: (0.608, 0.631, 0.682))
+    static let accent = adaptive(light: (0.004, 0.090, 0.745), dark: (0.353, 0.408, 1))
+    static let onAccent = Color.white
+    static let good = adaptive(light: (0.090, 0.502, 0.267), dark: (0.306, 0.796, 0.494))
+    static let warn = adaptive(light: (0.651, 0.341, 0.059), dark: (0.949, 0.651, 0.353))
 
     private static func adaptive(
         light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat)
@@ -47,6 +53,31 @@ enum Palette {
             return UIColor(displayP3Red: red, green: green, blue: blue, alpha: 1)
         })
     }
+}
+
+enum Space {
+    static let s1: CGFloat = 4
+    static let s2: CGFloat = 8
+    static let s3: CGFloat = 12
+    static let s4: CGFloat = 16
+    static let s5: CGFloat = 20
+    static let s6: CGFloat = 24
+    static let s8: CGFloat = 32
+    static let s12: CGFloat = 48
+}
+
+enum Radius {
+    static let inset: CGFloat = 12
+    static let container: CGFloat = 24
+}
+
+enum Fonts {
+    static let title = Font.headline
+    static let body = Font.body
+    static let label = Font.subheadline.weight(.medium)
+    static let caption = Font.footnote
+    static let eyebrow = Font.caption2.weight(.bold)
+    static let mono = Font.footnote.monospaced()
 }
 
 struct BrandMark: View {
