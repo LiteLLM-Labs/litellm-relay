@@ -24,7 +24,7 @@ final class StreamingTests: XCTestCase {
         XCTAssertTrue(latest.isHittable)
         latest.tap()
 
-        let stop = app.buttons["Stop"]
+        let stop = app.buttons["stopTurnButton"]
         XCTAssertTrue(stop.isHittable)
         stop.tap()
         XCTAssertTrue(stop.waitForNonExistence(timeout: 8))

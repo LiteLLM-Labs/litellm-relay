@@ -4,20 +4,21 @@ struct InlineError: View {
     let text: String
     var body: some View {
         Label(text, systemImage: "exclamationmark.circle")
-            .font(.caption).foregroundStyle(Palette.warning).lineSpacing(3)
+            .font(Fonts.caption).foregroundStyle(Palette.warn).lineSpacing(3)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14).background(Palette.warning.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+            .padding(Space.s3 + 2)
+            .background(Palette.warn.opacity(0.07), in: .rect(cornerRadius: Radius.inset, style: .continuous))
     }
 }
 
 struct ConnectionBadge: View {
     let online: Bool
     var body: some View {
-        HStack(spacing: 5) {
-            Circle().fill(online ? Palette.success : Palette.secondary).frame(width: 5, height: 5)
-            Text(online ? "Online" : "Offline").font(.system(size: 11, weight: .medium))
+        HStack(spacing: Space.s1 + 1) {
+            Circle().fill(online ? Palette.good : Palette.inkSoft).frame(width: 6, height: 6)
+            Text(online ? "Online" : "Offline").font(Fonts.caption.weight(.medium))
         }
-        .foregroundStyle(online ? Palette.success : Palette.secondary)
+        .foregroundStyle(online ? Palette.good : Palette.inkSoft)
     }
 }
 
@@ -25,13 +26,13 @@ struct SectionHeading: View {
     let title: String
     let count: Int
     var body: some View {
-        HStack(spacing: 7) {
-            Text(title).foregroundStyle(Palette.secondary)
-            Text("\(count)").foregroundStyle(Palette.secondary.opacity(0.6))
+        HStack(spacing: Space.s2 - 1) {
+            Text(title).foregroundStyle(Palette.inkSoft)
+            Text("\(count)").foregroundStyle(Palette.inkSoft.opacity(0.6)).monospacedDigit()
             Spacer()
         }
-        .font(.system(size: 11, weight: .semibold)).textCase(.uppercase).tracking(1)
-        .padding(.top, 10).padding(.bottom, 2)
+        .font(Fonts.eyebrow).textCase(.uppercase).tracking(1)
+        .padding(.top, Space.s2 + 2).padding(.bottom, Space.s1 - 2)
     }
 }
 
@@ -40,12 +41,14 @@ struct EmptyWorkspace: View {
     let text: String
     let symbol: String
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: Space.s4) {
             Image(systemName: symbol).font(.system(size: 30, weight: .light)).foregroundStyle(Palette.accent)
-                .frame(width: 76, height: 76).background(Palette.accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 24))
+                .frame(width: 76, height: 76)
+                .background(Palette.accent.opacity(0.055), in: .rect(cornerRadius: Radius.container, style: .continuous))
             Text(title).font(.title3.weight(.semibold)).tracking(-0.5)
-            Text(text).font(.subheadline).foregroundStyle(Palette.secondary).multilineTextAlignment(.center).lineSpacing(4)
+            Text(text).font(Fonts.label).foregroundStyle(Palette.inkSoft)
+                .multilineTextAlignment(.center).lineSpacing(4)
         }
-        .frame(maxWidth: .infinity).padding(.horizontal, 24).padding(.vertical, 60)
+        .frame(maxWidth: .infinity).padding(.horizontal, Space.s6).padding(.vertical, Space.s12 + Space.s3)
     }
 }

@@ -14,7 +14,7 @@ struct ConnectionView: View {
                     .font(.system(size: 41, weight: .semibold)).tracking(-1.8).lineSpacing(-2)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Keep building, wherever you are.")
-                    .font(.body).foregroundStyle(Palette.secondary).padding(.top, 16)
+                    .font(.body).foregroundStyle(Palette.inkSoft).padding(.top, 16)
                 VStack(alignment: .leading, spacing: 22) {
                     if store.configuration == nil { workspaceForm }
                     else { signIn }
@@ -25,7 +25,7 @@ struct ConnectionView: View {
                     Image(systemName: "lock.shield")
                     Text("Your account. Your devices. Your LiteLLM gateway.")
                 }
-                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                .font(Fonts.caption).foregroundStyle(Palette.inkSoft)
                 .padding(.top, 32)
                 .padding(.bottom, 48)
             }
@@ -33,7 +33,7 @@ struct ConnectionView: View {
             .frame(maxWidth: 520)
             .frame(maxWidth: .infinity, alignment: .center)
         }
-        .background(Palette.background)
+        .background(Palette.canvas)
         .scrollDismissesKeyboard(.interactively)
         .task(id: store.login?.flowToken) {
             while store.login != nil && !Task.isCancelled {
@@ -45,41 +45,41 @@ struct ConnectionView: View {
 
     private var workspaceForm: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("LITELLM GATEWAY").font(.system(size: 10, weight: .semibold)).tracking(1.5).foregroundStyle(Palette.secondary)
+            Text("LITELLM GATEWAY").font(Fonts.eyebrow).tracking(1.5).foregroundStyle(Palette.inkSoft)
             TextField("gateway.your-company.com", text: $store.gatewayAddress)
                 .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                .font(.system(size: 16)).padding(18)
-                .background(Palette.surface, in: RoundedRectangle(cornerRadius: 15))
-                .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Palette.border))
+                .font(Fonts.body).padding(Space.s4 + 2)
+                .background(Palette.surface, in: Capsule())
+                .overlay(Capsule().strokeBorder(Palette.border))
                 .accessibilityIdentifier("workspaceAddress")
                 .onSubmit { Task { await store.connect() } }
             DisclosureGroup("Advanced") {
                 TextField("Remote-service address", text: $store.serviceOverride)
                     .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .font(.subheadline).padding(15).background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
+                    .font(Fonts.label).padding(Space.s3 + 2).background(Palette.surface, in: Capsule())
                     .accessibilityIdentifier("remoteServiceAddress")
             }
-            .font(.caption).foregroundStyle(Palette.secondary).padding(.vertical, 5)
+            .font(.caption).foregroundStyle(Palette.inkSoft).padding(.vertical, 5)
             Button { Task { await store.connect() } } label: {
                 HStack {
                     Spacer()
-                    if store.busy { ProgressView().tint(.white) }
+                    if store.busy { ProgressView().tint(Palette.onAccent) }
                     else { Text(store.hasSavedSession ? "Reconnect" : "Continue").fontWeight(.semibold); Image(systemName: "arrow.right") }
                     Spacer()
                 }
                 .padding(.vertical, 10)
             }
-            .buttonStyle(.borderedProminent).foregroundStyle(.white).controlSize(.large).buttonBorderShape(.roundedRectangle(radius: 15))
+            .buttonStyle(.borderedProminent).foregroundStyle(Palette.onAccent).controlSize(.large).buttonBorderShape(.capsule)
             .disabled(store.busy || store.gatewayAddress.isEmpty).accessibilityIdentifier("connectButton")
             Text(store.hasSavedSession ? "Your sign-in is saved. Reconnect to continue." : "Connect to your own gateway. Sign in with your work account.")
-                .font(.caption).foregroundStyle(Palette.secondary).padding(.top, 4)
+                .font(.caption).foregroundStyle(Palette.inkSoft).padding(.top, 4)
         }
     }
 
     @ViewBuilder private var signIn: some View {
         VStack(alignment: .leading, spacing: 20) {
             Label(URL(string: store.configuration?.gateway ?? "")?.host ?? "LiteLLM workspace", systemImage: "building.2")
-                .font(.subheadline).foregroundStyle(Palette.secondary)
+                .font(.subheadline).foregroundStyle(Palette.inkSoft)
             if let login = store.login {
                 Text("Your sign-in code").font(.subheadline.weight(.medium))
                 HStack {
@@ -87,17 +87,17 @@ struct ConnectionView: View {
                     Spacer()
                     Button("Copy code", systemImage: "doc.on.doc") { UIPasteboard.general.string = login.code }.labelStyle(.iconOnly)
                 }
-                .padding(20).background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
+                .padding(Space.s5).background(Palette.surface, in: .rect(cornerRadius: Radius.container, style: .continuous))
                 Text("Enter this code on the sign-in page, then return here.")
-                    .font(.subheadline).foregroundStyle(Palette.secondary)
+                    .font(.subheadline).foregroundStyle(Palette.inkSoft)
                 if login.verificationUrl.scheme == "https" {
                     Button { openURL(login.verificationUrl) } label: {
                         HStack { Spacer(); Text("Open secure sign-in").fontWeight(.semibold); Image(systemName: "arrow.up.right"); Spacer() }.padding(.vertical, 9)
                     }
-                    .buttonStyle(.borderedProminent).foregroundStyle(.white).controlSize(.large).buttonBorderShape(.roundedRectangle(radius: 15))
+                    .buttonStyle(.borderedProminent).foregroundStyle(Palette.onAccent).controlSize(.large).buttonBorderShape(.capsule)
                 }
                 if store.teams.isEmpty {
-                    HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Waiting for you to sign in").font(.caption) }.foregroundStyle(Palette.secondary)
+                    HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Waiting for you to sign in").font(.caption) }.foregroundStyle(Palette.inkSoft)
                 } else {
                     ForEach(store.teams) { team in Button(team.name) { Task { await store.pollLogin(team: team.id) } }.buttonStyle(.bordered) }
                 }
@@ -105,9 +105,9 @@ struct ConnectionView: View {
                 Button { Task { await store.startLogin() } } label: {
                     HStack { Spacer(); Text("Sign in with LiteLLM").fontWeight(.semibold); Image(systemName: "arrow.up.right"); Spacer() }.padding(.vertical, 9)
                 }
-                .buttonStyle(.borderedProminent).foregroundStyle(.white).controlSize(.large).buttonBorderShape(.roundedRectangle(radius: 15)).disabled(store.busy)
+                .buttonStyle(.borderedProminent).foregroundStyle(Palette.onAccent).controlSize(.large).buttonBorderShape(.capsule).disabled(store.busy)
             }
-            Button("Use another workspace") { store.disconnect() }.font(.caption).foregroundStyle(Palette.secondary)
+            Button("Use another workspace") { store.disconnect() }.font(.caption).foregroundStyle(Palette.inkSoft)
         }
     }
 }

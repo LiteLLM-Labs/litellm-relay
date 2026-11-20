@@ -10,7 +10,7 @@ struct DevicesView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     Text("Your devices").font(.system(size: 34, weight: .bold)).tracking(-1.3)
                     Text("Your workspace stays with you. Your files stay where they belong.")
-                        .font(.subheadline).foregroundStyle(Palette.secondary).lineSpacing(4)
+                        .font(.subheadline).foregroundStyle(Palette.inkSoft).lineSpacing(4)
                     if store.devices.isEmpty {
                         EmptyWorkspace(title: "Connect your first Mac", text: "Sign in to the Relay Remote connector on your Mac using this LiteLLM account.", symbol: "laptopcomputer")
                     }
@@ -18,7 +18,7 @@ struct DevicesView: View {
                         VStack(alignment: .leading, spacing: 20) {
                             HStack(spacing: 16) {
                                 Image(systemName: "laptopcomputer").font(.system(size: 26, weight: .light))
-                                    .frame(width: 55, height: 55).background(Palette.background, in: RoundedRectangle(cornerRadius: 17))
+                                    .frame(width: 55, height: 55).background(Palette.canvas, in: RoundedRectangle(cornerRadius: 17))
                                 VStack(alignment: .leading, spacing: 7) {
                                     Text(device.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                                     ConnectionBadge(online: device.online)
@@ -26,16 +26,16 @@ struct DevicesView: View {
                                 Spacer(minLength: 0)
                                 Menu {
                                     Button("Disconnect device", role: .destructive) { removing = device }
-                                } label: { Image(systemName: "ellipsis").frame(width: 30, height: 30).foregroundStyle(Palette.secondary) }.accessibilityLabel("Device options")
+                                } label: { Image(systemName: "ellipsis").frame(width: 30, height: 30).foregroundStyle(Palette.inkSoft) }.accessibilityLabel("Device options")
                             }
                             Divider().overlay(Palette.border)
                             HStack {
-                                Text(device.platform).font(.caption).foregroundStyle(Palette.secondary)
+                                Text(device.platform).font(.caption).foregroundStyle(Palette.inkSoft)
                                 Spacer()
                                 if !device.online {
-                                    Text(Date(timeIntervalSince1970: device.lastSeen / 1000), style: .relative).font(.caption2).foregroundStyle(Palette.secondary)
+                                    Text(Date(timeIntervalSince1970: device.lastSeen / 1000), style: .relative).font(.caption2).foregroundStyle(Palette.inkSoft)
                                 } else {
-                                    Label("Encrypted connection", systemImage: "lock").font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                                    Label("Encrypted connection", systemImage: "lock").font(.system(size: 10)).foregroundStyle(Palette.inkSoft)
                                 }
                             }
                         }
@@ -49,7 +49,7 @@ struct DevicesView: View {
                 }
                 .padding(24)
             }
-            .background(Palette.background)
+            .background(Palette.canvas)
             .toolbar { ToolbarItem(placement: .topBarLeading) { BrandMark(size: 34) } }
             .refreshable { await store.refreshDevices() }
             .task { await store.refreshDevices() }
@@ -77,20 +77,20 @@ struct AccountView: View {
                     Text("Account").font(.system(size: 34, weight: .bold)).tracking(-1.3)
                     VStack(alignment: .leading, spacing: 20) {
                         Label("Your LiteLLM workspace", systemImage: "building.2").font(.subheadline.weight(.semibold))
-                        Text(URL(string: store.address)?.host ?? store.address).font(.subheadline).foregroundStyle(Palette.secondary)
+                        Text(URL(string: store.address)?.host ?? store.address).font(.subheadline).foregroundStyle(Palette.inkSoft)
                         Divider()
                         HStack {
-                            Label("Signed in securely", systemImage: "checkmark.shield").font(.caption).foregroundStyle(Palette.success)
+                            Label("Signed in securely", systemImage: "checkmark.shield").font(.caption).foregroundStyle(Palette.good)
                             Spacer()
-                            Text("SSO").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.secondary)
+                            Text("SSO").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.inkSoft)
                         }
                     }
                     .padding(22).background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("CONNECTED GATEWAY").font(.system(size: 10, weight: .semibold)).tracking(1.3).foregroundStyle(Palette.secondary)
+                        Text("CONNECTED GATEWAY").font(.system(size: 10, weight: .semibold)).tracking(1.3).foregroundStyle(Palette.inkSoft)
                         Text(URL(string: store.configuration?.gateway ?? "")?.host ?? "LiteLLM").font(.subheadline.weight(.medium))
                         Text("Inference runs through your gateway. Your provider credentials never need to be on this phone.")
-                            .font(.caption).foregroundStyle(Palette.secondary).lineSpacing(4)
+                            .font(.caption).foregroundStyle(Palette.inkSoft).lineSpacing(4)
                     }
                     .padding(22).background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))
                     if let error = store.error { InlineError(text: error) }
@@ -98,11 +98,11 @@ struct AccountView: View {
                         .font(.subheadline.weight(.medium)).frame(maxWidth: .infinity).padding(16)
                         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 15))
                     Text("LiteLLM Remote · Preview")
-                        .font(.system(size: 11)).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity).padding(.top, 12)
+                        .font(.system(size: 11)).foregroundStyle(Palette.inkSoft).frame(maxWidth: .infinity).padding(.top, 12)
                 }
                 .padding(24)
             }
-            .background(Palette.background)
+            .background(Palette.canvas)
             .toolbar { ToolbarItem(placement: .topBarLeading) { BrandMark(size: 34) } }
         }
     }

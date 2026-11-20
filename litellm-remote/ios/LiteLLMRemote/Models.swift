@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct GatewayIdentity: Codable, Sendable {
     let subject: String
@@ -197,6 +198,42 @@ actor MarkdownQueue {
                 job.finish(parsed)
             }
         }
+    }
+}
+
+/// A text file staged in the composer. The agents' control protocols carry
+/// plain text, so attachments travel inline as fenced blocks the way pasted
+/// content does; binary files are refused rather than silently mangled.
+struct DraftAttachment: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let name: String
+    let text: String
+
+    static let readableTypes: [UTType] = [
+        .plainText, .utf8PlainText, .text, .sourceCode, .json, .xml, .yaml,
+        .propertyList, .commaSeparatedText, .log,
+    ]
+
+    static func read(url: URL) -> Result<DraftAttachment, RemoteFailure> {
+        let secured = url.startAccessingSecurityScopedResource()
+        defer { if secured { url.stopAccessingSecurityScopedResource() } }
+        let refused = RemoteFailure(
+            message: "\(url.lastPathComponent) couldn’t be attached. Text files up to 24,000 characters are supported.",
+            status: nil
+        )
+        guard let data = try? Data(contentsOf: url), data.count <= 256_000,
+              let text = String(data: data, encoding: .utf8), text.count <= 24_000
+        else { return .failure(refused) }
+        return .success(DraftAttachment(name: url.lastPathComponent, text: text))
+    }
+
+    static func compose(draft: String, attachments: [DraftAttachment]) -> String {
+        let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !attachments.isEmpty else { return body }
+        let blocks = attachments.map { attachment in
+            "<attached-file name=\"\(attachment.name)\">\n\(attachment.text)\n</attached-file>"
+        }
+        return ((body.isEmpty ? [] : [body]) + blocks).joined(separator: "\n\n")
     }
 }
 
