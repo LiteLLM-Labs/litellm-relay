@@ -342,8 +342,8 @@ private struct MessageView: View {
 
 // Parsing markdown inside `body` stalled the main thread on long streamed turns.
 // Show plain text until a parse for this exact string exists. Parses run one at
-// a time off the main actor; a newer poll supersedes ones that have not started,
-// so Stop during a long stream does not leave a pile of user-initiated parses running.
+// a time off the main actor. A cancelled poll is dropped; every other string,
+// including neighboring bubbles, still gets its own parse.
 private struct MarkdownText: View {
     let text: String
     @State private var rendered: RenderedMarkdown?

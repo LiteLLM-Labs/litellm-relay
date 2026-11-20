@@ -126,14 +126,14 @@ enum MessageMarkdown {
     }
 }
 
-// One markdown parse at a time. Each streamed poll used to start another
-// unstructured task at user-initiated priority, and cancelling the view task
-// did not cancel that work, so a long turn could fill the process until Stop
-// could no longer run.
+// Parses run one at a time, off the main actor, so a long stream cannot stack
+// user-initiated work. Different strings all complete; only a cancelled request
+// is dropped, and identical queued strings share one parse.
 actor MarkdownQueue {
     static let shared = MarkdownQueue()
 
-    private struct Waiter {
+    private struct Job {
+        let id: UUID
         let text: String
         let continuation: CheckedContinuation<AttributedString?, Never>
 
@@ -142,40 +142,48 @@ actor MarkdownQueue {
         }
     }
 
-    private var waiters: [Waiter] = []
+    private var jobs: [Job] = []
     private var pumping = false
 
     func parse(_ text: String) async -> AttributedString? {
-        await withCheckedContinuation { continuation in
-            waiters.append(Waiter(text: text, continuation: continuation))
-            guard !pumping else { return }
-            pumping = true
-            Task { await self.pump() }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                jobs.append(Job(id: id, text: text, continuation: continuation))
+                guard !pumping else { return }
+                pumping = true
+                Task { await self.pump() }
+            }
+        } onCancel: {
+            Task { await self.drop(id) }
         }
+    }
+
+    private func drop(_ id: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+        jobs.remove(at: index).finish(nil)
     }
 
     private func pump() async {
         while true {
-            guard let newest = waiters.last?.text else {
+            guard let text = jobs.first?.text else {
                 pumping = false
-                if waiters.isEmpty { return }
+                if jobs.isEmpty { return }
                 pumping = true
                 continue
             }
-            var skipped: [Waiter] = []
-            var cohort: [Waiter] = []
-            for waiter in waiters {
-                if waiter.text == newest { cohort.append(waiter) } else { skipped.append(waiter) }
+            var cohort: [Job] = []
+            var rest: [Job] = []
+            while !jobs.isEmpty {
+                let job = jobs.removeFirst()
+                if job.text == text { cohort.append(job) } else { rest.append(job) }
             }
-            waiters.removeAll()
-            while let waiter = skipped.popLast() {
-                waiter.finish(nil)
-            }
+            jobs = rest
             let parsed = await Task.detached(priority: .utility) {
-                MessageMarkdown.parse(newest)
+                MessageMarkdown.parse(text)
             }.value
-            while let waiter = cohort.popLast() {
-                waiter.finish(parsed)
+            while let job = cohort.popLast() {
+                job.finish(parsed)
             }
         }
     }
