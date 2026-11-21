@@ -6,6 +6,7 @@ import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -28,6 +29,9 @@ class ApiClient(
     private val token: suspend () -> String? = { null },
 ) {
     val json = Json { ignoreUnknownKeys = true }
+
+    internal suspend fun refreshSession(refreshToken: String): RemoteResult<RefreshedSession> =
+        ApiClient(endpoint).request("/api/auth/refresh", "POST", mapOf("refreshToken" to refreshToken), retry = false)
 
     suspend inline fun <reified T> request(
         path: String, method: String = "GET", body: Map<String, String> = emptyMap(), retry: Boolean = true,
@@ -84,3 +88,6 @@ class ApiClient(
         fun query(path: String, name: String, value: String) = "$path?$name=${URLEncoder.encode(value, Charsets.UTF_8.name())}"
     }
 }
+
+@Serializable
+internal data class RefreshedSession(val token: String, val refreshToken: String, val expiresAt: Long)
