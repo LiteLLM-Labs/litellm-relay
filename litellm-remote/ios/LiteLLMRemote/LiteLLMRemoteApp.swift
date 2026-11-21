@@ -30,8 +30,7 @@ struct LiteLLMRemoteApp: App {
 }
 
 // The LiteLLM Remote design language. Every color, distance, radius, and font
-// in the app resolves through these four enums; view code never uses literals.
-// The schematic lives in litellm-remote/DESIGN.md.
+// in the app resolves through these four enums.
 
 enum Palette {
     static let canvas = adaptive(light: (0.969, 0.973, 0.984), dark: (0.043, 0.051, 0.071))

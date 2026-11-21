@@ -199,7 +199,3 @@ curl -fsSL https://raw.githubusercontent.com/LiteLLM-Labs/litellm-relay/main/src
   RELAY_SHA256=<release-tarball-sha256> \
   bash
 ```
-
-## Native mobile remote control
-
-The optional [LiteLLM Remote companion](litellm-remote/README.md) contains native iOS and Android clients, a shared control service, and an outbound Mac connector for Claude Code and Codex. The connector uses Relay’s existing local inference proxy and credential helper when the agents are managed by Relay. It does not replace the Relay app, broker, or MDM installer. Remote-control enrollment and deployment are separate from the default Relay installation.

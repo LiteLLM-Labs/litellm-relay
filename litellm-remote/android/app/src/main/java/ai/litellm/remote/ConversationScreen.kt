@@ -211,7 +211,7 @@ import kotlinx.coroutines.launch
             val context = LocalContext.current
             val markdown = remember(context) { Markwon.create(context) }
             val text = message.text
-            val parsed by produceState<CharSequence>(text, text, markdown) {
+            val parsed by produceState<CharSequence>(text, markdown) {
                 value = text
                 value = parseMarkdown(text) { markdown.toMarkdown(it) }
             }
