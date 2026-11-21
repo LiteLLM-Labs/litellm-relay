@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::{
     claude, codex,
-    protocol::{self, Action, Agent, Decision, Outcome},
+    protocol::{self, Action, Agent, Decision, Outcome, Platform},
     route,
     service::Service,
     store::{RequestState, Store},
@@ -157,7 +157,7 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
         let (token, identity) = store
             .issue("owner", &["fixture-model".into()], 100)
             .unwrap();
-        let (device, device_token) = store.enroll("owner", "Mac", 100).unwrap();
+        let (device, device_token) = store.enroll("owner", "Mac", Platform::MacOs, 100).unwrap();
         assert!(store.device(device.id, "other").is_err());
         assert!(matches!(
             store.begin("owner", request, "input", 100).unwrap(),
@@ -213,6 +213,99 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
         )
         .unwrap();
     assert!(!saved.contains(&token));
+}
+
+#[tokio::test]
+async fn codex_starts_only_when_enabled_and_socket_is_missing() {
+    let directory = Directory::new();
+    let socket = directory.0.join("control.sock");
+    let gateway = Url::parse("https://gateway.example.com").unwrap();
+    let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway.clone());
+    let no_start = || async { panic!("must not start a daemon") };
+    assert_eq!(
+        codex.control_stream(no_start()).await.unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway).auto_start(true);
+    let mut listener = None;
+    codex
+        .control_stream(async {
+            listener = Some(tokio::net::UnixListener::bind(&socket)?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let listener = listener.unwrap();
+    listener.accept().await.unwrap();
+    codex.control_stream(no_start()).await.unwrap();
+}
+
+#[tokio::test]
+async fn devices_report_the_paired_platform_with_a_legacy_default() {
+    let gateway = gateway().await;
+    let server = control(gateway.url.clone()).await;
+    let owner = sign_in(&server).await;
+    let path = server.url.join("/api/devices").unwrap();
+    for input in [
+        json!({"name":"Always-on host","platform":"Linux"}),
+        json!({"name":"Laptop"}),
+    ] {
+        client()
+            .post(path.clone())
+            .bearer_auth(&owner)
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    let response: Value = client()
+        .get(path)
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["devices"][0]["platform"], "Linux");
+    assert_eq!(response["devices"][1]["platform"], "macOS");
+}
+
+#[test]
+fn migrates_legacy_device_records_without_expiring_their_tokens() {
+    let directory = Directory::new();
+    let path = directory.0.join("control.sqlite");
+    let id = Uuid::new_v4();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE devices (id TEXT PRIMARY KEY, subject TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen INTEGER NOT NULL);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO devices VALUES (?, 'owner', 'Laptop', ?, 100)",
+        [id.to_string(), protocol::digest("old-device-token")],
+    )
+    .unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let old = store
+        .authenticate_device("old-device-token")
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.id, id);
+    assert_eq!(old.platform, Platform::MacOs);
+    let (host, _) = store.enroll("owner", "Host", Platform::Linux, 101).unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.device(host.id, "owner").unwrap().platform,
+        Platform::Linux
+    );
 }
 
 #[tokio::test]

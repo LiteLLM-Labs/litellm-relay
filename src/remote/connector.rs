@@ -97,7 +97,10 @@ pub async fn pair(endpoint: Url, name: Option<String>) -> Result<()> {
             ),
         "Invalid sign-in address."
     );
-    println!("Sign in to pair this Mac. Verification code {}", start.code);
+    println!(
+        "Sign in to pair this device. Verification code {}",
+        start.code
+    );
     println!("{}", start.verification_url);
     crate::auth::open_browser(start.verification_url.as_str());
     let mut team: Option<String> = None;
@@ -138,7 +141,10 @@ pub async fn pair(endpoint: Url, name: Option<String>) -> Result<()> {
                 let device: Device = post(
                     &endpoint,
                     "/api/devices",
-                    json!({"name":name.unwrap_or_else(crate::system::hostname)}),
+                    json!({
+                        "name":name.unwrap_or_else(crate::system::hostname),
+                        "platform":protocol::Platform::current()
+                    }),
                     Some(&token),
                 )
                 .await?;
@@ -154,7 +160,7 @@ pub async fn pair(endpoint: Url, name: Option<String>) -> Result<()> {
                     &credentials_file(),
                     &serde_json::to_string(&credentials)?,
                 )?;
-                println!("This Mac is paired. Run relay remote connect and sign in to the same remote service in the mobile app.");
+                println!("This device is paired. Run relay remote connect and sign in to the same remote service in the mobile app.");
                 return Ok(());
             }
         }
@@ -166,12 +172,12 @@ pub fn load() -> Result<Credentials> {
     let file = credentials_file();
     let credentials: Credentials =
         serde_json::from_slice(&std::fs::read(file).context("Run relay remote pair first.")?)
-            .context("Invalid pairing record. Pair this Mac again.")?;
+            .context("Invalid pairing record. Pair this device again.")?;
     super::address(Some(credentials.endpoint.clone()), "LITELLM_REMOTE_URL")?;
     super::address(Some(credentials.gateway.clone()), "LITELLM_GATEWAY_URL")?;
     anyhow::ensure!(
         credentials.endpoint.path() == "/" && credentials.device_token.len() == 43,
-        "Invalid pairing record. Pair this Mac again."
+        "Invalid pairing record. Pair this device again."
     );
     Ok(credentials)
 }
@@ -196,13 +202,15 @@ pub fn sessions(
             )
         })
         .unwrap_or_else(|| PathBuf::from("claude"));
+    let auto_start_codex = cfg!(target_os = "linux") && codex_socket.is_none();
     Sessions {
         codex: Codex::new(
             codex_socket
                 .unwrap_or_else(|| codex_home.join("app-server-control/app-server-control.sock")),
             provider,
             credentials.gateway.clone(),
-        ),
+        )
+        .auto_start(auto_start_codex),
         claude: Claude::new(
             executable,
             claude_home,
@@ -261,7 +269,7 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
         .map_err(|_| {
             anyhow::anyhow!("Cannot connect to the remote service. Check the address and pairing.")
         })?;
-    println!("Connected to LiteLLM Remote. Keep this Mac awake.");
+    println!("Connected to LiteLLM Remote. Keep this device online.");
     let (mut sink, mut source) = socket.split();
     let mut work = tokio::task::JoinSet::new();
     let mut seen = HashMap::<Uuid, ()>::new();
@@ -278,7 +286,7 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
                         if seen.len() >= 4096 { return Ok(()); }
                         seen.insert(command.id, ());
                         if work.len() >= 16 {
-                            let reply = Reply { id: command.id, result: Outcome::from_result(Err(protocol::Failure::new(429, "The Mac is busy. Try again shortly."))) };
+                            let reply = Reply { id: command.id, result: Outcome::from_result(Err(protocol::Failure::new(429, "The device is busy. Try again shortly."))) };
                             sink.send(Message::Text(serde_json::to_string(&reply)?.into())).await?;
                             continue;
                         }
@@ -291,7 +299,7 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
                 }
             }
             reply = work.join_next(), if !work.is_empty() => {
-                let reply = reply.context("The Mac request ended unexpectedly.")??;
+                let reply = reply.context("The device request ended unexpectedly.")??;
                 let bytes = serde_json::to_string(&reply)?;
                 if bytes.len() > 4 * 1024 * 1024 { anyhow::bail!("The session response exceeded the transport limit."); }
                 sink.send(Message::Text(bytes.into())).await?;

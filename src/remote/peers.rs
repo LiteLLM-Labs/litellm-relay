@@ -78,7 +78,7 @@ impl Peers {
                 .ok_or_else(|| {
                     Failure::new(
                         503,
-                        "This device is offline. Keep Relay Remote connected on your Mac.",
+                        "This device is offline. Keep Relay Remote connected on the device.",
                     )
                 })?;
             if connection.pending.len() >= 16 {
@@ -87,7 +87,7 @@ impl Peers {
             connection
                 .sender
                 .try_send(Outbound::Command(Command { id, action }))
-                .map_err(|_| Failure::new(503, "Your Mac is busy or disconnected."))?;
+                .map_err(|_| Failure::new(503, "The device is busy or disconnected."))?;
             connection.pending.insert(id, sender);
         }
         Ok(Pending { id, receiver })
@@ -104,11 +104,11 @@ impl Peers {
             Ok(Ok(outcome)) => outcome.into_result(),
             Ok(Err(_)) => Err(Failure::new(
                 503,
-                "Your Mac disconnected. Refresh before sending again.",
+                "The device disconnected. Refresh before sending again.",
             )),
             Err(_) => Err(Failure::new(
                 504,
-                "Your Mac did not confirm the request. Refresh before sending again.",
+                "The device did not confirm the request. Refresh before sending again.",
             )),
         }
     }

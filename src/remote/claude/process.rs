@@ -74,7 +74,7 @@ impl Live {
                     .ok_or_else(|| Failure::new(502, "Invalid Claude permission request."))?;
                 if request["subtype"] != "can_use_tool" {
                     return Ok(Some(
-                        json!({"type":"control_response","response":{"subtype":"error","request_id":request_id,"error":"Review this request on your Mac."}}),
+                        json!({"type":"control_response","response":{"subtype":"error","request_id":request_id,"error":"Review this request on the device."}}),
                     ));
                 }
                 let tool = request["tool_name"].as_str().unwrap_or("Tool");
@@ -298,7 +298,7 @@ impl Claude {
         {
             return Err(Failure::new(
                 409,
-                "This session is open outside Relay. Exit it on your Mac first.",
+                "This session is open outside Relay. Exit it on the device first.",
             ));
         }
         if self
@@ -489,7 +489,7 @@ async fn output(mut command: Command) -> Result<Vec<u8>> {
     let mut child = command.spawn().map_err(|_| {
         Failure::new(
             503,
-            "Install native Claude Code and configure Relay on this Mac.",
+            "Install native Claude Code and configure Relay on this device.",
         )
     })?;
     let mut bytes = Vec::new();
