@@ -353,6 +353,9 @@ pub(super) fn settings(home: &Path, cwd: &Path) -> Result<Value> {
         if let Some(helper) = value.get("apiKeyHelper") {
             effective["apiKeyHelper"] = helper.clone();
         }
+        if let Some(model) = value.get("model") {
+            effective["model"] = model.clone();
+        }
     }
     Ok(effective)
 }

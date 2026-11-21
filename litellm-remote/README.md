@@ -102,7 +102,9 @@ LITELLM_API_KEY=<your scoped virtual key>
 ANTHROPIC_BASE_URL=https://gateway.example.com
 ```
 
-For Claude Code, the connector uses `ANTHROPIC_BASE_URL` and passes the virtual key to the Claude child process. Use the same gateway advertised by the control service. If a Claude user or project setting already supplies an endpoint, make sure that setting also points at the paired gateway. Don't reuse a Mac's loopback broker configuration on the VM. In the app, choose a Claude model the gateway serves and the virtual key can use.
+For Claude Code, the connector uses `ANTHROPIC_BASE_URL` and passes the virtual key to the Claude child process. Use the same gateway advertised by the control service. If a Claude user or project setting already supplies an endpoint, make sure that setting also points at the paired gateway. Don't reuse a Mac's loopback broker configuration on the VM.
+
+On the first turn of a new session, the connector checks the model against the direct gateway's catalog for the host's `LITELLM_API_KEY`. A model picked in the app takes precedence over the connector's Claude configuration. If neither specifies a model, the connector picks the first available `claude-` model by ID. For custom aliases, set `ANTHROPIC_MODEL` in `host.env` to the exact model ID the virtual key can use, or select it in the app.
 
 For Codex, configure `~/.codex/config.toml` under the same user. Replace the placeholder with the exact model ID exposed by LiteLLM:
 

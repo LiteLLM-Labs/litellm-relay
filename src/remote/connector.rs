@@ -7,12 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{
-    client::IntoClientRequest, protocol::WebSocketConfig, Message,
+    client::IntoClientRequest, protocol::WebSocketConfig, Error as WebSocketError, Message,
 };
+use tokio_tungstenite::WebSocketStream;
 use url::Url;
 use uuid::Uuid;
 
@@ -43,6 +44,17 @@ async fn post<T: DeserializeOwned>(
     body: Value,
     token: Option<&str>,
 ) -> Result<T> {
+    response_json(post_request(endpoint, path, body, token).await?)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.error))
+}
+
+async fn post_request(
+    endpoint: &Url,
+    path: &str,
+    body: Value,
+    token: Option<&str>,
+) -> Result<reqwest::Response> {
     let request = http_client()
         .post(endpoint.join(path)?)
         .header("X-LiteLLM-Client", "relay")
@@ -51,14 +63,41 @@ async fn post<T: DeserializeOwned>(
         Some(token) => request.bearer_auth(token),
         None => request,
     };
-    response_json(
-        request
-            .send()
-            .await
-            .context("Cannot reach the remote service.")?,
+    request
+        .send()
+        .await
+        .context("Cannot reach the remote service.")
+}
+
+async fn enroll<T: DeserializeOwned>(endpoint: &Url, name: String, token: &str) -> Result<T> {
+    let path = "/api/devices";
+    let mut response = post_request(
+        endpoint,
+        path,
+        json!({"name":name,"platform":protocol::Platform::current()}),
+        Some(token),
     )
-    .await
-    .map_err(|error| anyhow::anyhow!(error.error))
+    .await?;
+    if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        let mut error = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("Cannot read the pairing response.")?
+        {
+            if chunk.len() > 4096 - error.len() {
+                break;
+            }
+            error.extend_from_slice(&chunk);
+        }
+        if String::from_utf8_lossy(&error).contains("unknown field `platform`") {
+            eprintln!("The remote service does not support device platforms. Upgrade it to identify this device correctly.");
+            return post(endpoint, path, json!({"name":name}), Some(token)).await;
+        }
+    }
+    response_json(response)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.error))
 }
 
 pub async fn pair(endpoint: Url, name: Option<String>) -> Result<()> {
@@ -138,14 +177,10 @@ pub async fn pair(endpoint: Url, name: Option<String>) -> Result<()> {
                 );
             }
             Poll::Ready { token } => {
-                let device: Device = post(
+                let device: Device = enroll(
                     &endpoint,
-                    "/api/devices",
-                    json!({
-                        "name":name.unwrap_or_else(crate::system::hostname),
-                        "platform":protocol::Platform::current()
-                    }),
-                    Some(&token),
+                    name.unwrap_or_else(crate::system::hostname),
+                    &token,
                 )
                 .await?;
                 let _: Value = post(&endpoint, "/api/auth/logout", json!({}), Some(&token)).await?;
@@ -243,6 +278,22 @@ pub async fn connect(credentials: Credentials, sessions: Sessions) -> Result<()>
     }
 }
 
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn send_frame(
+    sink: &mut (impl Sink<Message, Error = WebSocketError> + Unpin),
+    message: Message,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    let deadline = deadline.min(tokio::time::Instant::now() + WRITE_TIMEOUT);
+    tokio::time::timeout_at(deadline, sink.send(message))
+        .await
+        .context("The remote service link stopped accepting writes.")??;
+    Ok(())
+}
+
 async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Result<()> {
     let mut endpoint = credentials.endpoint.join("/agent")?;
     let scheme = if endpoint.scheme() == "https" {
@@ -270,15 +321,26 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
             anyhow::anyhow!("Cannot connect to the remote service. Check the address and pairing.")
         })?;
     println!("Connected to LiteLLM Remote. Keep this device online.");
+    serve_link(socket, sessions).await
+}
+
+async fn serve_link(
+    socket: WebSocketStream<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>,
+    sessions: Arc<Sessions>,
+) -> Result<()> {
     let (mut sink, mut source) = socket.split();
     let mut work = tokio::task::JoinSet::new();
     let mut seen = HashMap::<Uuid, ()>::new();
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
-    let mut last = tokio::time::Instant::now();
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut deadline = tokio::time::Instant::now() + HEARTBEAT_TIMEOUT;
+    let mut pending_ping = None;
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                anyhow::bail!("The remote service link stopped responding.");
+            }
             frame = source.next() => {
-                last = tokio::time::Instant::now();
                 match frame {
                     Some(Ok(Message::Text(text))) => {
                         let command: protocol::Command = serde_json::from_str(&text).context("The service sent an unsupported command.")?;
@@ -287,14 +349,21 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
                         seen.insert(command.id, ());
                         if work.len() >= 16 {
                             let reply = Reply { id: command.id, result: Outcome::from_result(Err(protocol::Failure::new(429, "The device is busy. Try again shortly."))) };
-                            sink.send(Message::Text(serde_json::to_string(&reply)?.into())).await?;
+                            send_frame(&mut sink, Message::Text(serde_json::to_string(&reply)?.into()), deadline).await?;
                             continue;
                         }
                         let sessions = sessions.clone();
                         work.spawn(async move { Reply { id: command.id, result: Outcome::from_result(sessions.execute(command.action).await) } });
                     }
-                    Some(Ok(Message::Ping(bytes))) => sink.send(Message::Pong(bytes)).await?,
-                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Ping(bytes))) => {
+                        send_frame(&mut sink, Message::Pong(bytes), deadline).await?;
+                    }
+                    Some(Ok(Message::Pong(bytes))) => {
+                        if pending_ping.as_ref().is_some_and(|ping: &Uuid| bytes.as_ref() == ping.as_bytes()) {
+                            pending_ping = None;
+                            deadline = tokio::time::Instant::now() + HEARTBEAT_TIMEOUT;
+                        }
+                    }
                     _ => return Ok(()),
                 }
             }
@@ -302,12 +371,108 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
                 let reply = reply.context("The device request ended unexpectedly.")??;
                 let bytes = serde_json::to_string(&reply)?;
                 if bytes.len() > 4 * 1024 * 1024 { anyhow::bail!("The session response exceeded the transport limit."); }
-                sink.send(Message::Text(bytes.into())).await?;
+                send_frame(&mut sink, Message::Text(bytes.into()), deadline).await?;
             }
-            _ = heartbeat.tick() => {
-                if last.elapsed() > Duration::from_secs(90) { return Ok(()); }
-                sink.send(Message::Ping(Vec::new().into())).await?;
+            _ = heartbeat.tick(), if pending_ping.is_none() => {
+                let ping = Uuid::new_v4();
+                send_frame(&mut sink, Message::Ping(ping.as_bytes().to_vec().into()), deadline).await?;
+                pending_ping = Some(ping);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+    use tokio::time::Instant;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    #[tokio::test]
+    async fn pairing_only_omits_platform_when_the_service_rejects_that_field() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let app = Router::new().route(
+            "/api/devices",
+            post(move |Json(body): Json<Value>| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(body.clone());
+                    match body["name"].as_str().unwrap() {
+                        "old" if body.get("platform").is_some() => (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "unknown field `platform`, expected `name`",
+                        )
+                            .into_response(),
+                        "invalid" => {
+                            (StatusCode::UNPROCESSABLE_ENTITY, "invalid name").into_response()
+                        }
+                        _ => Json(json!({"paired":true})).into_response(),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for name in ["old", "new"] {
+            assert_eq!(
+                enroll::<Value>(&endpoint, name.into(), "token")
+                    .await
+                    .unwrap(),
+                json!({"paired":true})
+            );
+        }
+        assert!(enroll::<Value>(&endpoint, "invalid".into(), "token")
+            .await
+            .is_err());
+        let platform = protocol::Platform::current();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                json!({"name":"old","platform":platform}),
+                json!({"name":"old"}),
+                json!({"name":"new","platform":platform}),
+                json!({"name":"invalid","platform":platform}),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnects_when_heartbeat_is_not_acknowledged() {
+        let gateway = Url::parse("https://example.test").unwrap();
+        let sessions = Arc::new(Sessions {
+            claude: Claude::new(
+                "unused".into(),
+                "unused".into(),
+                "unused".into(),
+                gateway.clone(),
+            ),
+            codex: Codex::new("unused".into(), "litellm".into(), gateway),
+        });
+        let (connector, peer) = tokio::io::duplex(1024);
+        let connector = WebSocketStream::from_raw_socket(connector, Role::Client, None).await;
+        let mut peer = WebSocketStream::from_raw_socket(peer, Role::Server, None).await;
+        let link = tokio::spawn(serve_link(connector, sessions));
+        let Some(Ok(Message::Ping(ping))) = peer.next().await else {
+            panic!("expected connector ping");
+        };
+        peer.send(Message::Pong(ping)).await.unwrap();
+        let Some(Ok(Message::Ping(_))) = peer.next().await else {
+            panic!("expected another ping after acknowledgement");
+        };
+        peer.send(Message::Pong(Vec::new().into())).await.unwrap();
+        let sent_at = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(35), link)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "The remote service link stopped responding."
+        );
+        assert_eq!(sent_at.elapsed(), Duration::from_secs(30));
     }
 }

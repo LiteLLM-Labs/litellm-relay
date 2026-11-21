@@ -1,4 +1,5 @@
 use super::super::{
+    auth::{http_client, response_json},
     protocol::{now_ms, public_error, redact, Approval, Failure, Result},
     route,
 };
@@ -119,6 +120,7 @@ pub(super) struct Running {
     finished: watch::Receiver<bool>,
     pub(super) live: Arc<Mutex<Live>>,
     pub(super) endpoint: Url,
+    pub(super) startup_model: Option<String>,
 }
 
 struct Startup {
@@ -273,7 +275,11 @@ impl Claude {
         Ok((endpoint, local))
     }
 
-    pub(super) async fn start(&self, grant: &Grant) -> Result<Running> {
+    pub(super) async fn start(
+        &self,
+        grant: &Grant,
+        requested_model: Option<&str>,
+    ) -> Result<Running> {
         if let Some(run) = self
             .runs
             .lock()
@@ -321,6 +327,26 @@ impl Claude {
             })?;
         let (endpoint, local) = self.connection(grant).await?;
         let resume = self.transcript(grant.id).is_ok();
+        let direct_key = if local {
+            None
+        } else {
+            std::env::var("LITELLM_API_KEY").ok()
+        };
+        let startup_model = match direct_key.as_deref() {
+            Some(key) if !resume && grant.model.is_none() => {
+                let settings = settings(&self.home, Path::new(&grant.cwd))?;
+                let configured = settings["env"]["ANTHROPIC_MODEL"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
+                    .or_else(|| settings["model"].as_str().map(str::to_owned));
+                Some(
+                    gateway_model(&endpoint, key, requested_model.or(configured.as_deref()))
+                        .await?,
+                )
+            }
+            _ => grant.model.clone(),
+        };
         let mut command = Command::new(&self.executable);
         command
             .current_dir(&grant.cwd)
@@ -360,12 +386,12 @@ impl Claude {
                 .env_remove("LITELLM_API_KEY")
                 .env_remove("ANTHROPIC_API_KEY")
                 .env_remove("ANTHROPIC_AUTH_TOKEN");
-        } else if let Ok(key) = std::env::var("LITELLM_API_KEY") {
+        } else if let Some(key) = direct_key {
             command
                 .env_remove("ANTHROPIC_API_KEY")
                 .env("ANTHROPIC_AUTH_TOKEN", key);
         }
-        if let Some(model) = &grant.model {
+        if let Some(model) = &startup_model {
             command.arg("--model").arg(model);
         }
         let mut child = command
@@ -441,6 +467,7 @@ impl Claude {
             finished: completion,
             live,
             endpoint,
+            startup_model,
         };
         let mut startup = Startup {
             stop: run.stop.clone(),
@@ -467,6 +494,44 @@ impl Claude {
         startup.completed = true;
         Ok(run)
     }
+}
+
+async fn gateway_model(endpoint: &Url, key: &str, preferred: Option<&str>) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Models {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+    }
+    let response = http_client()
+        .get(format!("{}/v1/models", route::normalized(endpoint)))
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|_| Failure::new(503, "Cannot read the host's LiteLLM model list."))?;
+    let models: Models = response_json(response).await?;
+    if let Some(preferred) = preferred {
+        return models
+            .data
+            .into_iter()
+            .find(|model| model.id == preferred)
+            .map(|model| model.id)
+            .ok_or_else(|| {
+                Failure::new(
+                    403,
+                    "This Claude model is not available to the host's LiteLLM key.",
+                )
+            });
+    }
+    models
+        .data
+        .into_iter()
+        .map(|model| model.id)
+        .filter(|id| id.starts_with("claude-") && id.len() <= 200)
+        .min()
+        .ok_or_else(|| Failure::new(409, "The host's LiteLLM key lists no Claude model. Choose an allowed model or configure its gateway model ID in ANTHROPIC_MODEL."))
 }
 
 async fn write_input(
@@ -521,4 +586,58 @@ async fn output(mut command: Command) -> Result<Vec<u8>> {
         .await
         .map_err(|_| Failure::new(504, "Claude session discovery timed out."))??;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{http::HeaderMap, routing::get, Json, Router};
+
+    #[tokio::test]
+    async fn claude_default_and_selected_models_are_checked_against_the_host_key() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|headers: HeaderMap| async move {
+                let data = match headers["authorization"].to_str().unwrap() {
+                    "Bearer claude-key" => json!([
+                        {"id":"gpt-fixture"},
+                        {"id":"claude-allowed"},
+                        {"id":"custom-alias"}
+                    ]),
+                    "Bearer other-key" => json!([{"id":"gpt-fixture"}]),
+                    _ => panic!("expected host key"),
+                };
+                Json(json!({"data":data}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint =
+            Url::parse(&format!("http://{}/v1", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(
+            gateway_model(&endpoint, "claude-key", None).await.unwrap(),
+            "claude-allowed"
+        );
+        assert_eq!(
+            gateway_model(&endpoint, "claude-key", Some("custom-alias"))
+                .await
+                .unwrap(),
+            "custom-alias"
+        );
+        assert_eq!(
+            gateway_model(&endpoint, "claude-key", Some("not-allowed"))
+                .await
+                .unwrap_err()
+                .status,
+            403
+        );
+        assert_eq!(
+            gateway_model(&endpoint, "other-key", None)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        server.abort();
+    }
 }

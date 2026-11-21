@@ -205,7 +205,7 @@ impl Claude {
     pub async fn send(&self, id: Uuid, text: String, model: Option<String>) -> Result<Value> {
         let _guard = self.mutation.lock().await;
         let grant = self.grant(id)?;
-        let run = self.start(&grant).await?;
+        let run = self.start(&grant, model.as_deref()).await?;
         if run.live.lock().expect("Claude live lock").working {
             return Err(Failure::new(
                 409,
@@ -244,7 +244,7 @@ impl Claude {
             return Err(error);
         }
         let updated = Grant {
-            model: model.or(grant.model),
+            model: model.or(grant.model).or_else(|| run.startup_model.clone()),
             title: if grant.title == "New Claude session" {
                 redact(text.lines().next().unwrap_or("Claude session"))
                     .chars()
