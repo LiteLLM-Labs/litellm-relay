@@ -296,5 +296,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         mutable.update { RemoteState(gateway = it.gateway, controlAddress = it.controlAddress) }
     }
     private fun fail(message: String) { mutable.update { it.copy(error = message, busy = false, loading = false) } }
-    private fun handle(failure: RemoteResult.Failure) { if (failure.status == 401) disconnect(); fail(failure.message) }
+    private fun handle(failure: RemoteResult.Failure) {
+        if (failure.status == 401) disconnect()
+        if (failure.status in listOf(null, 503, 504)) mutable.update { it.copy(detailCurrent = false) }
+        fail(failure.message)
+    }
 }

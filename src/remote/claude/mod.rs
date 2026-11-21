@@ -226,7 +226,7 @@ impl Claude {
             session,
             expired_approval: if live
                 .as_ref()
-                .is_some_and(|live| live.working || live.starting)
+                .is_some_and(|live| live.working || live.starting || !live.approvals.is_empty())
             {
                 None
             } else {

@@ -66,7 +66,7 @@ for line in sys.stdin:
         if value['message']['content'] == 'idle':
             emit({'type':'result','subtype':'success','session_id':session})
         else:
-            emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Edit','input':{'file_path':'fixture.txt'}}})
+            emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_use_id':'fixture-tool','tool_name':'Edit','input':{'file_path':'fixture.txt'}}})
     elif value['type'] == 'control_response':
         if value['response']['response']['behavior'] == 'allow':
             with (home / 'tools').open('a') as log:
@@ -157,6 +157,12 @@ for line in sys.stdin:
         .unwrap();
         drop(a);
         let b = fresh();
+        assert!(b
+            .call(Request::Read { id })
+            .await
+            .unwrap()
+            .get("expiredApproval")
+            .is_none());
         assert_eq!(
             b.call(Request::Read { id }).await.unwrap()["approvals"][0]["id"],
             approval.to_string()
@@ -335,6 +341,193 @@ async fn claude_supervisor_rejects_bad_frames_and_exits_when_idle() {
     );
     tokio::time::advance(Duration::from_secs(901)).await;
     task.await.unwrap().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_supervisor_process_fixture() {
+    let Some(root) = std::env::var_os("RELAY_JOURNAL_SUPERVISOR_FIXTURE") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let server = claude::supervisor::Server::bind(&root.join("private/supervisor.sock"))
+                .unwrap()
+                .unwrap();
+            let claude = claude::Claude::new(
+                root.join("claude-fixture"),
+                root.join("config"),
+                root.join("grants"),
+                Url::parse("https://gateway.example.test").unwrap(),
+            );
+            server
+                .serve(Arc::new(claude), false, std::future::pending())
+                .await
+                .unwrap();
+        });
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn claude_supervisor_crash_expires_only_lost_approvals() {
+    use claude::supervisor::{Client, Request};
+    use std::{os::unix::fs::PermissionsExt, process::Stdio};
+    let directory = Directory::new();
+    let root = &directory.0;
+    let home = root.join("config");
+    std::fs::create_dir(&home).unwrap();
+    let relay = serve(Router::new().route("/api/status", get(|| async {
+        Json(json!({"runtime":"rust","gateway_url":"https://gateway.example.test","broker":{"gateway_url":"https://gateway.example.test"}}))
+    }))).await;
+    std::fs::write(
+        home.join("settings.json"),
+        json!({"env":{"ANTHROPIC_BASE_URL":relay.url},"apiKeyHelper":"relay credential --proxy"})
+            .to_string(),
+    )
+    .unwrap();
+    let script = root.join("claude-fixture");
+    std::fs::write(&script, r#"#!/usr/bin/python3
+import json, pathlib, os, sys
+if sys.argv[1:] == ['agents', '--json']:
+    print('[]')
+    sys.exit(0)
+home = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+session = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith(('--session-id=', '--resume=')))
+(home / 'child-pid').write_text(str(os.getpid()))
+def emit(value):
+    print(json.dumps(value), flush=True)
+for line in sys.stdin:
+    value = json.loads(line)
+    if value['type'] == 'control_request':
+        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
+    elif value['type'] == 'user':
+        emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_use_id':'durable-tool','tool_name':'Edit','input':{'file_path':'fixture.txt'}}})
+    elif value['type'] == 'control_response':
+        if value['response']['response']['behavior'] == 'allow':
+            with (home / 'tools').open('a') as log:
+                log.write('executed\n')
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let launch = || {
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "remote::tests::claude_supervisor_process_fixture",
+                "--nocapture",
+            ])
+            .env("RELAY_JOURNAL_SUPERVISOR_FIXTURE", root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    };
+    let fresh = || Client::new(root.join("private/supervisor.sock"), false, None);
+    let ready = |pid: u32| async move {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(hello) = fresh().call(Request::Hello).await {
+                    if hello["pid"] == pid {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    };
+    let mut supervisor = launch();
+    ready(supervisor.id().unwrap()).await;
+    let a = fresh();
+    let session = a
+        .call(Request::Create {
+            cwd: root.to_str().unwrap().into(),
+        })
+        .await
+        .unwrap();
+    let (_, id) = protocol::split_session(session["id"].as_str().unwrap()).unwrap();
+    a.call(Request::Send {
+        id,
+        text: "approval".into(),
+        model: None,
+    })
+    .await
+    .unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let detail = a.call(Request::Read { id }).await.unwrap();
+            if let Some(approval) = detail["approvals"][0]["id"].as_str() {
+                break Uuid::parse_str(approval).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(a);
+    let b = fresh();
+    let held = b.call(Request::Read { id }).await.unwrap();
+    assert_eq!(held["approvals"][0]["id"], approval.to_string());
+    assert!(held.get("expiredApproval").is_none());
+    let path = root.join("grants/approvals").join(format!("{id}.json"));
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved[0]["state"], "pending");
+    assert_eq!(saved[0]["id"], "durable-tool");
+    assert!(saved[0].get("input").is_none());
+    let child: u32 = std::fs::read_to_string(home.join("child-pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    supervisor.kill().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match std::fs::read_to_string(format!("/proc/{child}/stat")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Ok(stat) if stat.rsplit_once(") ").unwrap().1.starts_with('Z') => break,
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let mut restarted = launch();
+    ready(restarted.id().unwrap()).await;
+    let c = fresh();
+    let expired = c.call(Request::Read { id }).await.unwrap();
+    assert_eq!(expired["expiredApproval"]["id"], "durable-tool");
+    assert_eq!(expired["expiredApproval"]["tool"], "Edit");
+    assert_eq!(expired["expiredApproval"]["summary"], saved[0]["summary"]);
+    assert_eq!(expired["approvals"], json!([]));
+    for decision in [Decision::Accept, Decision::Decline] {
+        assert_eq!(
+            c.call(Request::Approve {
+                id,
+                approval,
+                decision
+            })
+            .await
+            .unwrap_err()
+            .status,
+            409
+        );
+    }
+    assert!(!home.join("tools").exists());
+    assert_eq!(
+        c.call(Request::Read { id }).await.unwrap()["expiredApproval"],
+        expired["expiredApproval"]
+    );
+    restarted.kill().await.unwrap();
 }
 
 impl Directory {
