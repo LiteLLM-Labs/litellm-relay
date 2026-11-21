@@ -1387,7 +1387,9 @@ async fn codex_approval_retries_after_a_failed_socket_write() {
 
 async fn codex_approval_fault(fault: ApprovalFault) {
     for decision in [Decision::Accept, Decision::Decline] {
-        let (path, listener) = ShortSocket::listen();
+        let directory = Directory::new();
+        let socket_path = directory.0.join("codex.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
         let thread = Uuid::new_v4();
         let decisions = Arc::new(AtomicUsize::new(0));
         let executions = Arc::new(AtomicUsize::new(0));
@@ -1500,7 +1502,7 @@ async fn codex_approval_fault(fault: ApprovalFault) {
             }
         });
         let gateway = Url::parse("https://gateway.example.test").unwrap();
-        let original = codex::Codex::new(path.0.clone(), "litellm".into(), gateway.clone());
+        let original = codex::Codex::new(socket_path.clone(), "litellm".into(), gateway.clone());
         original
             .send(thread, "Run the command".into(), None)
             .await
@@ -1508,7 +1510,7 @@ async fn codex_approval_fault(fault: ApprovalFault) {
         let old_id =
             Uuid::parse_str(&original.read(thread).await.unwrap().approvals[0].id).unwrap();
         drop(original);
-        let restarted = codex::Codex::new(path.0.clone(), "litellm".into(), gateway);
+        let restarted = codex::Codex::new(socket_path, "litellm".into(), gateway);
         let first = restarted.approve(thread, old_id, decision).await;
         release.notify_one();
         if fault == ApprovalFault::ReplacedSocket {
