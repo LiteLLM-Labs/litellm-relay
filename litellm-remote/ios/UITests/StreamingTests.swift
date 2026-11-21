@@ -26,6 +26,37 @@ final class StreamingTests: XCTestCase {
     }
 
     @MainActor
+    func testDelayedCodexReplyAppearsWithoutTappingLatest() throws {
+        continueAfterFailure = false
+        let service = try StreamingService(longHistory: true)
+        service.setReplyHeld(true)
+        let app = try launch(service)
+        defer { app.terminate() }
+        let composer = app.descendants(matching: .any)["messageComposer"].firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: composer)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 8), .completed)
+        XCTAssertTrue(app.staticTexts[StreamingService.historyTail].waitForExistence(timeout: 5))
+
+        let prompt = "Reply after the first detail poll"
+        composer.tap()
+        composer.typeText(prompt)
+        app.buttons["sendMessageButton"].tap()
+        XCTAssertTrue(app.staticTexts[prompt].waitForExistence(timeout: 8))
+        let reply = app.staticTexts["Follow-up acknowledged"]
+        XCTAssertFalse(reply.exists)
+        service.setReplyHeld(false)
+        XCTAssertTrue(reply.waitForExistence(timeout: 8))
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let frame = reply.frame
+            return reply.isHittable && !frame.isEmpty
+                && frame.minY >= app.navigationBars.firstMatch.frame.maxY
+                && frame.maxY <= composer.frame.minY
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 8), .completed,
+                       "Delayed reply should be visible above the composer")
+    }
+
+    @MainActor
     func testLongCodexReplyKeepsStopAndFollowUpResponsive() throws {
         continueAfterFailure = false
         let service = try StreamingService(streamOnFirstSend: true)
@@ -180,6 +211,7 @@ private final class StreamingService: @unchecked Sendable {
     private var interrupts = 0
     private var sends = 0
     private var followUp: String?
+    private var replyHeld = false
     private var online = true
     private var busy = false
     private let streamOnFirstSend: Bool
@@ -194,6 +226,7 @@ private final class StreamingService: @unchecked Sendable {
 
     func setOnline(_ value: Bool) { queue.sync { online = value } }
     func setBusy(_ value: Bool) { queue.sync { busy = value } }
+    func setReplyHeld(_ value: Bool) { queue.sync { replyHeld = value } }
 
     init(streamOnFirstSend: Bool = false, longHistory: Bool = false, expiredApproval: Bool = false) throws {
         self.streamOnFirstSend = streamOnFirstSend
@@ -299,10 +332,10 @@ private final class StreamingService: @unchecked Sendable {
                 ]
             }
             if let followUp {
-                messages += [
-                    ["id": "follow-up", "role": "user", "text": followUp],
-                    ["id": "ack", "role": "assistant", "text": "**Follow-up acknowledged**"]
-                ]
+                messages.append(["id": "follow-up", "role": "user", "text": followUp])
+                if !replyHeld {
+                    messages.append(["id": "ack", "role": "assistant", "text": "**Follow-up acknowledged**"])
+                }
             }
             response = ["session": session, "messages": messages, "olderMessages": false, "approvals": []]
             if firstSent && working { response["streamingReplyId"] = "next-reply" }
