@@ -34,8 +34,42 @@ struct SessionView: View {
     private var controlsEnabled: Bool { hasCurrentDetail && session.canSend && !sending }
 
     var body: some View {
+        VStack(spacing: 0) {
+            transcript
+            composer
+        }
+        .background(Palette.canvas)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) { sessionChip }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Latest message", systemImage: "arrow.down", action: scrollToLatest)
+                    .labelStyle(.iconOnly).font(Fonts.caption)
+            }
+        }
+        .toolbar(.hidden, for: .tabBar)
+        .task(id: route.deviceId) { await loadModels() }
+        .sheet(isPresented: $showingModels) { allModels }
+        .sheet(isPresented: $showingSession) { sessionSheet }
+        .fileImporter(
+            isPresented: $importingFiles,
+            allowedContentTypes: DraftAttachment.readableTypes,
+            allowsMultipleSelection: true
+        ) { attachFiles($0) }
+        .task(id: route.session.id) {
+            await update()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                if scenePhase == .active { await update() }
+            }
+        }
+    }
+
+    private var transcript: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: Space.s3) {
+            // The service bounds the transcript. Measuring it in one pass
+            // keeps the bottom offset stable when rows above it change height.
+            VStack(alignment: .leading, spacing: Space.s3) {
                 Text(statusLabel).font(Fonts.caption).foregroundStyle(Palette.inkSoft)
                 if let error = loadError ?? actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? modelError {
                     InlineError(text: error)
@@ -51,7 +85,6 @@ struct SessionView: View {
                 let streamingID = detail?.streamingReplyID
                 ForEach(detail?.messages ?? []) { message in
                     MessageView(message: message, agentName: session.agentName, streaming: message.id == streamingID)
-                        .id(message.id)
                 }
                 ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
                 if working {
@@ -68,32 +101,6 @@ struct SessionView: View {
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: detail?.messages.last?.id) {
             if !followed { scrollToLatest(); followed = true }
-        }
-        .background(Palette.canvas)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) { sessionChip }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Latest message", systemImage: "arrow.down", action: scrollToLatest)
-                    .labelStyle(.iconOnly).font(Fonts.caption)
-            }
-        }
-        .toolbar(.hidden, for: .tabBar)
-        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-        .task(id: route.deviceId) { await loadModels() }
-        .sheet(isPresented: $showingModels) { allModels }
-        .sheet(isPresented: $showingSession) { sessionSheet }
-        .fileImporter(
-            isPresented: $importingFiles,
-            allowedContentTypes: DraftAttachment.readableTypes,
-            allowsMultipleSelection: true
-        ) { attachFiles($0) }
-        .task(id: route.session.id) {
-            await update()
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
-                if scenePhase == .active { await update() }
-            }
         }
     }
 
@@ -174,7 +181,6 @@ struct SessionView: View {
             .padding(.leading, composing ? 0 : Space.s1)
             .background(Palette.surface, in: .rect(cornerRadius: composerRadius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: composerRadius, style: .continuous).strokeBorder(Palette.border))
-            .animation(.snappy(duration: 0.18), value: composing)
             .animation(.snappy(duration: 0.18), value: attachments)
             .onChange(of: attachments) { if !sending { requestId = UUID().uuidString } }
             HStack(spacing: Space.s1 + 1) {
@@ -441,7 +447,8 @@ struct SessionView: View {
     }
 
     private func send() async {
-        guard hasCurrentDetail, !sending else { return }
+        guard sendEnabled else { return }
+        composing = false
         sending = true
         actionError = nil
         let text = DraftAttachment.compose(draft: draft, attachments: attachments)
