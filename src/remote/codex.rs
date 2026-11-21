@@ -768,6 +768,16 @@ impl Codex {
         if decision == Decision::Accept {
             self.verify(&rpc, &thread.cwd).await?;
         }
+        let known = self
+            .events
+            .lock()
+            .expect("Codex event lock")
+            .approvals
+            .get(&approval)
+            .is_some_and(|request| request.thread == id.to_string());
+        if !known {
+            self.read(id).await?;
+        }
         let request = {
             let mut events = self.events.lock().expect("Codex event lock");
             let pending = events
