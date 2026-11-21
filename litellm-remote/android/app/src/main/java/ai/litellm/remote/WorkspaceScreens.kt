@@ -32,12 +32,13 @@ import kotlinx.coroutines.launch
         }
     }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            when {
-                !signedIn -> LoginScreen(state, model)
-                state.selectedSession != null -> ConversationScreen(state, model)
-                tab == 0 -> SessionsScreen(state, model)
-                tab == 1 -> DevicesScreen(state, model)
-                else -> AccountScreen(state, model)
+            ConversationStateHost(state, conversation = { ConversationScreen(state, model) }) {
+                when {
+                    !signedIn -> LoginScreen(state, model)
+                    tab == 0 -> SessionsScreen(state, model)
+                    tab == 1 -> DevicesScreen(state, model)
+                    else -> AccountScreen(state, model)
+                }
             }
         }
     }

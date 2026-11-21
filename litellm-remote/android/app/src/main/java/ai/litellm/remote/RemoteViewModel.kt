@@ -6,6 +6,7 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.net.URI
+import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -29,6 +30,7 @@ data class RemoteState(
     val detailCurrent: Boolean = false,
     val dismissedExpiredApproval: String? = null,
     val sessionReconnectStartedAt: Long? = null,
+    val conversationStateScope: String = UUID.randomUUID().toString(),
 ) {
     val sessionReconnecting get() = sessionReconnectStartedAt != null
     val device get() = devices.firstOrNull { it.id == deviceId }

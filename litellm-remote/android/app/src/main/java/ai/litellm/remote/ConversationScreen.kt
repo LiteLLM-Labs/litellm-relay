@@ -39,7 +39,7 @@ import kotlinx.coroutines.launch
     val session = state.detail?.session ?: state.selectedSession ?: return
     val available = state.hasCurrentDetail
     val online = state.sessionDevice?.online == true
-    var draft by rememberSaveable(session.id) { mutableStateOf("") }
+    var draft by rememberConversationDraft(session.id)
     var requestId by rememberSaveable(session.id) { mutableStateOf(UUID.randomUUID().toString()) }
     var selectedModel by rememberSaveable(session.id) { mutableStateOf<String?>(null) }
     var choosingModel by remember { mutableStateOf(false) }
