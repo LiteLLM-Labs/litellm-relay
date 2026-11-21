@@ -210,11 +210,8 @@ import kotlinx.coroutines.launch
             }
             val context = LocalContext.current
             val markdown = remember(context) { Markwon.create(context) }
-            val text = message.text
-            val parsed by produceState<CharSequence>(text, markdown) {
-                value = text
-                value = parseMarkdown(text) { markdown.toMarkdown(it) }
-            }
+            val render = remember(markdown) { { text: String -> markdown.toMarkdown(text) } }
+            val parsed by rememberParsedMarkdown(message.text, render)
             AndroidView(factory = { TextView(it).apply { textSize = 15f; setTextColor(Ink.toArgb()); setTextIsSelectable(true); setLineSpacing(6f, 1.08f) } },
                 update = { if (it.tag !== parsed) { it.text = parsed; it.tag = parsed } }, modifier = Modifier.fillMaxWidth())
         }
