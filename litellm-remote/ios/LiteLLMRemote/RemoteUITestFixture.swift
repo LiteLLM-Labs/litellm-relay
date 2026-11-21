@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import Synchronization
 
 @MainActor
 enum RemoteUITestFixture {
@@ -24,6 +25,8 @@ enum RemoteUITestFixture {
 
 final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
     static let gateway = "https://gateway.fixture.test"
+    private static let sentPrompt = Mutex<(text: String, at: ContinuousClock.Instant)?>(nil)
+    private static let codexPath = "/api/devices/mac/sessions/mac-codex-history"
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
@@ -31,7 +34,8 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         guard let url = request.url else { return }
         let mode = request.value(forHTTPHeaderField: "X-Fixture-Mode")
-        let macOnline = mode == "online"
+        let codexHistory = mode == "codex-history"
+        let macOnline = mode == "online" || codexHistory
         let linuxOnline = mode != "all-offline"
         let paths = url.pathComponents
         let body: [String: Any]
@@ -46,6 +50,29 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
                 ["id": "mac", "name": "Test laptop", "platform": "macOS", "online": macOnline, "lastSeen": 1],
                 ["id": "linux", "name": "Test host", "platform": "Linux", "online": linuxOnline, "lastSeen": 1]
             ]]
+        case "/api/devices/mac/sessions" where codexHistory:
+            body = ["sessions": [historySession()]]
+        case Self.codexPath where codexHistory:
+            let sent = Self.sentPrompt.withLock { $0 }
+            var messages = historyMessages()
+            let elapsed = sent.map { $0.at.duration(to: .now) } ?? .zero
+            let finished = elapsed >= .seconds(4)
+            if let sent {
+                messages.append(["id": "turn-5/user", "role": "user", "text": sent.text])
+            }
+            if elapsed >= .milliseconds(1650) {
+                messages.append(["id": "turn-5/comment", "role": "assistant", "text": "I’ll check the workspace and report what I find in the command output."])
+            }
+            if finished {
+                messages.append(["id": "turn-5/command", "role": "activity", "text": "printf 'Workspace check complete'"])
+                messages.append(["id": "turn-5/reply", "role": "assistant", "text": "Workspace check complete. The expected build files are present, the command completed normally, and no source files or settings changed."])
+            }
+            body = ["session": historySession(working: elapsed >= .milliseconds(1650) && !finished), "messages": messages,
+                    "olderMessages": false, "approvals": []]
+        case Self.codexPath + "/messages" where codexHistory && request.httpMethod == "POST":
+            let prompt = requestBody()?["text"] as? String
+            Self.sentPrompt.withLock { $0 = prompt.map { ($0, .now) } }
+            body = [:]
         case "/api/devices/mac/sessions" where macOnline && request.httpMethod == "GET":
             let older = url.query != nil
             body = ["sessions": [session("codex", id: older ? "mac-older" : "mac-saved",
@@ -85,11 +112,48 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
             let data = try JSONSerialization.data(withJSONObject: body)
             let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil,
                                            headerFields: ["Content-Type": "application/json"])!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
+            let respond: @Sendable () -> Void = {
+                self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                self.client?.urlProtocol(self, didLoad: data)
+                self.client?.urlProtocolDidFinishLoading(self)
+            }
+            if codexHistory && url.path.hasPrefix(Self.codexPath) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50), execute: respond)
+            } else {
+                respond()
+            }
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    private func historySession(working: Bool = false) -> [String: Any] {
+        session("codex", id: "mac-codex-history", title: "Laptop Codex history", cwd: "/Users/test/repo",
+                status: working ? "working" : "ready")
+            .merging(["canSend": !working, "model": "gpt-5.4"]) { _, value in value }
+    }
+
+    private func historyMessages() -> [[String: String]] {
+        (1...4).flatMap { turn in
+            func message(_ item: String, _ role: String, _ text: String) -> [String: String] {
+                ["id": "turn-\(turn)/\(item)", "role": role, "text": text]
+            }
+            let prompt = String(String(repeating: "Confirm the expected files and report the result. ", count: 5)
+                .prefix([203, 235, 190, 236][turn - 1]))
+            let final = """
+            I checked the workspace and reviewed the build output.
+
+            - Build files: `Package.swift` and `Sources/App.swift` are present and ready for further inspection.
+            - Check status: the command completed normally.
+
+            No files were changed. If you want, I can run the remaining checks and summarize their results.
+            """
+            var items = [message("user", "user", prompt),
+                         message("comment", "assistant", "I’ll check the workspace and report what I find in the output.")]
+            if turn == 1 || turn == 3 {
+                items.append(message("command", "activity", "cd /fixture/workspace/project && printf 'Workspace check complete: expected files are present'"))
+            }
+            return items + [message("reply", "assistant", final)]
         }
     }
 

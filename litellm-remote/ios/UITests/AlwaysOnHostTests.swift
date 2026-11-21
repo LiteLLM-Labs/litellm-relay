@@ -2,6 +2,31 @@ import XCTest
 
 final class AlwaysOnHostTests: XCTestCase {
     @MainActor
+    func testSendInCodexHistoryWithComposerFocused() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        launch(app, mode: "codex-history", run: UUID().uuidString)
+        let row = app.buttons["sessionRow-mac-codex-history"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        XCTAssertTrue(app.navigationBars["Laptop Codex history"].waitForExistence(timeout: 10))
+
+        let composer = app.descendants(matching: .any)["messageComposer"].firstMatch
+        let send = app.buttons["sendMessageButton"]
+        let prompt = "Run the remaining workspace check and summarize the result without changing any files. Confirm that the expected build files are present and report the project directory. Keep your response brief and don't change any source files or settings."
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "No files were changed.")).firstMatch.waitForExistence(timeout: 10))
+        composer.tap()
+        composer.typeText(prompt)
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label == %@", prompt)).firstMatch.waitForExistence(timeout: 10))
+        let reply = app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "Workspace check complete.")).firstMatch
+        XCTAssertTrue(reply.wait(for: \.isHittable, toEqual: true, timeout: 10))
+        XCTAssertTrue(app.navigationBars["Laptop Codex history"].buttons["Latest message"].isHittable)
+    }
+
+    @MainActor
     func testLinuxFallbackCreatesBothAgentsWithoutMovingSavedLaptopSession() {
         continueAfterFailure = false
         let app = XCUIApplication()
