@@ -17,7 +17,7 @@ import kotlinx.serialization.Serializable
         "working" -> "Working"
         "needs_approval" -> "Needs approval"
         "needs_input" -> "Needs input"
-        "handoff_required" -> "Set up on Mac"
+        "handoff_required" -> "Set up on device"
         "ready" -> "Ready"
         "error" -> "Needs attention"
         else -> "Saved"

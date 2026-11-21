@@ -22,7 +22,7 @@ private const val CLAUDE_RECONNECT_GRACE_MS = 180_000L
 data class RemoteState(
     val gateway: String = "", val controlAddress: String = "", val endpoint: String = "",
     val workspace: Workspace? = null, val devices: List<Device> = emptyList(), val deviceId: String? = null,
-    val sessions: List<CodingSession> = emptyList(), val nextCursor: String? = null,
+    val sessionPages: Map<String, SessionPage> = emptyMap(),
     val login: LoginStart? = null, val teams: List<Team> = emptyList(),
     val selectedSession: CodingSession? = null, val sessionDeviceId: String? = null, val detail: SessionDetail? = null,
     val busy: Boolean = false, val loading: Boolean = false, val error: String? = null,
@@ -34,7 +34,20 @@ data class RemoteState(
 ) {
     val sessionReconnecting get() = sessionReconnectStartedAt != null
     val device get() = devices.firstOrNull { it.id == deviceId }
-    val hasCurrentDetail get() = detailCurrent && detail != null && error == null && devices.firstOrNull { it.id == sessionDeviceId }?.online == true
+    private val selectedPage get() = deviceId?.let { sessionPages[it] }
+    val sessions get() = selectedPage?.sessions.orEmpty()
+    val nextCursor get() = selectedPage?.nextCursor
+    val sessionListWarning get() = selectedPage?.warnings.orEmpty()
+        .takeIf { device?.online == true && it.isNotEmpty() }?.joinToString("\n")
+    val sessionDevice get() = devices.firstOrNull { it.id == sessionDeviceId }
+    val newSessionDevice get() = device?.let { selected ->
+        when {
+            selected.online -> selected
+            selected.platform == "macOS" -> devices.firstOrNull { it.online && it.platform == "Linux" }
+            else -> null
+        }
+    }
+    val hasCurrentDetail get() = detailCurrent && detail != null && error == null && sessionDevice?.online == true
     val turnRunning get() = (detail?.session ?: selectedSession)?.let { it.canStop || it.status in setOf("working", "needs_approval") } == true
     val expiredApproval get() = detail?.expiredApproval?.takeIf { selectedSession?.agent == "claude" && !turnRunning && it.id != dismissedExpiredApproval }
     val canRetryExpiredApproval get() = expiredApproval != null && hasCurrentDetail && !turnRunning && detail?.session?.canSend == true
@@ -97,7 +110,7 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         mutable.update { it.copy(busy = true, error = null) }
         val override = state.value.controlAddress
         val endpoint = if (override.isNotBlank()) workspaceAddress(override) else {
-            when (val manifest = ApiClient(gateway) { null }.request<Discovery>("${URI(gateway).path}/.well-known/litellm-remote.json")) {
+            when (val manifest = ApiClient(gateway).request<Discovery>("${URI(gateway).path}/.well-known/litellm-remote.json")) {
                 is RemoteResult.Success -> manifest.value.takeIf { workspaceAddress(it.gatewayUrl, true) == gateway }
                     ?.controlUrl?.let { workspaceAddress(it) }?.takeIf { it.startsWith("https://") }
                 is RemoteResult.Failure -> null
@@ -191,20 +204,27 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
     suspend fun refresh() {
         val api = client ?: return
         val ticket = deviceReplies.next()
+        val sessionWasOnline = state.value.sessionDevice?.online == true
         when (val result = api.request<Devices>("/api/devices")) {
             is RemoteResult.Success -> if (client === api && deviceReplies.accepts(ticket)) mutable.update { previous ->
                 val selected = previous.deviceId?.takeIf { id -> result.value.devices.any { it.id == id } }
                     ?: result.value.devices.firstOrNull { it.online }?.id ?: result.value.devices.firstOrNull()?.id
+                val ids = result.value.devices.map { it.id }.toSet()
                 previous.copy(devices = result.value.devices, deviceId = selected,
-                    sessions = if (selected == previous.deviceId) previous.sessions else emptyList())
+                    sessionPages = previous.sessionPages.filterKeys { it in ids },
+                    loading = previous.loading && result.value.devices.any { it.id == selected && it.online })
             }
             is RemoteResult.Failure -> { if (client === api && deviceReplies.accepts(ticket)) handle(result); return }
         }
-        state.value.refreshSelection({ loadDetail() }, { refreshSessions() })
+        if (!deviceReplies.accepts(ticket)) return
+        state.value.refreshSelection({
+            loadDetail()
+            if (!sessionWasOnline && state.value.sessionDevice?.online == true) loadModels()
+        }, { refreshSessions() })
     }
 
     fun selectDevice(id: String) { viewModelScope.launch {
-        mutable.update { it.copy(deviceId = id, sessions = emptyList(), nextCursor = null, error = null) }
+        mutable.update { it.copy(deviceId = id, loading = false, error = null) }
         refreshSessions()
     } }
 
@@ -212,13 +232,20 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         val api = client ?: return
         val id = state.value.deviceId ?: return
         val ticket = sessionReplies.next()
+        if (state.value.device?.online != true) {
+            if (sessionReplies.accepts(ticket)) mutable.update { it.copy(loading = false) }
+            return
+        }
         val base = "/api/devices/$id/sessions"
         val path = if (older) state.value.nextCursor?.let { ApiClient.query(base, "cursor", it) } ?: base else base
         mutable.update { it.copy(loading = it.sessions.isEmpty()) }
         try { when (val result = api.request<SessionPage>(path)) {
-            is RemoteResult.Success -> if (client === api && sessionReplies.accepts(ticket) && state.value.deviceId == id) mutable.update {
-                it.copy(sessions = if (older) (it.sessions + result.value.sessions).distinctBy { session -> session.id } else result.value.sessions,
-                    nextCursor = result.value.nextCursor, loading = false, error = result.value.warnings.takeIf { warnings -> warnings.isNotEmpty() }?.joinToString("\n"))
+            is RemoteResult.Success -> if (client === api && sessionReplies.accepts(ticket) && state.value.devices.any { it.id == id }) mutable.update {
+                val page = if (older) result.value.copy(
+                    sessions = (it.sessionPages[id]?.sessions.orEmpty() + result.value.sessions).distinctBy { session -> session.id }
+                ) else result.value
+                val updated = it.copy(sessionPages = it.sessionPages + (id to page))
+                if (it.deviceId == id) updated.copy(loading = false, error = null) else updated
             }
             is RemoteResult.Failure -> if (client === api && sessionReplies.accepts(ticket) && state.value.deviceId == id) handle(result)
         } } finally {
@@ -226,9 +253,7 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         }
     }
 
-    fun openSession(session: CodingSession) { openSession(session, state.value.deviceId) }
-
-    private fun openSession(session: CodingSession, device: String?) { viewModelScope.launch {
+    fun openSession(device: String, session: CodingSession) { viewModelScope.launch {
         detailReplies.next()
         mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, models = emptyList(), modelError = null, error = null, actionError = null, sessionReconnectStartedAt = null) }
         loadDetail()
@@ -240,6 +265,7 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         val api = client ?: return
         val session = state.value.selectedSession ?: return
         val device = state.value.sessionDeviceId ?: return
+        if (state.value.sessionDevice?.online != true) return
         val ticket = detailReplies.next()
         when (val result = api.request<SessionDetail>("/api/devices/$device/sessions/${session.id}")) {
             is RemoteResult.Success -> mutable.update { if (client === api && detailReplies.accepts(ticket) && it.acceptsReply(api.endpoint, device, session.id)) it.detailReceived(result.value) else it }
@@ -247,13 +273,13 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         }
     }
 
-    suspend fun create(cwd: String, agent: String, requestId: String): Boolean {
+    suspend fun create(device: String, cwd: String, agent: String, requestId: String): Boolean {
         val api = client ?: return false
-        val device = state.value.deviceId ?: return false
+        if (state.value.devices.none { it.id == device && it.online }) return false
         mutable.update { it.copy(busy = true, error = null) }
         return try { when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
             is RemoteResult.Success -> {
-                openSession(result.value, device)
+                openSession(device, result.value)
                 true
             }
             is RemoteResult.Failure -> { handle(result); false }
@@ -263,6 +289,7 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
     suspend fun loadModels() {
         val api = client ?: return
         val device = state.value.sessionDeviceId ?: return
+        if (state.value.sessionDevice?.online != true) return
         val session = state.value.selectedSession?.id ?: return
         var cursor: String? = null
         val loaded = mutableListOf<ModelOption>()

@@ -1,6 +1,6 @@
 mod history;
 mod journal;
-mod process;
+pub(in crate::remote) mod process;
 
 use super::protocol::{now_ms, redact, Agent, Decision, Detail, Failure, Message, Result, Session};
 use process::Running;
@@ -158,7 +158,7 @@ impl Claude {
             .grant(id)
             .or_else(|error| external.clone().ok_or(error))?;
         if external.is_some() {
-            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), streaming_reply_id: None, expired_approval: None, error: Some("On your Mac, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
+            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), streaming_reply_id: None, expired_approval: None, error: Some("On the device, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
         }
         let (stored, older) = match self.history(id) {
             Ok(history) => history,
@@ -307,7 +307,7 @@ impl Claude {
                 .get(&approval)
                 .ok_or_else(|| Failure::new(409, "This approval was already resolved."))?;
             if decision == Decision::Accept && !permission.approval.can_accept {
-                return Err(Failure::new(400, "Review this request on your Mac."));
+                return Err(Failure::new(400, "Review this request on the device."));
             }
             self.journal()
                 .decide(id, &permission.request, decision == Decision::Accept)?;

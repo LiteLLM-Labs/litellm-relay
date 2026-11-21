@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::{
     claude, codex,
-    protocol::{self, Action, Agent, Decision, Outcome},
+    protocol::{self, Action, Agent, Decision, Outcome, Platform},
     route,
     service::Service,
     store::{RequestState, Store},
@@ -177,7 +177,7 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
             .issue("owner", &["fixture-model".into()], 100)
             .unwrap();
         let token = issued.access_token;
-        let (device, device_token) = store.enroll("owner", "Mac", 100).unwrap();
+        let (device, device_token) = store.enroll("owner", "Mac", Platform::MacOs, 100).unwrap();
         assert!(store.device(device.id, "other").is_err());
         assert!(matches!(
             store.begin("owner", request, "input", 100).unwrap(),
@@ -319,7 +319,9 @@ fn short_lived_credentials_expire_rotate_and_revoke_without_sleeping() {
         vec!["legacy-model".to_string()]
     );
 
-    let (device, device_token) = reopened.enroll("owner", "Mac", 1_000).unwrap();
+    let (device, device_token) = reopened
+        .enroll("owner", "Mac", Platform::MacOs, 1_000)
+        .unwrap();
     let (access, expires) = reopened.exchange_device(&device_token, 1_000).unwrap();
     assert_eq!(expires, 1_000 + super::store::ACCESS_TTL_MS);
     assert!(reopened
@@ -434,6 +436,105 @@ async fn agent_socket_rejects_the_device_credential_and_expired_access_tokens() 
     assert!(tokio_tungstenite::connect_async(connect(&renewed))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn codex_starts_only_when_enabled_and_socket_is_missing() {
+    let socket = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
+    struct SocketFile(PathBuf);
+    impl Drop for SocketFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _file = SocketFile(socket.clone());
+    let gateway = Url::parse("https://gateway.example.com").unwrap();
+    let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway.clone());
+    let no_start = || async { panic!("must not start a daemon") };
+    assert_eq!(
+        codex.control_stream(no_start()).await.unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway).auto_start(true);
+    let mut listener = None;
+    codex
+        .control_stream(async {
+            listener = Some(tokio::net::UnixListener::bind(&socket)?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let listener = listener.unwrap();
+    listener.accept().await.unwrap();
+    codex.control_stream(no_start()).await.unwrap();
+}
+
+#[tokio::test]
+async fn devices_report_the_paired_platform_with_a_legacy_default() {
+    let gateway = gateway().await;
+    let server = control(gateway.url.clone()).await;
+    let owner = sign_in(&server).await;
+    let path = server.url.join("/api/devices").unwrap();
+    for input in [
+        json!({"name":"Always-on host","platform":"Linux"}),
+        json!({"name":"Laptop"}),
+    ] {
+        client()
+            .post(path.clone())
+            .bearer_auth(&owner)
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    let response: Value = client()
+        .get(path)
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["devices"][0]["platform"], "Linux");
+    assert_eq!(response["devices"][1]["platform"], "macOS");
+}
+
+#[test]
+fn migrates_legacy_device_records_without_expiring_their_tokens() {
+    let directory = Directory::new();
+    let path = directory.0.join("control.sqlite");
+    let id = Uuid::new_v4();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE devices (id TEXT PRIMARY KEY, subject TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen INTEGER NOT NULL);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO devices VALUES (?, 'owner', 'Laptop', ?, 100)",
+        [id.to_string(), protocol::digest("old-device-token")],
+    )
+    .unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let old = store
+        .authenticate_device("old-device-token")
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.id, id);
+    assert_eq!(old.platform, Platform::MacOs);
+    let (host, _) = store.enroll("owner", "Host", Platform::Linux, 101).unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.device(host.id, "owner").unwrap().platform,
+        Platform::Linux
+    );
 }
 
 #[tokio::test]
@@ -1661,6 +1762,53 @@ for line in sys.stdin:
     assert_eq!(configured["OPENAI_API_KEY"], Value::Null);
     assert_eq!(configured["LITELLM_API_KEY"], Value::Null);
     assert_eq!(configured["AWS_SECRET_ACCESS_KEY"], Value::Null);
+}
+
+#[tokio::test]
+async fn codex_daemon_receives_only_the_configured_litellm_key() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = CLAUDE_ENV.lock().await;
+    let directory = Directory::new();
+    let home = directory.0.join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _restore = CredentialEnv::set(&[
+        ("ANTHROPIC_API_KEY", Some("sk-inherited-anthropic")),
+        ("ANTHROPIC_AUTH_TOKEN", Some("sk-inherited-token")),
+        ("OPENAI_API_KEY", Some("sk-inherited-openai")),
+        ("AWS_SECRET_ACCESS_KEY", Some("aws-inherited-secret")),
+        ("LITELLM_API_KEY", Some("sk-litellm-configured")),
+    ]);
+    let previous_home = std::env::var_os("CODEX_HOME");
+    std::env::set_var("CODEX_HOME", &home);
+    let script = directory.0.join("codex");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import json, os
+print(json.dumps({key: os.environ.get(key) for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'LITELLM_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'CODEX_HOME', 'PATH')}))
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = codex::Codex::daemon_command(&script).output().await;
+    match previous_home {
+        Some(value) => std::env::set_var("CODEX_HOME", value),
+        None => std::env::remove_var("CODEX_HOME"),
+    }
+    let output = output.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let child: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(child["ANTHROPIC_API_KEY"], Value::Null);
+    assert_eq!(child["ANTHROPIC_AUTH_TOKEN"], Value::Null);
+    assert_eq!(child["OPENAI_API_KEY"], Value::Null);
+    assert_eq!(child["AWS_SECRET_ACCESS_KEY"], Value::Null);
+    assert_eq!(child["LITELLM_API_KEY"], "sk-litellm-configured");
+    assert_eq!(child["CODEX_HOME"], home.to_str().unwrap());
+    assert_eq!(child["PATH"], std::env::var("PATH").unwrap());
 }
 
 async fn child_credentials(claude: &claude::Claude, home: &std::path::Path, cwd: &str) -> Value {

@@ -38,6 +38,7 @@ import kotlinx.coroutines.launch
 @Composable fun ConversationScreen(state: RemoteState, model: RemoteViewModel) {
     val session = state.detail?.session ?: state.selectedSession ?: return
     val available = state.hasCurrentDetail
+    val online = state.sessionDevice?.online == true
     var draft by rememberConversationDraft(session.id)
     var requestId by rememberSaveable(session.id) { mutableStateOf(UUID.randomUUID().toString()) }
     var selectedModel by rememberSaveable(session.id) { mutableStateOf<String?>(null) }
@@ -74,6 +75,9 @@ import kotlinx.coroutines.launch
                 Icon(Icons.Default.ArrowDownward, "Latest message", tint = RoyalBlue, modifier = Modifier.size(19.dp))
             }
         }
+        if (!online) Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            ErrorNotice("This session stays on its original device. Reconnect it to continue.")
+        }
         (state.actionError ?: state.error ?: state.detail?.error?.takeUnless { session.status == "handoff_required" } ?: state.modelError)?.let { Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ErrorNotice(it) } }
         if (state.sessionReconnecting) Text("Reconnecting to Relay…", modifier = Modifier.padding(horizontal = 22.dp, vertical = 8.dp), color = Secondary)
         LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(22.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
@@ -81,7 +85,7 @@ import kotlinx.coroutines.launch
                 Surface(color = Color.White, shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Text("Set up mobile control", fontWeight = FontWeight.SemiBold)
-                        SelectionContainer { Text(state.detail?.error ?: "Finish the current turn and hand this session over from Relay on your Mac.",
+                        SelectionContainer { Text(state.detail?.error ?: "Finish the current turn and hand this session over from Relay on the device.",
                             fontSize = 13.sp, fontFamily = FontFamily.Monospace, lineHeight = 21.sp) }
                     }
                 }
