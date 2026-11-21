@@ -123,7 +123,7 @@ struct SessionView: View {
 
     private var statusColor: Color {
         if !hasCurrentDetail { return Palette.inkSoft }
-        switch session.status {
+        return switch session.status {
         case "working": Palette.accent
         case "needs_approval", "error", "handoff_required": Palette.warn
         default: Palette.good
@@ -174,6 +174,7 @@ struct SessionView: View {
             .overlay(RoundedRectangle(cornerRadius: composerRadius, style: .continuous).strokeBorder(Palette.border))
             .animation(.snappy(duration: 0.18), value: composing)
             .animation(.snappy(duration: 0.18), value: attachments)
+            .onChange(of: attachments) { if !sending { requestId = UUID().uuidString } }
             HStack(spacing: Space.s1 + 1) {
                 Image(systemName: "lock.shield").font(.system(size: 9))
                 Text("Via your LiteLLM gateway").font(Fonts.caption)
@@ -266,6 +267,7 @@ struct SessionView: View {
                         } label: {
                             Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
                         }
+                        .disabled(sending)
                         .accessibilityLabel("Remove \(attachment.name)")
                     }
                     .foregroundStyle(Palette.inkSoft)
