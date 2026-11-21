@@ -1185,9 +1185,11 @@ async fn codex_declines_before_detail_after_restart() {
 }
 
 async fn codex_answers_before_detail(decision: Decision) {
-    let (socket, listener) = ShortSocket::listen();
+    let directory = Directory::new();
+    let socket_path = directory.0.join("codex.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
     codex_replays_a_pending_approval(
-        socket.0.clone(),
+        socket_path,
         Arc::new(listener),
         Uuid::new_v4(),
         Arc::new(AtomicUsize::new(0)),
