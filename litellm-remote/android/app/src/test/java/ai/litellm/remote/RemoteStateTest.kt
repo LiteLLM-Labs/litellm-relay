@@ -2,6 +2,7 @@ package ai.litellm.remote
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 class RemoteStateTest {
     private val session = CodingSession("codex:one", "Task", "repo", "/repo", "codex", "working", true, true, 1)
@@ -52,13 +53,38 @@ class RemoteStateTest {
         assertFalse(replies.accepts(second))
     }
 
-    @Test fun longRepliesRemainCompleteInBoundedPagesIncludingStreamingSuffixes() {
-        val text = "code and markdown\n".repeat(10000)
-        val pages = replyPages(text)
-        assertEquals(text, pages.joinToString(""))
-        assertTrue(pages.all { it.length <= 8000 })
-        assertEquals(listOf(""), replyPages(""))
-        assertEquals(listOf("short"), replyPages("short"))
-        assertEquals(text + "new streamed text", replyPages(text + "new streamed text").joinToString(""))
+    @Test fun actionErrorsStayInTheConversationAndOnlyDisconnectsInvalidateDetail() {
+        for (status in listOf<Int?>(409, 422, 429, 503, 504, null)) {
+            val failed = connected.actionFailed(RemoteResult.Failure("Try again", status))
+            assertEquals("Try again", failed.actionError)
+            assertNull(failed.error)
+            assertEquals(status in listOf(409, 422, 429), failed.hasCurrentDetail)
+            assertEquals(connected.detail, failed.detail)
+        }
+        assertNull(connected.actionFailed(RemoteResult.Failure("Expired", 401)).workspace)
+        assertNull(connected.actionFailed(RemoteResult.Failure("Expired", 401)).detail)
+    }
+
+    @Test fun selectedConversationIsPolledWhileNotCurrentAndControlsRecoverWithoutDismissal() = runBlocking {
+        for (status in listOf<Int?>(503, 504, null)) {
+            var current = connected.actionFailed(RemoteResult.Failure("Offline", status))
+            var polls = 0
+            assertFalse(current.hasCurrentDetail)
+            current.refreshSelection({
+                polls++
+                current = current.requestFailed(RemoteResult.Failure("Still offline", status))
+            }, { fail("The selected conversation must be polled") })
+            assertFalse(current.hasCurrentDetail)
+            current.refreshSelection({
+                polls++
+                current = current.detailReceived(connected.detail!!)
+            }, { fail("The selected conversation must be polled") })
+            assertEquals(2, polls)
+            assertTrue(current.hasCurrentDetail)
+            assertNull(current.error)
+        }
+        var sessionPolls = 0
+        RemoteState().refreshSelection({ fail("No conversation selected") }, { sessionPolls++ })
+        assertEquals(1, sessionPolls)
     }
 }

@@ -28,7 +28,16 @@ data class RemoteState(
 
     fun requestFailed(failure: RemoteResult.Failure): RemoteState = if (failure.status == 401) {
         RemoteState(gateway = gateway, controlAddress = controlAddress, error = failure.message)
-    } else copy(error = failure.message, detailCurrent = false, busy = false, loading = false)
+    } else copy(error = failure.message, detailCurrent = detailCurrent && failure.status !in listOf(null, 503, 504), busy = false, loading = false)
+
+    fun actionFailed(failure: RemoteResult.Failure): RemoteState = if (failure.status == 401) requestFailed(failure)
+    else copy(actionError = failure.message, detailCurrent = detailCurrent && failure.status !in listOf(null, 503, 504))
+
+    fun detailReceived(value: SessionDetail) = copy(detail = value, detailCurrent = true, error = null)
+
+    suspend fun refreshSelection(loadDetail: suspend () -> Unit, refreshSessions: suspend () -> Unit) {
+        if (selectedSession != null) loadDetail() else refreshSessions()
+    }
 }
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
@@ -128,7 +137,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             }
             is RemoteResult.Failure -> { if (client === api && deviceReplies.accepts(ticket)) handle(result); return }
         }
-        if (state.value.selectedSession != null) loadDetail() else refreshSessions()
+        state.value.refreshSelection({ loadDetail() }, { refreshSessions() })
     }
 
     fun selectDevice(id: String) { viewModelScope.launch {
@@ -168,7 +177,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val device = state.value.sessionDeviceId ?: return
         val ticket = detailReplies.next()
         when (val result = api.request<SessionDetail>("/api/devices/$device/sessions/${session.id}")) {
-            is RemoteResult.Success -> mutable.update { if (client === api && detailReplies.accepts(ticket) && it.acceptsReply(api.endpoint, device, session.id)) it.copy(detail = result.value, detailCurrent = true, error = null) else it }
+            is RemoteResult.Success -> mutable.update { if (client === api && detailReplies.accepts(ticket) && it.acceptsReply(api.endpoint, device, session.id)) it.detailReceived(result.value) else it }
             is RemoteResult.Failure -> if (client === api && detailReplies.accepts(ticket) && state.value.acceptsReply(api.endpoint, device, session.id)) handle(result)
         }
     }
@@ -218,7 +227,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val input = mapOf("text" to text, "requestId" to requestId) + (model?.let { mapOf("model" to it) } ?: emptyMap())
         return when (val result = api.empty("/api/devices/$device/sessions/${session.id}/messages", body = input)) {
             is RemoteResult.Success -> { loadDetail(); true }
-            is RemoteResult.Failure -> { if (state.value.acceptsReply(api.endpoint, device, session.id)) handle(result); false }
+            is RemoteResult.Failure -> { if (client === api && state.value.acceptsReply(api.endpoint, device, session.id)) handleAction(result); false }
         }
     }
 
@@ -229,7 +238,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val device = state.value.sessionDeviceId ?: return false
         return when (val result = api.empty("/api/devices/$device/sessions/${session.id}/interrupt", body = mapOf("requestId" to requestId))) {
             is RemoteResult.Success -> { loadDetail(); true }
-            is RemoteResult.Failure -> { if (state.value.acceptsReply(api.endpoint, device, session.id)) handle(result); false }
+            is RemoteResult.Failure -> { if (client === api && state.value.acceptsReply(api.endpoint, device, session.id)) handleAction(result); false }
         }
     }
 
@@ -240,7 +249,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val device = state.value.sessionDeviceId ?: return
         when (val result = api.empty("/api/devices/$device/sessions/${session.id}/approvals/${approval.id}", body = mapOf("decision" to decision))) {
             is RemoteResult.Success -> loadDetail()
-            is RemoteResult.Failure -> if (state.value.acceptsReply(api.endpoint, device, session.id)) handle(result)
+            is RemoteResult.Failure -> if (client === api && state.value.acceptsReply(api.endpoint, device, session.id)) handleAction(result)
         }
     }
 
@@ -273,5 +282,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     private fun handle(failure: RemoteResult.Failure) {
         if (failure.status == 401) disconnect()
         mutable.update { it.requestFailed(failure) }
+    }
+    private fun handleAction(failure: RemoteResult.Failure) {
+        if (failure.status == 401) disconnect()
+        mutable.update { it.actionFailed(failure) }
     }
 }

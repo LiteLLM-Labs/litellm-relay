@@ -33,12 +33,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.noties.markwon.Markwon
 import java.util.UUID
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-
-private val markdownParsing = Mutex()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun ConversationScreen(state: RemoteState, model: RemoteViewModel) {
@@ -184,7 +178,6 @@ private val markdownParsing = Mutex()
 
 @Composable private fun ChatMessage(message: Message, agentName: String) {
     var expanded by remember(message.id) { mutableStateOf(false) }
-    var page by remember(message.id) { mutableIntStateOf(0) }
     if (message.role == "activity") {
         Surface(onClick = { expanded = !expanded }, color = Border.copy(alpha = 0.3f), shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -217,21 +210,13 @@ private val markdownParsing = Mutex()
             }
             val context = LocalContext.current
             val markdown = remember(context) { Markwon.create(context) }
-            val pages = remember(message.text) { replyPages(message.text) }
-            val text = pages[page.coerceAtMost(pages.lastIndex)]
+            val text = message.text
             val parsed by produceState<CharSequence>(text, text, markdown) {
                 value = text
-                value = withContext(Dispatchers.Default) {
-                    markdownParsing.withLock { markdown.toMarkdown(text) }
-                }
+                value = parseMarkdown(text) { markdown.toMarkdown(it) }
             }
             AndroidView(factory = { TextView(it).apply { textSize = 15f; setTextColor(Ink.toArgb()); setTextIsSelectable(true); setLineSpacing(6f, 1.08f) } },
                 update = { if (it.tag !== parsed) { it.text = parsed; it.tag = parsed } }, modifier = Modifier.fillMaxWidth())
-            if (pages.size > 1) Row {
-                TextButton(onClick = { page-- }, enabled = page > 0) { Text("Previous") }
-                Text("${page.coerceAtMost(pages.lastIndex) + 1} / ${pages.size}")
-                TextButton(onClick = { page++ }, enabled = page < pages.lastIndex) { Text("Next") }
-            }
         }
     }
 }
