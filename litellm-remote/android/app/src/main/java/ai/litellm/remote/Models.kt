@@ -28,9 +28,13 @@ import kotlinx.serialization.Serializable
 @Serializable data class ModelPage(val models: List<ModelOption>, val nextCursor: String? = null)
 @Serializable data class Message(val id: String, val role: String, val text: String)
 @Serializable data class Approval(val id: String, val title: String, val text: String, val canAccept: Boolean)
+const val EXPIRED_APPROVAL_NOTICE = "Approval expired because the connector restarted. The command didn't run."
+const val EXPIRED_APPROVAL_RETRY = "The connector restarted before I could approve your last command, so it didn't run. Please try it again."
+@Serializable data class ExpiredApproval(val id: String, val tool: String, val summary: String)
 @Serializable data class SessionDetail(
     val session: CodingSession, val messages: List<Message>, val olderMessages: Boolean,
     val error: String? = null, val approvals: List<Approval> = emptyList(),
+    val expiredApproval: ExpiredApproval? = null,
 )
 @Serializable data class LoginStart(val flowToken: String, val code: String, val verificationUrl: String)
 @Serializable data class Team(val id: String, val name: String)

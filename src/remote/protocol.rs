@@ -176,11 +176,21 @@ pub struct Approval {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExpiredApproval {
+    pub id: String,
+    pub tool: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Detail {
     pub session: Session,
     pub messages: Vec<Message>,
     pub older_messages: bool,
     pub approvals: Vec<Approval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expired_approval: Option<ExpiredApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
