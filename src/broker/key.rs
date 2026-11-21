@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -28,9 +28,9 @@ pub struct MintRequest {
 
 impl MintRequest {
     pub fn new(team_id: &str, hostname: &str, now: i64) -> Self {
-        let stamp = DateTime::<Utc>::from_timestamp(now, 0)
-            .map(|at| at.format("%Y%m%dT%H%M%SZ").to_string())
-            .unwrap_or_else(|| now.to_string());
+        let stamp = Timestamp::from_second(now)
+            .map(|at| at.strftime("%Y%m%dT%H%M%SZ").to_string())
+            .unwrap_or_else(|_| now.to_string());
         Self {
             team_id: team_id.to_string(),
             alias: format!("relay-{hostname}-{stamp}"),
@@ -169,14 +169,9 @@ fn parse_extension(reply: Reply) -> Result<ExtendOutcome> {
 }
 
 pub fn parse_expiry(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|at| at.timestamp())
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
-                .ok()
-                .map(|naive| naive.and_utc().timestamp())
-        })
+    crate::datetime::parse(value)
+        .or_else(|| format!("{value}Z").parse::<Timestamp>().ok())
+        .map(|at| at.as_second())
 }
 
 fn excerpt(status: u16, body: &str) -> String {
@@ -188,7 +183,7 @@ fn post(gateway_url: &str, route: &str, bearer: &str, body: Value) -> Result<Rep
     let url = format!("{}{route}", gateway_url.trim_end_matches('/'));
     let bearer = bearer.to_string();
     call(move || async move {
-        let client = reqwest::Client::builder()
+        let client = crate::cert::http_client_builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
             .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECONDS))
             .redirect(reqwest::redirect::Policy::none())

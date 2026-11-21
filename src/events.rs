@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde_json::Value;
 
 use crate::http::{is_sensitive_name, scrub_request_target};
@@ -77,7 +77,7 @@ pub fn redact_event(mut event: Value) -> Value {
     redact_value(&mut event);
     if let Value::Object(map) = &mut event {
         map.entry("captured_at")
-            .or_insert_with(|| Value::String(Utc::now().to_rfc3339()));
+            .or_insert_with(|| Value::String(crate::datetime::rfc3339(Timestamp::now())));
     }
     event
 }

@@ -1,0 +1,5 @@
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/white" />
+    <foreground android:drawable="@drawable/litellm_train" />
+    <monochrome android:drawable="@drawable/litellm_train" />
+</adaptive-icon>

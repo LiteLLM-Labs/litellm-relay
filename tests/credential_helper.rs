@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::{
-    env, fs,
+    fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixListener,
     path::PathBuf,
@@ -19,8 +19,8 @@ const RELAY: &str = env!("CARGO_BIN_EXE_litellm-relay");
 static HOMES: AtomicUsize = AtomicUsize::new(0);
 
 fn scratch_home() -> PathBuf {
-    let home = env::temp_dir().join(format!(
-        "rh-{}-{}",
+    let home = PathBuf::from(format!(
+        "/tmp/rh{}-{}",
         std::process::id(),
         HOMES.fetch_add(1, Ordering::SeqCst)
     ));

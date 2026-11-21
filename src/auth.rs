@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,14 +16,13 @@ const CLI_SOURCE: &str = "litellm-cli";
 const CLI_POLL_SECRET_HEADER: &str = "x-litellm-cli-poll-secret";
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-const PYTHON_DATETIME_FORMATS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.f%:z", "%Y-%m-%d %H:%M:%S%.f%z"];
 
 #[derive(Debug)]
 pub struct GatewayAuth {
     pub api_key: String,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 pub struct GatewaySsoClient {
@@ -32,7 +31,7 @@ pub struct GatewaySsoClient {
 
 impl GatewaySsoClient {
     pub fn new() -> Self {
-        let http_client = reqwest::Client::builder()
+        let http_client = crate::cert::http_client_builder()
             .timeout(Duration::from_secs(10))
             .cookie_store(true)
             .build()
@@ -210,16 +209,9 @@ fn auth_from_poll_result(poll_response: PollResponse) -> Result<GatewayAuth> {
 }
 
 /// Credential expiry as the Gateway reports it, RFC 3339 or Python `str(datetime)` text.
-fn parse_expiry(value: &Value) -> Option<DateTime<Utc>> {
+fn parse_expiry(value: &Value) -> Option<Timestamp> {
     let text = value.as_str()?.trim();
-    DateTime::parse_from_rfc3339(text)
-        .ok()
-        .or_else(|| {
-            PYTHON_DATETIME_FORMATS
-                .iter()
-                .find_map(|format| DateTime::parse_from_str(text, format).ok())
-        })
-        .map(|parsed| parsed.with_timezone(&Utc))
+    crate::datetime::parse(text)
 }
 
 fn normalize_gateway_url(gateway_url: &str) -> Result<String> {
@@ -374,17 +366,26 @@ mod tests {
     #[test]
     fn should_parse_rfc3339_expiry() {
         let expiry = parse_expiry(&Value::String("2026-09-21T22:27:58.096Z".into())).unwrap();
-        assert_eq!(expiry.to_rfc3339(), "2026-09-21T22:27:58.096+00:00");
+        assert_eq!(
+            crate::datetime::rfc3339(expiry),
+            "2026-09-21T22:27:58.096+00:00"
+        );
     }
 
     #[test]
     fn should_parse_python_datetime_expiry() {
         let expiry =
             parse_expiry(&Value::String("2026-09-21 22:27:58.096000+00:00".into())).unwrap();
-        assert_eq!(expiry.to_rfc3339(), "2026-09-21T22:27:58.096+00:00");
+        assert_eq!(
+            crate::datetime::rfc3339(expiry),
+            "2026-09-21T22:27:58.096+00:00"
+        );
 
         let offset = parse_expiry(&Value::String("2026-09-22 00:27:58+02:00".into())).unwrap();
-        assert_eq!(offset.to_rfc3339(), "2026-09-21T22:27:58+00:00");
+        assert_eq!(
+            crate::datetime::rfc3339(offset),
+            "2026-09-21T22:27:58+00:00"
+        );
     }
 
     #[test]
@@ -409,7 +410,7 @@ mod tests {
         .unwrap();
         let auth = auth_from_poll_result(poll_response).unwrap();
         assert_eq!(
-            auth.expires_at.map(|at| at.to_rfc3339()),
+            auth.expires_at.map(crate::datetime::rfc3339),
             Some("2026-09-21T22:27:58.096+00:00".to_string())
         );
     }

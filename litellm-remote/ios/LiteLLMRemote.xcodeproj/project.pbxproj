@@ -1,0 +1,547 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0375118121BB6A17F5B4FA86 /* LiteLLMRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2DD63CC0C12C4DB06BCDC4B /* LiteLLMRemoteApp.swift */; };
+		046B4A0BD9155FEDA1F1BDDD /* RemoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F7629045C8E3822363E45B /* RemoteStore.swift */; };
+		07BA0B390E988486EE637582 /* DeviceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23002AD1A66750DDE13B0A1C /* DeviceViews.swift */; };
+		0CE958620626E09804E4193D /* SessionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99525DFBF30EDD5B995C1393 /* SessionViews.swift */; };
+		2ED1A11EBAF3FE6F4D7ADC58 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3DD3A4062935FC23761757F3 /* Assets.xcassets */; };
+		4BCB309597C99B89C241E35A /* NewSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFD09203FFA515AA1FF9E56E /* NewSessionView.swift */; };
+		77C2AF94471E8D5205538B41 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81636B9DC1927B76F84E0A5C /* Models.swift */; };
+		7DFAF3E4CE9A0A140503FC2F /* SessionVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 576637DE9C9CB401D6191F50 /* SessionVault.swift */; };
+		B353C6980210EEDEBDB8C89B /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */; };
+		D0ABFF0C2836B6049E25B888 /* RemoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */; };
+		E59607B355EBC8011B403D33 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CFCC18FB031202D1C353E36 /* Components.swift */; };
+		EA7E62F87CDD71D60ADFB54B /* StreamingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74034B9D27BB10A5D244E7E5 /* StreamingTests.swift */; };
+		FC005057BCECF27F78FE8D32 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		164F9484E5CDEB7C32154194 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CBBEA23A99DDC45E9540E792 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 745EC38EBF1C163381FFC485;
+			remoteInfo = LiteLLMRemote;
+		};
+		850A2CAA5E6E7CB70C1E46E7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CBBEA23A99DDC45E9540E792 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 745EC38EBF1C163381FFC485;
+			remoteInfo = LiteLLMRemote;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		00F4295C283EF3A7F83C8BD6 /* LiteLLMRemoteTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = LiteLLMRemoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		23002AD1A66750DDE13B0A1C /* DeviceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceViews.swift; sourceTree = "<group>"; };
+		2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTests.swift; sourceTree = "<group>"; };
+		25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		2D9E4A891D46E6592FC97DF6 /* LiteLLMRemoteUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = LiteLLMRemoteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3DD3A4062935FC23761757F3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		4CFCC18FB031202D1C353E36 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		576637DE9C9CB401D6191F50 /* SessionVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVault.swift; sourceTree = "<group>"; };
+		65F7629045C8E3822363E45B /* RemoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStore.swift; sourceTree = "<group>"; };
+		74034B9D27BB10A5D244E7E5 /* StreamingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingTests.swift; sourceTree = "<group>"; };
+		81636B9DC1927B76F84E0A5C /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LiteLLMRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		99525DFBF30EDD5B995C1393 /* SessionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionViews.swift; sourceTree = "<group>"; };
+		AFD09203FFA515AA1FF9E56E /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
+		B2DD63CC0C12C4DB06BCDC4B /* LiteLLMRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiteLLMRemoteApp.swift; sourceTree = "<group>"; };
+		C49FD3722DBA7F3ABA2F0F83 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		000C151A937B6578F335EB03 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */,
+				00F4295C283EF3A7F83C8BD6 /* LiteLLMRemoteTests.xctest */,
+				2D9E4A891D46E6592FC97DF6 /* LiteLLMRemoteUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1AE82CEFA6F574C99B50DA41 /* LiteLLMRemote */ = {
+			isa = PBXGroup;
+			children = (
+				3DD3A4062935FC23761757F3 /* Assets.xcassets */,
+				4CFCC18FB031202D1C353E36 /* Components.swift */,
+				E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */,
+				25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */,
+				23002AD1A66750DDE13B0A1C /* DeviceViews.swift */,
+				C49FD3722DBA7F3ABA2F0F83 /* Info.plist */,
+				B2DD63CC0C12C4DB06BCDC4B /* LiteLLMRemoteApp.swift */,
+				81636B9DC1927B76F84E0A5C /* Models.swift */,
+				AFD09203FFA515AA1FF9E56E /* NewSessionView.swift */,
+				65F7629045C8E3822363E45B /* RemoteStore.swift */,
+				576637DE9C9CB401D6191F50 /* SessionVault.swift */,
+				99525DFBF30EDD5B995C1393 /* SessionViews.swift */,
+			);
+			path = LiteLLMRemote;
+			sourceTree = "<group>";
+		};
+		6C592265084C25AC60794DA7 = {
+			isa = PBXGroup;
+			children = (
+				1AE82CEFA6F574C99B50DA41 /* LiteLLMRemote */,
+				D230B4D3A86FB139F38833F7 /* Tests */,
+				ED15A7C24D54617C2FFE8900 /* UITests */,
+				000C151A937B6578F335EB03 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D230B4D3A86FB139F38833F7 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		ED15A7C24D54617C2FFE8900 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				74034B9D27BB10A5D244E7E5 /* StreamingTests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		745EC38EBF1C163381FFC485 /* LiteLLMRemote */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 74E46387AA0E8BC22345D7E2 /* Build configuration list for PBXNativeTarget "LiteLLMRemote" */;
+			buildPhases = (
+				E8FA17CBCA8C7D24F181F5C7 /* Sources */,
+				739BCEE7E165F544553DF6BD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LiteLLMRemote;
+			packageProductDependencies = (
+			);
+			productName = LiteLLMRemote;
+			productReference = 92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */;
+			productType = "com.apple.product-type.application";
+		};
+		AEBF89F200554F45B75A996B /* LiteLLMRemoteUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 15399F3B69D66A32874FEBF3 /* Build configuration list for PBXNativeTarget "LiteLLMRemoteUITests" */;
+			buildPhases = (
+				045107D79A661C97C29C1E54 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				281CC15C00A16B54566C2259 /* PBXTargetDependency */,
+			);
+			name = LiteLLMRemoteUITests;
+			packageProductDependencies = (
+			);
+			productName = LiteLLMRemoteUITests;
+			productReference = 2D9E4A891D46E6592FC97DF6 /* LiteLLMRemoteUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		C5E8B72DEC1767EB9A7075CA /* LiteLLMRemoteTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E5EC71B70CED721C04DFF1A6 /* Build configuration list for PBXNativeTarget "LiteLLMRemoteTests" */;
+			buildPhases = (
+				B75130F3EBF37D672CD0671E /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A293DA9F05A92B74CA731058 /* PBXTargetDependency */,
+			);
+			name = LiteLLMRemoteTests;
+			packageProductDependencies = (
+			);
+			productName = LiteLLMRemoteTests;
+			productReference = 00F4295C283EF3A7F83C8BD6 /* LiteLLMRemoteTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CBBEA23A99DDC45E9540E792 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					745EC38EBF1C163381FFC485 = {
+						ProvisioningStyle = Automatic;
+					};
+					AEBF89F200554F45B75A996B = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 745EC38EBF1C163381FFC485;
+					};
+					C5E8B72DEC1767EB9A7075CA = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = B609D29F40DE3AA868FB8ECA /* Build configuration list for PBXProject "LiteLLMRemote" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 6C592265084C25AC60794DA7;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 000C151A937B6578F335EB03 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				745EC38EBF1C163381FFC485 /* LiteLLMRemote */,
+				C5E8B72DEC1767EB9A7075CA /* LiteLLMRemoteTests */,
+				AEBF89F200554F45B75A996B /* LiteLLMRemoteUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		739BCEE7E165F544553DF6BD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2ED1A11EBAF3FE6F4D7ADC58 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		045107D79A661C97C29C1E54 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EA7E62F87CDD71D60ADFB54B /* StreamingTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B75130F3EBF37D672CD0671E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D0ABFF0C2836B6049E25B888 /* RemoteTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E8FA17CBCA8C7D24F181F5C7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E59607B355EBC8011B403D33 /* Components.swift in Sources */,
+				B353C6980210EEDEBDB8C89B /* ConnectionView.swift in Sources */,
+				FC005057BCECF27F78FE8D32 /* ConversationView.swift in Sources */,
+				07BA0B390E988486EE637582 /* DeviceViews.swift in Sources */,
+				0375118121BB6A17F5B4FA86 /* LiteLLMRemoteApp.swift in Sources */,
+				77C2AF94471E8D5205538B41 /* Models.swift in Sources */,
+				4BCB309597C99B89C241E35A /* NewSessionView.swift in Sources */,
+				046B4A0BD9155FEDA1F1BDDD /* RemoteStore.swift in Sources */,
+				7DFAF3E4CE9A0A140503FC2F /* SessionVault.swift in Sources */,
+				0CE958620626E09804E4193D /* SessionViews.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		281CC15C00A16B54566C2259 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 745EC38EBF1C163381FFC485 /* LiteLLMRemote */;
+			targetProxy = 164F9484E5CDEB7C32154194 /* PBXContainerItemProxy */;
+		};
+		A293DA9F05A92B74CA731058 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 745EC38EBF1C163381FFC485 /* LiteLLMRemote */;
+			targetProxy = 850A2CAA5E6E7CB70C1E46E7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		5C45604DCE2FA1FAED833D32 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = LiteLLMRemote/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		6DD58891D6495C9F3AFDDBAA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = LiteLLMRemote;
+			};
+			name = Debug;
+		};
+		8D95D2A923FA84375747D5D0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		CC20ADF79509AE62D9F6F65E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LiteLLMRemote.app/LiteLLMRemote";
+			};
+			name = Debug;
+		};
+		E006252AC81C3F09E690DE3B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		F7C3A50A9CC1DABA41A7F418 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = LiteLLMRemote/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FD72D13D388F008EA4FA7C17 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LiteLLMRemote.app/LiteLLMRemote";
+			};
+			name = Release;
+		};
+		FE4988C58C94CF6499959B16 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = LiteLLMRemote;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		15399F3B69D66A32874FEBF3 /* Build configuration list for PBXNativeTarget "LiteLLMRemoteUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6DD58891D6495C9F3AFDDBAA /* Debug */,
+				FE4988C58C94CF6499959B16 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		74E46387AA0E8BC22345D7E2 /* Build configuration list for PBXNativeTarget "LiteLLMRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F7C3A50A9CC1DABA41A7F418 /* Debug */,
+				5C45604DCE2FA1FAED833D32 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B609D29F40DE3AA868FB8ECA /* Build configuration list for PBXProject "LiteLLMRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E006252AC81C3F09E690DE3B /* Debug */,
+				8D95D2A923FA84375747D5D0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E5EC71B70CED721C04DFF1A6 /* Build configuration list for PBXNativeTarget "LiteLLMRemoteTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC20ADF79509AE62D9F6F65E /* Debug */,
+				FD72D13D388F008EA4FA7C17 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = CBBEA23A99DDC45E9540E792 /* Project object */;
+}

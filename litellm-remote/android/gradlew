@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+REMOTE_APP_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+REMOTE_JAVA_BIN=java
+if [ -n "${JAVA_HOME:-}" ]; then REMOTE_JAVA_BIN="$JAVA_HOME/bin/java"; fi
+exec "$REMOTE_JAVA_BIN" -classpath "$REMOTE_APP_DIR/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"

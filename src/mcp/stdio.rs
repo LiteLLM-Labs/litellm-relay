@@ -539,7 +539,6 @@ pub async fn run_mcp(socket: PathBuf) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use std::{
-        env,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -714,9 +713,8 @@ mod tests {
     }
 
     fn socket_in_temp_dir() -> PathBuf {
-        let dir = env::temp_dir().join(format!("rmcp-{}", Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir.join("mcp.sock")
+        let id = Uuid::new_v4().simple().to_string();
+        PathBuf::from(format!("/tmp/m{id:.8}.sock"))
     }
 
     async fn connect(

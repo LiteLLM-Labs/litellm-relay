@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -31,7 +31,7 @@ pub struct GatewayClient {
 #[derive(Clone)]
 struct CachedCredentialCheck {
     cached_at: Instant,
-    checked_at: DateTime<Utc>,
+    checked_at: Timestamp,
     gateway_url: String,
     api_key: String,
     check: CredentialCheck,
@@ -86,7 +86,7 @@ impl CredentialCache {
         let check = check_credential(&self.http, gateway_url, api_key).await;
         CachedCredentialCheck {
             cached_at: Instant::now(),
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
             gateway_url: gateway_url.to_string(),
             api_key: api_key.to_string(),
             check,
@@ -139,7 +139,7 @@ impl CredentialCache {
 impl GatewayClient {
     pub fn new(config: Arc<RelayConfig>) -> Self {
         let timeout = Duration::from_secs_f64(config.request_timeout_seconds);
-        let http_client = reqwest::Client::builder()
+        let http_client = crate::cert::http_client_builder()
             .timeout(timeout)
             .build()
             .expect("reqwest client configuration should be valid");
@@ -181,7 +181,7 @@ impl GatewayClient {
                 self.config.gateway_expires_at,
             ),
         };
-        let expiry = expiry_state(expires_at, Utc::now());
+        let expiry = expiry_state(expires_at, Timestamp::now());
         let Some(api_key) = api_key else {
             return CredentialStatus {
                 configured: false,
@@ -322,8 +322,8 @@ fn build_collector_payload(capture: &CaptureIngest) -> Value {
                 "total_tokens": 0,
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
-                "startTime": capture.started_at.to_rfc3339(),
-                "endTime": capture.ended_at.to_rfc3339(),
+                "startTime": crate::datetime::rfc3339(capture.started_at),
+                "endTime": crate::datetime::rfc3339(capture.ended_at),
                 "request_duration_ms": capture.duration_ms,
                 "status": status,
                 "request_tags": ["litellm-relay", app],
@@ -359,8 +359,8 @@ pub struct CaptureIngest {
     pub attribution: AppAttribution,
     pub method: String,
     pub path: String,
-    pub started_at: DateTime<Utc>,
-    pub ended_at: DateTime<Utc>,
+    pub started_at: Timestamp,
+    pub ended_at: Timestamp,
     pub request_payload: Value,
     pub response_payload: Value,
     pub duration_ms: u64,
@@ -379,9 +379,9 @@ pub struct IngestResult {
 pub struct CredentialStatus {
     pub configured: bool,
     pub check: Option<CredentialCheck>,
-    pub checked_at: Option<DateTime<Utc>>,
-    pub enrolled_at: Option<DateTime<Utc>>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub checked_at: Option<Timestamp>,
+    pub enrolled_at: Option<Timestamp>,
+    pub expires_at: Option<Timestamp>,
     pub expiry: ExpiryState,
 }
 
@@ -407,9 +407,9 @@ impl CredentialStatus {
             "configured": self.configured,
             "state": state,
             "detail": detail,
-            "checked_at": self.checked_at.map(|at| at.to_rfc3339()),
-            "enrolled_at": self.enrolled_at.map(|at| at.to_rfc3339()),
-            "expires_at": self.expires_at.map(|at| at.to_rfc3339()),
+            "checked_at": self.checked_at.map(crate::datetime::rfc3339),
+            "enrolled_at": self.enrolled_at.map(crate::datetime::rfc3339),
+            "expires_at": self.expires_at.map(crate::datetime::rfc3339),
             "expiry": expiry,
         })
     }
@@ -450,14 +450,14 @@ fn build_shadow_payload(event: &Value, config: &RelayConfig, event_id: &str) -> 
             "event_id": event_id,
             "host_hash": host_hash,
             "method": method,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": crate::datetime::rfc3339(Timestamp::now()),
         },
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
+    use jiff::Timestamp;
     use serde_json::json;
 
     use super::*;
@@ -468,9 +468,9 @@ mod tests {
 
     #[test]
     fn should_include_destination_and_process_attribution_in_collector_metadata() {
-        let timestamp = DateTime::parse_from_rfc3339("2026-07-13T00:00:00Z")
-            .expect("timestamp should parse")
-            .with_timezone(&Utc);
+        let timestamp = "2026-07-13T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("timestamp should parse");
         let capture = CaptureIngest {
             event_id: "event-1".into(),
             host: "api.openai.com".into(),
@@ -500,10 +500,8 @@ mod tests {
         assert_eq!(metadata["traffic_reason"], "openai_api_path");
     }
 
-    fn at(rfc3339: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(rfc3339)
-            .unwrap()
-            .with_timezone(&Utc)
+    fn at(rfc3339: &str) -> Timestamp {
+        rfc3339.parse::<jiff::Timestamp>().unwrap()
     }
 
     #[test]
@@ -691,7 +689,7 @@ mod tests {
 
         let stale_probe = CachedCredentialCheck {
             cached_at: Instant::now(),
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
             gateway_url: gateway.clone(),
             api_key: "sk-old".to_string(),
             check: CredentialCheck::Rejected {
@@ -705,7 +703,7 @@ mod tests {
 
         let fresh_probe = CachedCredentialCheck {
             cached_at: Instant::now(),
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
             gateway_url: gateway.clone(),
             api_key: "sk-new".to_string(),
             check: CredentialCheck::Rejected {

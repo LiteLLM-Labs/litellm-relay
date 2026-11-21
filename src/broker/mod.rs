@@ -23,7 +23,7 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -68,7 +68,7 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> i64 {
-        Utc::now().timestamp()
+        Timestamp::now().as_second()
     }
 }
 
@@ -380,9 +380,9 @@ fn with_ok(body: serde_json::Result<Value>) -> Value {
 }
 
 pub fn rfc3339(timestamp: i64) -> String {
-    DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_else(|| timestamp.to_string())
+    Timestamp::from_second(timestamp)
+        .map(|at| at.to_string())
+        .unwrap_or_else(|_| timestamp.to_string())
 }
 
 #[derive(Clone, PartialEq, Eq)]

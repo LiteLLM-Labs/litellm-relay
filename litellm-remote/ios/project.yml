@@ -1,0 +1,67 @@
+name: LiteLLMRemote
+options:
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  LiteLLMRemote:
+    type: application
+    platform: iOS
+    sources:
+      - LiteLLMRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.litellm.remote.v0
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: LiteLLMRemote/Info.plist
+      properties:
+        CFBundleDisplayName: LiteLLM Remote
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+  LiteLLMRemoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: LiteLLMRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.litellm.remote.v0.tests
+        GENERATE_INFOPLIST_FILE: YES
+  LiteLLMRemoteUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: LiteLLMRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.litellm.remote.v0.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  LiteLLMRemote:
+    build:
+      targets:
+        LiteLLMRemote: all
+    test:
+      targets:
+        - LiteLLMRemoteTests
+        - LiteLLMRemoteUITests

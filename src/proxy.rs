@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use jiff::Timestamp;
 use rustls::pki_types::ServerName;
 use serde_json::{json, Value};
 use tokio::{
@@ -525,7 +525,7 @@ impl RelayProxy {
             };
             bytes_out += request.raw.len();
             let capture_event_id = Uuid::new_v4().to_string();
-            let request_started_at = Utc::now();
+            let request_started_at = Timestamp::now();
             let request_started = Instant::now();
             let request_line = parse_request_line(&request.header_text);
             let request_path = scrub_request_target(&request_line.path);
@@ -716,7 +716,7 @@ impl RelayProxy {
                         method: request_line.method.clone(),
                         path: request_path.clone(),
                         started_at: request_started_at,
-                        ended_at: Utc::now(),
+                        ended_at: Timestamp::now(),
                         request_payload,
                         response_payload,
                         duration_ms: request_started.elapsed().as_millis() as u64,

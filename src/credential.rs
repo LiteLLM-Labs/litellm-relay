@@ -2,11 +2,11 @@
 
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use reqwest::StatusCode;
 use serde_json::Value;
 
-pub const EXPIRY_WARNING_WINDOW: Duration = Duration::hours(24);
+pub const EXPIRY_WARNING_WINDOW: SignedDuration = SignedDuration::from_secs(86_400);
 pub const REENROLL_HINT: &str = "Run `litellm-relay setup` to sign in again.";
 pub const CREDENTIAL_CHECK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
@@ -28,14 +28,14 @@ pub enum CredentialCheck {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExpiryState {
     Unknown,
-    Ok { at: DateTime<Utc> },
-    ExpiringSoon { at: DateTime<Utc> },
-    Expired { at: DateTime<Utc> },
+    Ok { at: Timestamp },
+    ExpiringSoon { at: Timestamp },
+    Expired { at: Timestamp },
 }
 
 /// HTTP client for credential probes, bounded so a silent Gateway never hangs a caller.
 pub fn check_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::cert::http_client_builder()
         .timeout(CREDENTIAL_CHECK_TIMEOUT)
         .build()
         .expect("reqwest client configuration should be valid")
@@ -90,7 +90,7 @@ fn gateway_message(body: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-pub fn expiry_state(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> ExpiryState {
+pub fn expiry_state(expires_at: Option<Timestamp>, now: Timestamp) -> ExpiryState {
     let Some(at) = expires_at else {
         return ExpiryState::Unknown;
     };
@@ -198,10 +198,8 @@ mod tests {
     const EXPIRED_KEY_BODY: &str = r#"{"error":{"message":"Authentication Error - Expired Key. Key Expiry time 2026-09-21 22:27:58.096000+00:00 and current time 2026-09-21 22:28:15.211000+00:00","type":"expired_key","code":"401"}}"#;
     const ROUTE_NOT_ALLOWED_BODY: &str = r#"{"detail":"Virtual key is not allowed to call this route. Only allowed to call routes: ['/chat/completions', '/v1/chat/completions']. Tried to call route: /v1/models"}"#;
 
-    fn at(rfc3339: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(rfc3339)
-            .unwrap()
-            .with_timezone(&Utc)
+    fn at(rfc3339: &str) -> Timestamp {
+        rfc3339.parse::<jiff::Timestamp>().unwrap()
     }
 
     #[tokio::test]

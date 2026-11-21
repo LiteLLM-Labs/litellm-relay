@@ -171,6 +171,7 @@ async fn connect(target: &GatewayTarget) -> Result<Connection, UpstreamError> {
             credential,
         )]))
         .max_concurrent_requests(usize::MAX);
+    crate::cert::install_default_crypto_provider();
     let transport = StreamableHttpClientTransport::from_config(config);
     let refused_response = refused_response_reader(&transport);
     ().serve(transport)

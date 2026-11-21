@@ -68,6 +68,26 @@ jobs:
       - name: Test
         run: swift test --package-path macos/RelayBarGlass
 
+  remote-ios:
+    name: Remote iOS tests
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on iPhone 17
+        working-directory: litellm-remote/ios
+        run: |
+          device=$(xcrun simctl list -j devices available | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
+          print(next(device["udid"] for device in devices if device["name"] == "iPhone 17"))
+          ')
+          xcrun simctl bootstatus "$device" -b
+          xcodebuild -project LiteLLMRemote.xcodeproj -scheme LiteLLMRemote \
+            -destination "id=$device" -parallel-testing-enabled NO CODE_SIGN_IDENTITY=- test -quiet
+
   proxy-smoke:
     name: Proxy/TLS smoke
     runs-on: ubuntu-latest
