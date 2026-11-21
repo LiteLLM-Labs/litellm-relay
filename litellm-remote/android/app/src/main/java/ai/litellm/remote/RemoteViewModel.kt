@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class RemoteState(
     val gateway: String = "", val controlAddress: String = "", val endpoint: String = "",
@@ -63,6 +65,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     private var token: String? = null
     private var refreshToken: String? = null
     private var accessExpiresAt: Long = 0
+    private val refreshMutex = Mutex()
     private val detailReplies = ReplyGate()
     private val sessionReplies = ReplyGate()
     private val deviceReplies = ReplyGate()
@@ -351,25 +354,23 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun refreshAccess(): Boolean {
         val refresh = refreshToken ?: return false
         val api = client ?: return false
-        return when (val result = api.request<LoginPoll>("/api/auth/refresh", "POST", mapOf("refreshToken" to refresh), retry = false)) {
-            is RemoteResult.Success -> {
-                val access = result.value.token ?: return false
-                val next = result.value.refreshToken ?: return false
-                if (!vault.save(state.value.endpoint, next)) return false
-                refreshToken = next
-                token = access
-                accessExpiresAt = result.value.expiresAt ?: 0L
-                true
-            }
-            is RemoteResult.Failure -> {
-                if (result.status == 401) {
-                    refreshToken = null
-                    token = null
-                    accessExpiresAt = 0
-                    vault.remove(state.value.endpoint)
-                    forgetRefresh(state.value.endpoint)
+        return refreshMutex.withLock {
+            if (client !== api) return@withLock false
+            if (refreshToken != refresh) return@withLock token != null
+            when (val result = api.refreshSession(refresh)) {
+                is RemoteResult.Success -> {
+                    if (refreshToken != refresh) return@withLock token != null
+                    val next = result.value.refreshToken
+                    refreshToken = next
+                    token = result.value.token
+                    accessExpiresAt = result.value.expiresAt
+                    vault.save(state.value.endpoint, next)
+                    true
                 }
-                false
+                is RemoteResult.Failure -> {
+                    if (client === api && refreshToken == refresh && result.status == 401) disconnect()
+                    false
+                }
             }
         }
     }
