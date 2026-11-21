@@ -29,6 +29,314 @@ use super::{
 
 struct Directory(PathBuf);
 
+#[tokio::test]
+async fn claude_supervisor_restart_approvals_permissions_lock_and_eviction() {
+    use claude::supervisor::{Client, Request, Server as Supervisor};
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::AsyncWriteExt;
+
+    let directory = Directory::new();
+    let relay = serve(Router::new().route("/api/status", get(|| async {
+        Json(json!({"runtime":"rust","gateway_url":"https://gateway.example.test","broker":{"gateway_url":"https://gateway.example.test"}}))
+    }))).await;
+    let home = directory.0.join("config");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        json!({"env":{"ANTHROPIC_BASE_URL":relay.url},"apiKeyHelper":"relay credential --proxy"})
+            .to_string(),
+    )
+    .unwrap();
+    let script = directory.0.join("claude-fixture");
+    std::fs::write(&script, r#"#!/usr/bin/python3
+import json, pathlib, os, sys
+if sys.argv[1:] == ['agents', '--json']:
+    print('[]')
+    sys.exit(0)
+home = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+session = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith(('--session-id=', '--resume=')))
+def emit(value):
+    print(json.dumps(value), flush=True)
+for line in sys.stdin:
+    value = json.loads(line)
+    if value['type'] == 'control_request':
+        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
+    elif value['type'] == 'user':
+        emit({'type':'system','subtype':'init','session_id':session})
+        if value['message']['content'] == 'idle':
+            emit({'type':'result','subtype':'success','session_id':session})
+        else:
+            emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Edit','input':{'file_path':'fixture.txt'}}})
+    elif value['type'] == 'control_response':
+        if value['response']['response']['behavior'] == 'allow':
+            with (home / 'tools').open('a') as log:
+                log.write(session + '\n')
+        emit({'type':'result','subtype':'success','session_id':session})
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let claude = Arc::new(claude::Claude::new(
+        script,
+        home.clone(),
+        directory.0.join("grants"),
+        Url::parse("https://gateway.example.test").unwrap(),
+    ));
+    let socket = directory.0.join("private/supervisor.sock");
+    std::fs::create_dir(socket.parent().unwrap()).unwrap();
+    std::fs::write(&socket, "stale").unwrap();
+    let server = Supervisor::bind(&socket).unwrap().unwrap();
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(socket.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(Supervisor::bind(&socket).unwrap().is_none());
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    let hosted = claude.clone();
+    let task = tokio::spawn(server.serve(hosted, false, async {
+        let _ = shutdown.await;
+    }));
+    let fresh = || Client::new(socket.clone(), false, None);
+    assert_eq!(
+        fresh().call(Request::Hello).await.unwrap()["pid"],
+        std::process::id()
+    );
+    assert_eq!(fresh().call(Request::List).await.unwrap(), json!([]));
+    assert_eq!(
+        fresh()
+            .call(Request::Read { id: Uuid::new_v4() })
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert_eq!(
+        fresh()
+            .call(Request::Create {
+                cwd: "relative".into()
+            })
+            .await
+            .unwrap_err()
+            .status,
+        400
+    );
+    let mut ids = Vec::new();
+    for decision in [Decision::Accept, Decision::Decline] {
+        let a = fresh();
+        let session = a
+            .call(Request::Create {
+                cwd: directory.0.to_str().unwrap().into(),
+            })
+            .await
+            .unwrap();
+        let (_, id) = protocol::split_session(session["id"].as_str().unwrap()).unwrap();
+        ids.push(id);
+        a.call(Request::Send {
+            id,
+            text: "approve".into(),
+            model: None,
+        })
+        .await
+        .unwrap();
+        let approval = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let detail = a.call(Request::Read { id }).await.unwrap();
+                if let Some(approval) = detail["approvals"][0]["id"].as_str() {
+                    break Uuid::parse_str(approval).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(a);
+        let b = fresh();
+        assert_eq!(
+            b.call(Request::Read { id }).await.unwrap()["approvals"][0]["id"],
+            approval.to_string()
+        );
+        assert_eq!(
+            b.call(Request::Handoff { id }).await.unwrap_err().status,
+            409
+        );
+        b.call(Request::Approve {
+            id,
+            approval,
+            decision,
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if b.call(Request::Read { id }).await.unwrap()["session"]["status"] == "ready" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let failure = b
+            .call(Request::Approve {
+                id,
+                approval,
+                decision,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.status, 409);
+        assert!(failure.error.contains("already resolved"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join("tools")).unwrap(),
+        format!("{}\n", ids[0])
+    );
+    // Fill four idle slots, touch the first again, then evict the older second.
+    for _ in 0..2 {
+        let session = claude.create(directory.0.to_str().unwrap().into()).unwrap();
+        let (_, id) = protocol::split_session(&session.id).unwrap();
+        ids.push(id);
+        claude.send(id, "idle".into(), None).await.unwrap();
+    }
+    claude.send(ids[0], "idle".into(), None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut idle = true;
+            for id in &ids {
+                idle &= claude.read(*id).await.unwrap().session.status == "ready";
+            }
+            if idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let fifth = claude.create(directory.0.to_str().unwrap().into()).unwrap();
+    let (_, fifth) = protocol::split_session(&fifth.id).unwrap();
+    claude.send(fifth, "approve".into(), None).await.unwrap();
+    assert!(claude.has_open_run(ids[0]));
+    assert!(!claude.has_open_run(ids[1]));
+    for id in [ids[0], ids[2], ids[3]] {
+        claude.send(id, "approve".into(), None).await.unwrap();
+    }
+    let sixth = claude.create(directory.0.to_str().unwrap().into()).unwrap();
+    let (_, sixth) = protocol::split_session(&sixth.id).unwrap();
+    let error = claude.send(sixth, "idle".into(), None).await.unwrap_err();
+    assert_eq!(error.status, 429);
+    assert!(error.error.contains("busy"));
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let detail = fresh().call(Request::Read { id: fifth }).await.unwrap();
+            if let Some(id) = detail["approvals"][0]["id"].as_str() {
+                break Uuid::parse_str(id).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A disconnected approval request must still complete.
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let mut bytes = serde_json::to_vec(&Request::Approve {
+        id: fifth,
+        approval,
+        decision: Decision::Accept,
+    })
+    .unwrap();
+    bytes.push(b'\n');
+    stream.write_all(&bytes).await.unwrap();
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fresh().call(Request::Read { id: fifth }).await.unwrap()["session"]["status"]
+                == "ready"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(home.join("tools")).unwrap(),
+        format!("{}\n{fifth}\n", ids[0])
+    );
+    assert_eq!(
+        fresh()
+            .call(Request::Approve {
+                id: fifth,
+                approval,
+                decision: Decision::Accept
+            })
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    assert!(!claude.has_open_runs());
+    assert!(Supervisor::bind(&socket).unwrap().is_some());
+    let missing = Client::new(directory.0.join("missing.sock"), false, None);
+    assert_eq!(missing.call(Request::Hello).await.unwrap_err().status, 503);
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_supervisor_rejects_bad_frames_and_exits_when_idle() {
+    use claude::supervisor::{Client, Request, Server as Supervisor};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let directory = Directory::new();
+    let socket = directory.0.join("private/supervisor.sock");
+    let server = Supervisor::bind(&socket).unwrap().unwrap();
+    let claude = Arc::new(claude::Claude::new(
+        "unused".into(),
+        directory.0.clone(),
+        directory.0.join("grants"),
+        Url::parse("https://gateway.example.test").unwrap(),
+    ));
+    let task = tokio::spawn(server.serve(claude, true, std::future::pending()));
+    let client = Client::new(socket.clone(), false, None);
+    client.call(Request::Hello).await.unwrap();
+    for frame in [b"not json\n".as_slice(), b"{}".as_slice()] {
+        let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        stream.write_all(frame).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Outcome>(&line)
+                .unwrap()
+                .into_result()
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    assert_eq!(
+        client
+            .call(Request::Send {
+                id: Uuid::new_v4(),
+                text: "x".repeat(8 * 1024 * 1024),
+                model: None
+            })
+            .await
+            .unwrap_err()
+            .status,
+        400
+    );
+    tokio::time::advance(Duration::from_secs(901)).await;
+    task.await.unwrap().unwrap();
+}
+
 impl Directory {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("remote-{}", Uuid::new_v4()));

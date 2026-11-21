@@ -70,7 +70,7 @@ For a Relay-managed inference endpoint, inherited gateway keys are removed from 
 
 ### Provision the VM and install the tools
 
-Provision a separate Linux VM with systemd and persistent storage for each person. Configure it to boot after maintenance and stay running when nobody is logged in. Give the user an unprivileged account and use that account for installation, pairing, and both services. Allow outbound HTTPS to the control service, gateway, and source control. Open no inbound Relay port on the VM. Use your normal restricted administrative access for maintenance.
+Provision a separate Linux VM with systemd and persistent storage for each person. Configure it to boot after maintenance and stay running when nobody is logged in. Give the user an unprivileged account and use that account for installation, pairing, and all three services. Allow outbound HTTPS to the control service, gateway, and source control. Open no inbound Relay port on the VM. Use your normal restricted administrative access for maintenance.
 
 Install native Claude Code using its supported Linux installer and install Codex using its supported Linux distribution. The Codex release must support `codex app-server daemon start`. Install `git`, `jq`, and the Relay build for the VM's architecture. If installing Relay from source, run these commands from the repository root on the VM under the host account:
 
@@ -131,9 +131,9 @@ relay remote pair --url https://remote.example.com --name "Always-on Linux host"
 
 Pairing writes the device credential to `~/.litellm-relay/remote/device.json` for this OS user. Do not copy it to another VM. Pairing does not start the connector. If replacing an existing device, remove the old entry through the app so its credential is revoked.
 
-### Supervise Codex and Relay with systemd
+### Supervise Codex, Claude, and Relay with systemd
 
-Run `mkdir -p ~/.config/systemd/user` and put each unit below in its own file. Keep the same `CODEX_HOME`, user, and gateway key configuration for both services. Codex writes a JSON PID file, so the unit extracts the process ID into the plain file systemd expects.
+Run `mkdir -p ~/.config/systemd/user` and put each unit below in its own file. Keep the same `CODEX_HOME`, user, and gateway key configuration for all three services. Codex writes a JSON PID file, so the unit extracts the process ID into the plain file systemd expects.
 
 ```ini
 # litellm-remote-codex.service
@@ -156,17 +156,33 @@ WantedBy=default.target
 ```
 
 ```ini
+# litellm-remote-claude.service
+[Unit]
+Description=Claude supervisor for LiteLLM Remote
+
+[Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/litellm-remote/host.env
+ExecStart=%h/.local/bin/relay remote claude-supervisor --socket %h/.config/litellm-remote/claude/supervisor.sock
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
 # litellm-remote-connector.service
 [Unit]
 Description=LiteLLM Remote connector
-Wants=litellm-remote-codex.service
-After=litellm-remote-codex.service
+Wants=litellm-remote-codex.service litellm-remote-claude.service
+After=litellm-remote-codex.service litellm-remote-claude.service
 
 [Service]
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=CODEX_HOME=%h/.codex
 EnvironmentFile=%h/.config/litellm-remote/host.env
-ExecStart=%h/.local/bin/relay remote connect --codex-socket %h/.codex/app-server-control/app-server-control.sock
+ExecStart=%h/.local/bin/relay remote connect --codex-socket %h/.codex/app-server-control/app-server-control.sock --claude-supervisor %h/.config/litellm-remote/claude/supervisor.sock
 Restart=always
 RestartSec=5
 
@@ -177,21 +193,22 @@ WantedBy=default.target
 ```sh
 loginctl enable-linger "$USER"  # Have the machine administrator enable it if required.
 systemctl --user daemon-reload
-systemctl --user enable --now litellm-remote-codex.service litellm-remote-connector.service
-journalctl --user -u litellm-remote-codex -u litellm-remote-connector -f
+systemctl --user enable --now litellm-remote-codex.service litellm-remote-claude.service litellm-remote-connector.service
+journalctl --user -u litellm-remote-codex -u litellm-remote-claude -u litellm-remote-connector -f
 ```
 
-Lingering lets the user service manager start at boot and stay running after logout. It does not keep a powered-off or suspended VM online. The explicit `--codex-socket` leaves Codex startup to systemd. When running the Linux connector without that option, Relay tries `codex app-server daemon start` on demand if the default socket is missing. Do not run a second connector under the same account or share the Codex socket across users.
+Lingering lets the user service manager start at boot and stay running after logout. It does not keep a powered-off or suspended VM online. The explicit socket flags leave agent startup to systemd. Without them, the Linux connector starts Codex and a detached Claude supervisor on demand. Claude's default socket is `<relay_home>/remote/claude-<device_id>.d/supervisor.sock`; the units above instead share the explicit path shown. Do not run a second connector under the same account or share sockets across users. With these units, use `relay remote handoff --claude-supervisor "$HOME/.config/litellm-remote/claude/supervisor.sock"` so handoff checks supervisor-owned runs. Without an explicit socket, handoff discovers the default supervisor.
 
 ```sh
 loginctl show-user "$USER" -p Linger
-systemctl --user is-active litellm-remote-codex.service litellm-remote-connector.service
+systemctl --user is-active litellm-remote-codex.service litellm-remote-claude.service litellm-remote-connector.service
 test -S "$HOME/.codex/app-server-control/app-server-control.sock"
+test -S "$HOME/.config/litellm-remote/claude/supervisor.sock"
 ```
 
-Expect `Linger=yes`, two `active` lines, and a successful socket check. Then confirm the host shows online in the apps.
+Expect `Linger=yes`, three `active` lines, and successful socket checks. Then confirm the host shows online in the apps.
 
-For an unattended boot check, reboot the VM and confirm the host comes online in the app before anyone logs in as the host user. To test logout, close the host user's login session normally or terminate only that session with `loginctl terminate-session <session-id>`. Do not use `loginctl terminate-user` as a logout test. It stops the user's service manager and both services even if lingering is enabled. To recover without a login or reboot, an administrator can run `sudo systemctl start "user@$(id -u relayuser).service"`, replacing `relayuser` with the host username, then check that the host is online again.
+For an unattended boot check, reboot the VM and confirm the host comes online in the app before anyone logs in as the host user. To test logout, close the host user's login session normally or terminate only that session with `loginctl terminate-session <session-id>`. Do not use `loginctl terminate-user` as a logout test. It stops the user's service manager and all three services even if lingering is enabled. To recover without a login or reboot, an administrator can run `sudo systemctl start "user@$(id -u relayuser).service"`, replacing `relayuser` with the host username, then check that the host is online again.
 
 ## Existing Claude sessions
 
@@ -234,7 +251,7 @@ Only new sessions can use a different device. Previously loaded session summarie
 | You leave the Mac awake and connected | It remains available while the connector and agent are running. | It continues on the host. |
 | The Mac sleeps, shuts down, or loses its network | You cannot control it while its connector is offline. Sleep and shutdown can interrupt running work. A network loss alone does not move or stop the local agent. Reconnect the Mac to continue from saved state. | It continues independently of the Mac as long as the VM and its services stay online. |
 | The phone disconnects, sleeps, or closes the app | An accepted turn continues on the Mac if it stays running. | An accepted turn continues on the host. Reopen the app and refresh the original session to see its progress. |
-| The connector restarts on the coding device | A Claude child owned by the connector is interrupted. A Codex thread runs in the separate daemon and may continue if that daemon stays up. | The same distinction applies. Saved Claude conversations can be reopened, but in-flight process state cannot be recovered. Restarting Codex itself is different from restarting only the connector. |
+| The connector restarts on the coding device | On macOS, a Claude child owned by the connector is interrupted. Codex may continue in its separate daemon. | On Linux, Claude turns and pending approvals survive a connector-only restart. Restarting the Claude unit or upgrading it interrupts them; saved transcripts can be reopened. Restarting Codex itself also interrupts its turns. |
 
 A stopped VM can't continue a turn. Boot it and wait for its connector to come back online before trying to resume saved work. Neither app moves a conversation, files, or process state to another machine. After a disconnect or restart, refresh before retrying a send whose result is unclear. Relay does not automatically resend an uncertain command.
 
@@ -242,7 +259,7 @@ A stopped VM can't continue a turn. Boot it and wait for its connector to come b
 
 Before rollout, sign in from each supported mobile app and confirm the paired host is online. Create a session for each agent and send a short prompt. Confirm the gateway serves both requests. Disconnect and reconnect the phone while a turn runs, then reopen that same session. With a paired Mac, put it offline and confirm its own session is not moved as you create a new session on the host. Check the fallback destination on both apps. Restart just the Linux connector during a test window and confirm the device returns online and saved sessions remain on the host.
 
-For an upgrade, use a maintenance window. Finish active turns, confirm saved work, and back up the VM's project and agent data as appropriate. Update Relay and the CLIs as the host user. If you edit a unit, run `systemctl --user daemon-reload` first. Restart only the units you changed. If you replace Codex or rotate its key, restart both units so both see the new configuration. Verify device status, the socket, and one turn in each agent again. Keep the same device credential when upgrading in place. Re-pair only if the credential or service origin changes.
+For an upgrade, use a maintenance window. Finish active turns, confirm saved work, and back up the VM's project and agent data as appropriate. Update Relay and the CLIs as the host user. If you edit a unit, run `systemctl --user daemon-reload` first. Restart the Claude unit only in a maintenance window after turns finish; pending approvals do not survive that restart. A Relay upgrade needs a Claude unit restart to load the new binary. If you replace Codex or rotate the gateway key, restart the affected agent units and connector so they see the new configuration. Verify device status, both sockets, and one turn in each agent again. Keep the same device credential when upgrading in place. Re-pair only if the credential or service origin changes.
 
 Use separate VMs, virtual keys, Git credentials, and Codex sockets per person. Keep the host environment file and device credential private. Agent tools run with the host account's access, subject to agent permissions. Do not give that account privileged OS access or unrelated credentials. To retire a host, remove the device in the app, revoke its virtual key and Git credentials, and stop and disable the user services.
 
@@ -250,9 +267,10 @@ Use separate VMs, virtual keys, Git credentials, and Codex sockets per person. K
 | --- | --- |
 | The app cannot find the service | Query the gateway discovery URL, verify it names the right gateway and control origins, or enter the control origin under **Advanced**. Check HTTPS trust and private network access on the phone. |
 | Sign-in works but the host is missing | Check that the host was paired to this control service and the same gateway account. Verify the connector is using the same OS user's pairing file. |
-| The host shows offline | Check `systemctl --user status litellm-remote-connector.service`, its journal, and HTTPS access to the control service from the VM. If health works but the connector cannot connect, check WebSocket forwarding on `/agent`. If it only fails after logout or reboot, check `Linger=yes` and that both units are enabled. |
+| The host shows offline | Check `systemctl --user status litellm-remote-connector.service`, its journal, and HTTPS access to the control service from the VM. If health works but the connector cannot connect, check WebSocket forwarding on `/agent`. If it only fails after logout or reboot, check `Linger=yes` and that all three units are enabled. |
 | The user service bus is unavailable | Run `systemctl --user` from a real login under the host account, not a root shell. If needed, ask the administrator to enable lingering for that account. |
 | Codex cannot connect | Check the Codex unit's journal, its executable and (for npm) Node on the unit's `PATH`, and that both units name the same socket and `CODEX_HOME`. Check `jq` is installed if the unit cannot produce the systemd PID file. |
+| Claude cannot connect | Check `journalctl --user -u litellm-remote-claude`, the native Claude executable on its `PATH`, and that both units name the same socket. Without systemd, check `supervisor.log` next to the default socket. Keep the socket path under 108 bytes. |
 | Claude rejects the gateway, or inference is denied | Check the effective Claude endpoint in project settings and the host environment. Ensure Codex uses the `litellm` provider and the gateway's `/v1` base URL. Check the exact model ID, virtual key restrictions, and gateway logs without printing credentials. |
 | The app rejects the project folder | Use an existing absolute directory on the selected device and confirm the service account can access it. A Mac path will usually not exist on the Linux host. |
 

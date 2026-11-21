@@ -36,11 +36,24 @@ pub enum Command {
         codex_socket: Option<PathBuf>,
         #[arg(long)]
         claude_executable: Option<PathBuf>,
+        #[arg(long)]
+        claude_supervisor: Option<PathBuf>,
         #[arg(long, default_value = "litellm")]
         provider: String,
     },
     Handoff {
         session: Option<uuid::Uuid>,
+        #[arg(long)]
+        claude_supervisor: Option<PathBuf>,
+    },
+    #[command(hide = true)]
+    ClaudeSupervisor {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        claude_executable: Option<PathBuf>,
+        #[arg(long)]
+        idle_exit: bool,
     },
     Serve {
         #[arg(long)]
@@ -136,19 +149,66 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Connect {
             codex_socket,
             claude_executable,
+            claude_supervisor,
             provider,
         } => {
             let credentials = connector::load()?;
             let _lock = crate::system::lock_private(
                 &crate::config::relay_home().join("remote/connector.lock"),
             )?;
-            let sessions =
-                connector::sessions(&credentials, codex_socket, claude_executable, provider);
+            let mut sessions = connector::sessions(
+                &credentials,
+                codex_socket,
+                claude_executable.clone(),
+                provider,
+            );
+            if cfg!(target_os = "linux") || claude_supervisor.is_some() {
+                let auto_start = claude_supervisor.is_none();
+                sessions.claude = claude::Backend::Remote(claude::supervisor::Client::new(
+                    claude_supervisor.unwrap_or_else(|| {
+                        claude::supervisor::default_socket(credentials.device_id)
+                    }),
+                    auto_start,
+                    claude_executable,
+                ));
+            }
             connector::connect(credentials, sessions).await?;
         }
-        Command::Handoff { session } => {
+        Command::ClaudeSupervisor {
+            socket,
+            claude_executable,
+            idle_exit,
+        } => {
             let credentials = connector::load()?;
-            let sessions = connector::sessions(&credentials, None, None, "litellm".into());
+            let socket =
+                socket.unwrap_or_else(|| claude::supervisor::default_socket(credentials.device_id));
+            if let Some(server) = claude::supervisor::Server::bind(&socket)? {
+                let sessions =
+                    connector::sessions(&credentials, None, claude_executable, "litellm".into());
+                let claude::Backend::Local(claude) = sessions.claude else {
+                    unreachable!()
+                };
+                server.serve(std::sync::Arc::new(*claude), idle_exit, async {
+                    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+                    tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+                }).await?;
+            }
+        }
+        Command::Handoff {
+            session,
+            claude_supervisor,
+        } => {
+            let credentials = connector::load()?;
+            let mut sessions = connector::sessions(&credentials, None, None, "litellm".into());
+            let explicit = claude_supervisor.is_some();
+            let socket = claude_supervisor
+                .unwrap_or_else(|| claude::supervisor::default_socket(credentials.device_id));
+            let client = claude::supervisor::Client::new(socket, false, None);
+            match client.call(claude::supervisor::Request::Hello).await {
+                Ok(_) => sessions.claude = claude::Backend::Remote(client),
+                Err(error) if error.status == 503 && !explicit => {}
+                Err(error) => return Err(anyhow::anyhow!(error.error)),
+            }
             let session = match session {
                 Some(session) => session,
                 None => {

@@ -29,6 +29,7 @@ pub(super) struct Permission {
 }
 #[derive(Default)]
 pub(super) struct Live {
+    pub(super) last_used: u64,
     pub(super) starting: bool,
     pub(super) working: bool,
     pub(super) closed: bool,
@@ -307,16 +308,23 @@ impl Claude {
                 "This session is open outside Relay. Exit it on the device first.",
             ));
         }
-        if self
-            .runs
-            .lock()
-            .expect("Claude runs lock")
-            .values()
-            .filter(|run| !run.live.lock().expect("Claude live lock").closed)
-            .count()
-            >= 4
-        {
-            return Err(Failure::new(429, "Four Claude sessions are already open. Restart the connector to close idle sessions."));
+        let eviction = {
+            let runs = self.runs.lock().expect("Claude runs lock");
+            let open: Vec<_> = runs
+                .values()
+                .filter(|run| !run.live.lock().expect("Claude live lock").closed)
+                .collect();
+            if open.len() >= 4 {
+                Some(open.into_iter().filter_map(|run| {
+                    let live = run.live.lock().expect("Claude live lock");
+                    (!live.starting && !live.working && !live.stopping && live.approvals.is_empty()).then(|| (live.last_used, run.clone()))
+                }).min_by_key(|(used, _)| *used).map(|(_, run)| run).ok_or_else(|| Failure::new(429, "Four Claude sessions are busy. Finish or stop one before starting another."))?)
+            } else {
+                None
+            }
+        };
+        if let Some(run) = eviction {
+            run.close().await?;
         }
         crate::ai_tools::claude_cli::refuse_node_script_claude_code(Some(&self.executable))
             .map_err(|_| {
@@ -394,6 +402,8 @@ impl Claude {
         if let Some(model) = &startup_model {
             command.arg("--model").arg(model);
         }
+        #[cfg(target_os = "linux")]
+        protect_child(&mut command);
         let mut child = command
             .spawn()
             .map_err(|_| Failure::new(503, "Cannot start native Claude Code."))?;
@@ -546,7 +556,25 @@ async fn write_input(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn protect_child(command: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
 async fn output(mut command: Command) -> Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    protect_child(&mut command);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

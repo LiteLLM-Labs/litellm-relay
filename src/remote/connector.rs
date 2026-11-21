@@ -29,7 +29,7 @@ use super::{
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Credentials {
     endpoint: Url,
-    device_id: Uuid,
+    pub(super) device_id: Uuid,
     device_token: String,
     gateway: Url,
 }
@@ -254,7 +254,8 @@ pub fn sessions(
                 .unwrap_or(Path::new("."))
                 .join(format!("claude-{}", credentials.device_id)),
             credentials.gateway.clone(),
-        ),
+        )
+        .into(),
     }
 }
 
@@ -449,7 +450,8 @@ mod tests {
                 "unused".into(),
                 "unused".into(),
                 gateway.clone(),
-            ),
+            )
+            .into(),
             codex: Codex::new("unused".into(), "litellm".into(), gateway),
         });
         let (connector, peer) = tokio::io::duplex(1024);

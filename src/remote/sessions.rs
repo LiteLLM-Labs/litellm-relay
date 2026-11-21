@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    claude::Claude,
+    claude::Backend,
     codex::Codex,
     protocol::{split_session, Action, Agent, Failure, Result, Session},
 };
 
 pub struct Sessions {
-    pub claude: Claude,
+    pub claude: Backend,
     pub codex: Codex,
 }
 
@@ -95,7 +95,7 @@ impl Sessions {
                 Ok(json!({"sessions":sessions,"nextCursor":next,"warnings":warnings}))
             }
             Action::Create { cwd, agent } => value(match agent {
-                Agent::Claude => self.claude.create(cwd)?,
+                Agent::Claude => self.claude.create(cwd).await?,
                 Agent::Codex => self.codex.create(cwd).await?,
             }),
             Action::Read { session_id } => {

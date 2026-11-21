@@ -1,5 +1,8 @@
+mod backend;
 mod history;
 mod process;
+pub use backend::Backend;
+pub(super) mod supervisor;
 
 use super::protocol::{now_ms, redact, Agent, Decision, Detail, Failure, Message, Result, Session};
 use process::Running;
@@ -31,6 +34,35 @@ pub struct Claude {
 }
 
 impl Claude {
+    pub(super) fn has_open_run(&self, id: Uuid) -> bool {
+        self.runs
+            .lock()
+            .expect("Claude runs lock")
+            .get(&id)
+            .is_some_and(|run| !run.live.lock().expect("Claude live lock").closed)
+    }
+
+    pub(super) fn has_open_runs(&self) -> bool {
+        self.runs
+            .lock()
+            .expect("Claude runs lock")
+            .values()
+            .any(|run| !run.live.lock().expect("Claude live lock").closed)
+    }
+
+    pub(super) async fn close_runs(&self) {
+        let runs: Vec<_> = self
+            .runs
+            .lock()
+            .expect("Claude runs lock")
+            .values()
+            .cloned()
+            .collect();
+        for run in runs {
+            let _ = run.close().await;
+        }
+    }
+
     pub fn new(executable: PathBuf, home: PathBuf, grants: PathBuf, gateway: Url) -> Self {
         Self {
             executable,
@@ -226,6 +258,8 @@ impl Claude {
         {
             let mut live = run.live.lock().expect("Claude live lock");
             live.working = true;
+            static USAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            live.last_used = USAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             live.error = None;
             live.transcript.message(
                 Message {
