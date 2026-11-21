@@ -29,6 +29,42 @@ use super::{
 
 struct Directory(PathBuf);
 
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_supervisor_releases_its_lock_while_a_forked_child_has_the_fd() {
+    use claude::supervisor::Server as Supervisor;
+    use std::{io::Write, os::fd::AsRawFd, os::unix::net::UnixStream};
+
+    let directory = Directory::new();
+    let socket = directory.0.join("supervisor.sock");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let server = Supervisor::bind(&socket).unwrap().unwrap();
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    let child_fd = child.as_raw_fd();
+    // Only async-signal-safe operations may run between fork and _exit.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        unsafe {
+            let mut byte = 0u8;
+            libc::read(child_fd, (&mut byte as *mut u8).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    drop(child);
+    drop(server);
+    let rebound = Supervisor::bind(&socket);
+    parent.write_all(&[1]).unwrap();
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert_eq!(status, 0);
+    assert!(rebound.unwrap().is_some());
+}
+
 #[tokio::test]
 async fn claude_supervisor_restart_approvals_permissions_lock_and_eviction() {
     use claude::supervisor::{Client, Request, Server as Supervisor};

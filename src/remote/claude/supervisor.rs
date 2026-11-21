@@ -116,6 +116,15 @@ pub struct Server {
     _lock: fs::File,
 }
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        // Forked children can hold this file description until exec.
+        if let Err(error) = self._lock.unlock() {
+            eprintln!("Cannot unlock Claude supervisor: {error}");
+        }
+    }
+}
+
 impl Server {
     pub fn bind(socket: &Path) -> anyhow::Result<Option<Self>> {
         let parent = private_directory(socket)?;
