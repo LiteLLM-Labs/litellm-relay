@@ -384,6 +384,57 @@ fn disconnected() -> Failure {
     Failure::new(503, "Cannot reach Codex. Keep Codex running on this Mac.")
 }
 
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_waits_for_the_transport_result() {
+        for succeeds in [true, false] {
+            let (sender, mut receiver) = mpsc::channel(1);
+            let rpc = Rpc { sender };
+            let write = rpc.write(json!({"id":17,"result":{"decision":"accept"}}));
+            tokio::pin!(write);
+            let call = tokio::select! {
+                result = &mut write => panic!("Write completed before reaching the transport: {result:?}"),
+                call = receiver.recv() => call.unwrap(),
+            };
+            let (checked, check) = oneshot::channel();
+            checked.send(()).unwrap();
+            tokio::select! {
+                biased;
+                result = &mut write => panic!("Write completed without a transport result: {result:?}"),
+                _ = check => {}
+            }
+            call.written
+                .unwrap()
+                .send(if succeeds {
+                    Ok(())
+                } else {
+                    Err(disconnected())
+                })
+                .unwrap();
+            let result = write.await;
+            if succeeds {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().status, 503);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_reports_a_disconnected_transport() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let rpc = Rpc { sender };
+        let writer = tokio::spawn(async move {
+            receiver.recv().await.unwrap();
+        });
+        assert_eq!(rpc.write(json!({"id":17})).await.unwrap_err().status, 503);
+        writer.await.unwrap();
+    }
+}
+
 fn sun_path_len() -> usize {
     if cfg!(any(
         target_os = "macos",

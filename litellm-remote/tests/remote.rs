@@ -1,5 +1,4 @@
 use std::{
-    os::fd::AsFd,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -968,7 +967,7 @@ enum ApprovalFault {
     HistoryAfterReplay,
     ClosedHistory,
     ReplacedSocket,
-    SocketWrite,
+    Disconnected,
 }
 
 #[tokio::test]
@@ -997,8 +996,8 @@ async fn codex_approval_uses_the_socket_that_restored_it() {
 }
 
 #[tokio::test]
-async fn codex_approval_retries_after_a_failed_socket_write() {
-    codex_approval_fault(ApprovalFault::SocketWrite).await;
+async fn codex_approval_retries_after_the_daemon_disconnects() {
+    codex_approval_fault(ApprovalFault::Disconnected).await;
 }
 
 async fn codex_approval_fault(fault: ApprovalFault) {
@@ -1008,11 +1007,9 @@ async fn codex_approval_fault(fault: ApprovalFault) {
         let decisions = Arc::new(AtomicUsize::new(0));
         let executions = Arc::new(AtomicUsize::new(0));
         let answered_on = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new(tokio::sync::Notify::new());
         let observed_decisions = decisions.clone();
         let observed_executions = executions.clone();
         let observed_connection = answered_on.clone();
-        let release_socket = release.clone();
         let server = tokio::spawn(async move {
             let mut pending = false;
             let mut failed = false;
@@ -1088,22 +1085,14 @@ async fn codex_approval_fault(fault: ApprovalFault) {
                         socket.flush().await.unwrap();
                         break;
                     }
-                    let fail_write = connection == 1
-                        && !failed
+                    if connection == 1
                         && method == "thread/turns/list"
-                        && fault == ApprovalFault::SocketWrite;
-                    if fail_write {
-                        failed = true;
-                        let fd = socket.get_ref().as_fd().try_clone_to_owned().unwrap();
-                        std::os::unix::net::UnixStream::from(fd)
-                            .shutdown(std::net::Shutdown::Read)
-                            .unwrap();
-                    }
-                    socket.send(response).await.unwrap();
-                    if fail_write {
-                        release_socket.notified().await;
+                        && fault == ApprovalFault::Disconnected
+                    {
+                        socket.close(None).await.unwrap();
                         break;
                     }
+                    socket.send(response).await.unwrap();
                     if pending
                         && matches!(method, "turn/start" | "thread/resume")
                         && !(connection == 1
@@ -1126,7 +1115,6 @@ async fn codex_approval_fault(fault: ApprovalFault) {
         drop(original);
         let restarted = codex::Codex::new(path.0.clone(), "litellm".into(), gateway);
         let first = restarted.approve(thread, old_id, decision).await;
-        release.notify_one();
         if fault == ApprovalFault::ReplacedSocket {
             first.expect("The approval must be answered on the restored socket");
         } else {
@@ -1134,7 +1122,7 @@ async fn codex_approval_fault(fault: ApprovalFault) {
                 first.unwrap_err().status,
                 if matches!(
                     fault,
-                    ApprovalFault::SocketWrite | ApprovalFault::ClosedHistory
+                    ApprovalFault::Disconnected | ApprovalFault::ClosedHistory
                 ) {
                     503
                 } else {
@@ -1164,7 +1152,7 @@ async fn codex_approval_fault(fault: ApprovalFault) {
             answered_on.load(Ordering::SeqCst),
             if matches!(
                 fault,
-                ApprovalFault::SocketWrite
+                ApprovalFault::Disconnected
                     | ApprovalFault::ReplacedSocket
                     | ApprovalFault::ClosedHistory
             ) {
