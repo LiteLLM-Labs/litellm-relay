@@ -1168,9 +1168,33 @@ async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
             thread,
             observed_resumes.clone(),
             decision,
+            true,
         )
         .await;
     }
+}
+
+#[tokio::test]
+async fn codex_accepts_before_detail_after_restart() {
+    codex_answers_before_detail(Decision::Accept).await;
+}
+
+#[tokio::test]
+async fn codex_declines_before_detail_after_restart() {
+    codex_answers_before_detail(Decision::Decline).await;
+}
+
+async fn codex_answers_before_detail(decision: Decision) {
+    let (socket, listener) = ShortSocket::listen();
+    codex_replays_a_pending_approval(
+        socket.0.clone(),
+        Arc::new(listener),
+        Uuid::new_v4(),
+        Arc::new(AtomicUsize::new(0)),
+        decision,
+        false,
+    )
+    .await;
 }
 
 async fn codex_replays_a_pending_approval(
@@ -1179,6 +1203,7 @@ async fn codex_replays_a_pending_approval(
     thread: Uuid,
     observed_resumes: Arc<AtomicUsize>,
     decision: Decision,
+    read_before_answer: bool,
 ) {
     let resumes = observed_resumes.clone();
     let decisions = Arc::new(AtomicUsize::new(0));
@@ -1188,7 +1213,7 @@ async fn codex_replays_a_pending_approval(
     let server = tokio::spawn(async move {
         let mut pending = false;
         let mut completed = false;
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Frame::Text(text))) = socket.next().await {
@@ -1267,32 +1292,44 @@ async fn codex_replays_a_pending_approval(
     let old_id = Uuid::parse_str(&before.approvals[0].id).unwrap();
     drop(original);
 
-    let restarted = codex::Codex::new(socket_path, "litellm".into(), gateway);
-    let restored = restarted.read(thread).await.unwrap();
-    assert_eq!(restored.session.status, "needs_approval");
-    assert_eq!(
-        restored.approvals.len(),
-        1,
-        "The daemon still holds an answerable approval"
-    );
-    assert!(restored.approvals[0].can_accept);
-    assert_eq!(
-        restored.approvals[0].id,
-        old_id.to_string(),
-        "Public approval ID changed after connector restart"
-    );
-    assert_eq!(restarted.read(thread).await.unwrap().approvals.len(), 1);
-    assert_eq!(
-        resumes.load(Ordering::SeqCst),
-        2,
-        "Attach once per connection, not on every poll"
-    );
+    let restarted = codex::Codex::new(socket_path.clone(), "litellm".into(), gateway.clone());
+    if read_before_answer {
+        let restored = restarted.read(thread).await.unwrap();
+        assert_eq!(restored.session.status, "needs_approval");
+        assert_eq!(
+            restored.approvals.len(),
+            1,
+            "The daemon still holds an answerable approval"
+        );
+        assert!(restored.approvals[0].can_accept);
+        assert_eq!(
+            restored.approvals[0].id,
+            old_id.to_string(),
+            "Public approval ID changed after connector restart"
+        );
+        assert_eq!(restarted.read(thread).await.unwrap().approvals.len(), 1);
+    } else {
+        assert_eq!(resumes.load(Ordering::SeqCst), 1);
+    }
     restarted.approve(thread, old_id, decision).await.unwrap();
     let resolved = restarted.read(thread).await.unwrap();
     assert!(resolved.approvals.is_empty());
     assert_eq!(resolved.session.status, "ready");
     assert!(!resolved.session.can_stop);
+    assert_eq!(
+        resumes.load(Ordering::SeqCst),
+        2,
+        "Attach once per connection, not on every poll or answer"
+    );
     let repeated = restarted
+        .approve(thread, old_id, decision)
+        .await
+        .unwrap_err();
+    assert_eq!(repeated.status, 409);
+    assert_eq!(resumes.load(Ordering::SeqCst), 2);
+    drop(restarted);
+    let after_completion = codex::Codex::new(socket_path, "litellm".into(), gateway);
+    let repeated = after_completion
         .approve(thread, old_id, decision)
         .await
         .unwrap_err();
