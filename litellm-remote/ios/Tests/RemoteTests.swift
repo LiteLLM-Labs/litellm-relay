@@ -47,6 +47,50 @@ final class RemoteTests: XCTestCase {
     }
 
     @MainActor
+    func testRestoreAcceptsControlRefreshReplyWithoutLoginStatus() async throws {
+        try await withSavedSession { defaults, workspace, _ in
+            defaults.set([workspace], forKey: "refreshWorkspaces")
+            let store = RemoteStore(defaults: defaults, session: restoreSession(response: "refresh"))
+            await store.restore()
+            XCTAssertEqual(store.configuration?.identity?.subject, "qa")
+            XCTAssertEqual(SessionVault.load(workspace: workspace), "first-refresh")
+        }
+    }
+
+    @MainActor
+    func testConcurrentRequestsShareOneSignInRefresh() async throws {
+        try await withSavedSession { defaults, workspace, _ in
+            defaults.set([workspace], forKey: "refreshWorkspaces")
+            let store = RemoteStore(defaults: defaults, session: restoreSession(response: "rotate"))
+            await store.restore()
+            XCTAssertNotNil(store.configuration?.identity)
+            async let first = store.models(deviceId: "fixture")
+            async let second = store.models(deviceId: "fixture")
+            let results = await (first, second)
+            XCTAssertTrue(try results.0.get().models.isEmpty)
+            XCTAssertTrue(try results.1.get().models.isEmpty)
+            XCTAssertEqual(SessionVault.load(workspace: workspace), "next-refresh")
+        }
+    }
+
+    @MainActor
+    func testFailedRefreshSaveKeepsTheRotatedSignInInMemory() async throws {
+        try await withSavedSession { defaults, workspace, _ in
+            defaults.set([workspace], forKey: "refreshWorkspaces")
+            let store = RemoteStore(defaults: defaults, session: restoreSession(response: "rotate")) { token, workspace in
+                token == "next-refresh" && SessionVault.save(token, workspace: workspace)
+            }
+            await store.restore()
+            XCTAssertEqual(store.configuration?.identity?.subject, "qa")
+            XCTAssertFalse(store.hasSavedSession)
+            XCTAssertNil(SessionVault.load(workspace: workspace))
+            let result = await store.models(deviceId: "fixture")
+            XCTAssertTrue(try result.get().models.isEmpty)
+            XCTAssertEqual(SessionVault.load(workspace: workspace), "next-refresh")
+        }
+    }
+
+    @MainActor
     func testForegroundRestoreDoesNotOverwriteWorkspaceEdits() async throws {
         try await withSavedSession { defaults, workspace, token in
             let changedGateway = RemoteStore(defaults: defaults, session: restoreSession())
@@ -193,6 +237,15 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(String(try XCTUnwrap(second).characters), "beta")
     }
 
+    func testDenseMarkdownLimitsActiveLinksWithoutRemovingLabels() throws {
+        let links = (0..<40).map { "[label\($0)](https://example.test/\($0))" }.joined(separator: "\n")
+        let parsed = try XCTUnwrap(MessageMarkdown.parse("[unsafe](http://example.test)\n" + links))
+        let active = parsed.runs.compactMap(\.link)
+        XCTAssertEqual(active.count, 12)
+        XCTAssertEqual(active.first?.absoluteString, "https://example.test/0")
+        XCTAssertTrue(String(parsed.characters).hasSuffix("label39"))
+    }
+
     func testCachedMarkdownNeverShowsForNewerStreamedText() throws {
         let parsed = try XCTUnwrap(MessageMarkdown.parse("**bold** start"))
         let cached = RenderedMarkdown(source: "**bold** start", value: parsed)
@@ -271,6 +324,8 @@ final class RemoteTests: XCTestCase {
 }
 
 private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
+    private static let rotationLock = NSLock()
+    nonisolated(unsafe) private static var rotations: [String: Int] = [:]
     static let gateway = "https://gateway.example.test"
     static let started = Notification.Name("RemoteRestoreRequestStarted")
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -278,6 +333,11 @@ private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 
     override func startLoading() {
+        let mode = request.value(forHTTPHeaderField: "X-Test-Response")
+        if mode == "refresh" || mode == "rotate", let url = request.url {
+            respondToRotation(url, useLoginStatus: mode == "rotate")
+            return
+        }
         guard let url = request.url, url.path == "/api/me" else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
@@ -300,6 +360,55 @@ private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
         do {
             let data = try JSONEncoder().encode(Reply(gateway: Self.gateway, identity: identity))
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    private func respondToRotation(_ url: URL, useLoginStatus: Bool) {
+        switch url.path {
+        case "/api/auth/refresh":
+            let count = Self.rotationLock.withLock {
+                Self.rotations[url.host ?? "", default: 0] += 1
+                return Self.rotations[url.host ?? "", default: 0]
+            }
+            switch count {
+            case 1:
+                var reply: [String: Any] = ["token": "first-access", "refreshToken": "first-refresh", "expiresAt": 0]
+                if useLoginStatus { reply["status"] = "ready" }
+                respond(url, json: reply)
+            case 2:
+                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+                    self?.respond(url, json: [
+                        "status": "ready", "token": "next-access", "refreshToken": "next-refresh",
+                        "expiresAt": Int64(Date().addingTimeInterval(900).timeIntervalSince1970 * 1000)
+                    ])
+                }
+            default:
+                respond(url, status: 401, json: ["error": "Sign in again."])
+            }
+        case "/api/me":
+            respond(url, json: ["gateway": Self.gateway, "identity": [
+                "subject": "qa", "label": "QA", "method": "sso", "expiresAt": 0
+            ]])
+        case "/api/devices/fixture/models":
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer next-access" {
+                respond(url, json: ["models": []])
+            } else {
+                respond(url, status: 401, json: ["error": "Sign in again."])
+            }
+        default:
+            respond(url, status: 404, json: ["error": "Unexpected fixture route."])
+        }
+    }
+
+    private func respond(_ url: URL, status: Int = 200, json: [String: Any]) {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: json)
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)

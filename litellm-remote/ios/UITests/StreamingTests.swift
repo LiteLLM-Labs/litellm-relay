@@ -4,21 +4,54 @@ import XCTest
 
 final class StreamingTests: XCTestCase {
     @MainActor
-    func testLongCodexReplyKeepsStopAndFollowUpResponsive() throws {
+    func testReopeningLongCodexHistoryShowsLatestReply() throws {
         continueAfterFailure = false
-        let service = try StreamingService()
+        let service = try StreamingService(longHistory: true)
         let app = try launch(service)
         defer { app.terminate() }
         let session = app.staticTexts[StreamingService.title]
+        let reply = app.staticTexts[StreamingService.historyTail]
 
-        let reply = app.staticTexts["streamingReply"]
-        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        for attempt in 0..<3 {
+            XCTAssertTrue(reply.waitForExistence(timeout: 5))
+            let frame = reply.frame
+            XCTAssertFalse(frame.isEmpty)
+            XCTAssertTrue(app.frame.contains(frame), "Latest reply is offscreen on entry \(attempt + 1)")
+            if attempt < 2 {
+                app.navigationBars.buttons.element(boundBy: 0).tap()
+                XCTAssertTrue(session.waitForExistence(timeout: 5))
+                session.tap()
+            }
+        }
+    }
+
+    @MainActor
+    func testLongCodexReplyKeepsStopAndFollowUpResponsive() throws {
+        continueAfterFailure = false
+        let service = try StreamingService(streamOnFirstSend: true)
+        let app = try launch(service)
+        defer { app.terminate() }
+        let session = app.staticTexts[StreamingService.title]
+        let composer = app.descendants(matching: .any)["messageComposer"].firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: composer)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 8), .completed)
+        composer.tap()
+        composer.typeText(StreamingService.firstPrompt)
+        app.buttons["sendMessageButton"].tap()
+
         let back = app.navigationBars.buttons.element(boundBy: 0)
         let latest = app.buttons["Latest message"]
         let chip = app.buttons["sessionChip"]
         XCTAssertTrue(chip.isHittable)
         XCTAssertGreaterThanOrEqual(chip.frame.minX, back.frame.maxX)
         XCTAssertLessThanOrEqual(chip.frame.maxX, latest.frame.minX)
+        let stop = app.buttons["stopTurnButton"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 10))
+        XCTAssertTrue(latest.isHittable)
+        latest.tap()
+
+        let reply = app.staticTexts["streamingReply"]
+        XCTAssertTrue(reply.waitForExistence(timeout: 10))
         // The fixture sends hundreds of lines per poll. The live bubble should
         // stay small and show fresh output rather than the beginning of the reply.
         let initial = reply.label
@@ -26,10 +59,6 @@ final class StreamingTests: XCTestCase {
         XCTAssertTrue(initial.contains("Stream tail"))
         let changes = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", initial), object: reply)
         XCTAssertEqual(XCTWaiter.wait(for: [changes], timeout: 8), .completed)
-        XCTAssertTrue(latest.isHittable)
-        latest.tap()
-
-        let stop = app.buttons["stopTurnButton"]
         XCTAssertTrue(stop.isHittable)
         stop.tap()
         XCTAssertTrue(stop.waitForNonExistence(timeout: 8))
@@ -37,7 +66,6 @@ final class StreamingTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Stopped reply"].waitForExistence(timeout: 5))
         XCTAssertEqual(service.interruptCount, 1)
 
-        let composer = app.descendants(matching: .any)["messageComposer"].firstMatch
         XCTAssertTrue(composer.isEnabled)
         composer.tap()
         composer.typeText("Follow up after stop")
@@ -51,7 +79,7 @@ final class StreamingTests: XCTestCase {
     @MainActor
     func testDisconnectedMacPreservesDraftAndRestoresComposer() throws {
         continueAfterFailure = false
-        let service = try StreamingService(working: false)
+        let service = try StreamingService()
         let app = try launch(service)
         defer { app.terminate() }
         XCTAssertTrue(app.staticTexts["Ready"].waitForExistence(timeout: 8))
@@ -75,6 +103,39 @@ final class StreamingTests: XCTestCase {
         send.tap()
         XCTAssertTrue(app.staticTexts["Follow-up acknowledged"].waitForExistence(timeout: 8))
         XCTAssertEqual(service.sentText, "Draft before disconnect")
+    }
+
+    @MainActor
+    func testExpiredClaudeApprovalRetriesAsOneNewTurn() throws {
+        continueAfterFailure = false
+        let service = try StreamingService(expiredApproval: true)
+        let app = try launch(service)
+        defer { app.terminate() }
+
+        let retry = app.buttons["retryExpiredApproval"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 8))
+        XCTAssertTrue(retry.isEnabled)
+        XCTAssertTrue(app.staticTexts[StreamingService.expiredSummary].exists)
+        XCTAssertFalse(app.buttons["Allow once"].exists)
+
+        service.setOnline(false)
+        XCTAssertTrue(app.staticTexts["Unavailable"].waitForExistence(timeout: 8))
+        XCTAssertFalse(retry.isEnabled)
+        XCTAssertEqual(service.sendCount, 0)
+
+        service.setBusy(true)
+        service.setOnline(true)
+        XCTAssertTrue(app.buttons["stopTurnButton"].waitForExistence(timeout: 8))
+        XCTAssertFalse(retry.isEnabled)
+        service.setBusy(false)
+        XCTAssertTrue(app.buttons["stopTurnButton"].waitForNonExistence(timeout: 8))
+        XCTAssertTrue(retry.isEnabled)
+
+        retry.tap()
+        XCTAssertTrue(app.buttons["Allow once"].waitForExistence(timeout: 8))
+        XCTAssertTrue(retry.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(service.sendCount, 1)
+        XCTAssertEqual(service.sentText, "The connector restarted before I could approve your last command, so it didn't run. Please try it again.")
     }
 
     @MainActor
@@ -105,24 +166,36 @@ final class StreamingTests: XCTestCase {
 private final class StreamingService: @unchecked Sendable {
     static let gateway = "https://gateway.example.test"
     static let title = "Generate a complete set of test scenarios for native Codex control from an iPhone on a different network"
+    static let firstPrompt = "Generate another long reply"
     static let offlineMessage = "This device is offline. Keep Relay Remote connected on your Mac."
+    static let historyTail = "Latest completed Codex reply"
+    static let expiredSummary = "Print the approval fixture marker"
 
     private let queue = DispatchQueue(label: "RemoteUITests.StreamingService")
     private let listener: NWListener
     private var poll = 0
     private var interrupts = 0
+    private var sends = 0
     private var followUp: String?
     private var online = true
-    private let startsWorking: Bool
+    private var busy = false
+    private let streamOnFirstSend: Bool
+    private let longHistory: Bool
+    private let expiredApproval: Bool
+    private var firstSent = false
 
     var port: UInt16? { listener.port?.rawValue }
     var interruptCount: Int { queue.sync { interrupts } }
+    var sendCount: Int { queue.sync { sends } }
     var sentText: String? { queue.sync { followUp } }
 
     func setOnline(_ value: Bool) { queue.sync { online = value } }
+    func setBusy(_ value: Bool) { queue.sync { busy = value } }
 
-    init(working: Bool = true) throws {
-        startsWorking = working
+    init(streamOnFirstSend: Bool = false, longHistory: Bool = false, expiredApproval: Bool = false) throws {
+        self.streamOnFirstSend = streamOnFirstSend
+        self.longHistory = longHistory
+        self.expiredApproval = expiredApproval
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: params)
@@ -168,15 +241,18 @@ private final class StreamingService: @unchecked Sendable {
 
     private func respond(to path: String, body: [String: String], on connection: NWConnection) {
         let base = "/api/devices/test-mac"
-        let detail = base + "/sessions/codex:fixture"
+        let agent = expiredApproval ? "claude" : "codex"
+        let sessionId = "\(agent):fixture"
+        let detail = base + "/sessions/" + sessionId
         let now = Date().timeIntervalSince1970
-        let working = startsWorking && interrupts == 0
+        let working = busy || (firstSent && interrupts == 0)
+        let needsApproval = expiredApproval && followUp != nil
         let session: [String: Any] = [
-            "id": "codex:fixture", "title": Self.title, "project": "Fixture", "cwd": "/fixture",
-            "agent": "codex", "status": working ? "working" : "ready",
-            "canSend": !working, "canStop": working, "updatedAt": now
+            "id": sessionId, "title": Self.title, "project": "Fixture", "cwd": "/fixture",
+            "agent": agent, "status": needsApproval ? "needs_approval" : working ? "working" : "ready",
+            "canSend": !working && !needsApproval, "canStop": working || needsApproval, "updatedAt": now
         ]
-        let response: [String: Any]
+        var response: [String: Any]
         switch path {
         case "/api/me":
             // This loopback fixture deliberately skips the external SSO round trip.
@@ -203,8 +279,22 @@ private final class StreamingService: @unchecked Sendable {
             let stream = String(repeating: "**Streaming** `code` [link](https://example.test)\n", count: 500)
             var messages = [
                 ["id": "user", "role": "user", "text": "Generate a long reply"],
-                ["id": "reply", "role": "assistant", "text": working ? stream + "Stream tail \(poll)" : "Stopped reply"]
+                ["id": "reply", "role": "assistant", "text": streamOnFirstSend ? stream : "Previous reply"]
             ]
+            if longHistory {
+                messages = (0..<11).flatMap { turn in
+                    [
+                        ["id": "user-\(turn)", "role": "user", "text": "Show examples for scenario \(turn)"],
+                        ["id": "reply-\(turn)", "role": "assistant", "text": "Scenario \(turn)\n" + stream]
+                    ]
+                } + [["id": "tail", "role": "assistant", "text": Self.historyTail]]
+            }
+            if firstSent {
+                messages += [
+                    ["id": "next-user", "role": "user", "text": Self.firstPrompt],
+                    ["id": "next-reply", "role": "assistant", "text": working ? stream + "Stream tail \(poll)" : "Stopped reply"]
+                ]
+            }
             if let followUp {
                 messages += [
                     ["id": "follow-up", "role": "user", "text": followUp],
@@ -212,11 +302,22 @@ private final class StreamingService: @unchecked Sendable {
                 ]
             }
             response = ["session": session, "messages": messages, "olderMessages": false, "approvals": []]
+            if expiredApproval && !needsApproval {
+                response["expiredApproval"] = ["id": "old-tool", "tool": "Bash", "summary": Self.expiredSummary]
+            }
+            if needsApproval {
+                response["approvals"] = [["id": "new-tool", "title": "Allow Bash?", "text": Self.expiredSummary, "canAccept": true]]
+            }
         case detail + "/interrupt":
             interrupts += 1
             response = [:]
         case detail + "/messages":
-            followUp = body["text"]
+            sends += 1
+            if streamOnFirstSend && !firstSent {
+                firstSent = body["text"] == Self.firstPrompt
+            } else {
+                followUp = body["text"]
+            }
             response = [:]
         default:
             send(["error": "Unknown fixture path"], status: "404 Not Found", on: connection)

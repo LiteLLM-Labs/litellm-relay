@@ -113,6 +113,21 @@ import kotlinx.coroutines.launch
                     Text("${session.agentName} is working", fontSize = 12.sp, color = Secondary)
                 }
             }
+            state.expiredApproval?.let { approval -> item(key = "expired-${approval.id}") {
+                Surface(color = Color.White, shape = RoundedCornerShape(17.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Warning.copy(alpha = 0.3f))) {
+                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text(EXPIRED_APPROVAL_NOTICE, fontSize = 14.sp)
+                        SelectionContainer(Modifier.fillMaxWidth().heightIn(max = 240.dp).background(Canvas, RoundedCornerShape(10.dp)).verticalScroll(rememberScrollState()).padding(12.dp)) {
+                            Text(approval.summary, fontSize = 12.sp, fontFamily = FontFamily.Monospace, lineHeight = 19.sp)
+                        }
+                        Button(onClick = { scope.launch {
+                            sending = true
+                            try { model.retryExpiredApproval(UUID.randomUUID().toString()) }
+                            finally { sending = false }
+                        } }, enabled = state.canRetryExpiredApproval && !sending) { Text("Retry") }
+                    }
+                }
+            } }
         }
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp)) {

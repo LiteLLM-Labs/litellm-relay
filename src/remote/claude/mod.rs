@@ -1,4 +1,5 @@
 mod history;
+mod journal;
 pub(in crate::remote) mod process;
 
 use super::protocol::{now_ms, redact, Agent, Decision, Detail, Failure, Message, Result, Session};
@@ -31,6 +32,10 @@ pub struct Claude {
 }
 
 impl Claude {
+    fn journal(&self) -> journal::Journal {
+        journal::Journal::new(self.grants.join("approvals"), self.home.clone())
+    }
+
     pub fn new(executable: PathBuf, home: PathBuf, grants: PathBuf, gateway: Url) -> Self {
         Self {
             executable,
@@ -153,7 +158,7 @@ impl Claude {
             .grant(id)
             .or_else(|error| external.clone().ok_or(error))?;
         if external.is_some() {
-            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), error: Some("On the device, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
+            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), expired_approval: None, error: Some("On the device, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
         }
         let (stored, older) = match self.history(id) {
             Ok(history) => history,
@@ -187,6 +192,14 @@ impl Claude {
             .collect();
         Ok(Detail {
             session,
+            expired_approval: if live
+                .as_ref()
+                .is_some_and(|live| live.working || live.starting)
+            {
+                None
+            } else {
+                self.journal().expired(id)
+            },
             messages,
             older_messages: older,
             approvals: live
@@ -225,6 +238,9 @@ impl Claude {
         let turn = Uuid::new_v4();
         {
             let mut live = run.live.lock().expect("Claude live lock");
+            self.journal().clear(id)?;
+            live.turn = turn.to_string();
+            live.permission_closed = false;
             live.working = true;
             live.error = None;
             live.transcript.message(
@@ -263,6 +279,7 @@ impl Claude {
     }
 
     pub async fn approve(&self, id: Uuid, approval: Uuid, decision: Decision) -> Result<Value> {
+        let _guard = self.mutation.lock().await;
         let run = self
             .runs
             .lock()
@@ -287,6 +304,8 @@ impl Claude {
             if decision == Decision::Accept && !permission.approval.can_accept {
                 return Err(Failure::new(400, "Review this request on the device."));
             }
+            self.journal()
+                .decide(id, &permission.request, decision == Decision::Accept)?;
             live.approvals
                 .remove(&approval)
                 .expect("pending permission")
@@ -314,12 +333,17 @@ impl Claude {
         }) else {
             return Ok(json!({"stopped":false}));
         };
-        let starting = run.live.lock().expect("Claude live lock").starting;
+        let starting = {
+            let mut live = run.live.lock().expect("Claude live lock");
+            self.journal().clear(id)?;
+            live.stopping = true;
+            live.approvals.clear();
+            live.starting
+        };
         if starting {
             run.close().await?;
             return Ok(json!({"stopped":true}));
         }
-        run.live.lock().expect("Claude live lock").stopping = true;
         run.control(json!({"subtype":"interrupt"})).await?;
         Ok(json!({"stopped":true}))
     }

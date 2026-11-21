@@ -21,6 +21,7 @@ data class RemoteState(
     val busy: Boolean = false, val loading: Boolean = false, val error: String? = null,
     val models: List<ModelOption> = emptyList(), val modelError: String? = null, val actionError: String? = null,
     val detailCurrent: Boolean = false,
+    val dismissedExpiredApproval: String? = null,
 ) {
     val device get() = devices.firstOrNull { it.id == deviceId }
     private val selectedPage get() = deviceId?.let { sessionPages[it] }
@@ -37,6 +38,11 @@ data class RemoteState(
         }
     }
     val hasCurrentDetail get() = detailCurrent && detail != null && error == null && sessionDevice?.online == true
+    val turnRunning get() = (detail?.session ?: selectedSession)?.let { it.canStop || it.status in setOf("working", "needs_approval") } == true
+    val expiredApproval get() = detail?.expiredApproval?.takeIf { selectedSession?.agent == "claude" && !turnRunning && it.id != dismissedExpiredApproval }
+    val canRetryExpiredApproval get() = expiredApproval != null && hasCurrentDetail && !turnRunning && detail?.session?.canSend == true
+
+    fun hideExpiredApproval() = copy(dismissedExpiredApproval = detail?.expiredApproval?.id ?: dismissedExpiredApproval)
 
     fun acceptsReply(endpoint: String, device: String, session: String?) =
         this.endpoint == endpoint && sessionDeviceId == device && selectedSession?.id == session
@@ -48,7 +54,10 @@ data class RemoteState(
     fun actionFailed(failure: RemoteResult.Failure): RemoteState = if (failure.status == 401) requestFailed(failure)
     else copy(actionError = failure.message, detailCurrent = detailCurrent && failure.status !in listOf(null, 503, 504))
 
-    fun detailReceived(value: SessionDetail) = copy(detail = value, detailCurrent = true, error = null)
+    fun detailReceived(value: SessionDetail): RemoteState {
+        val updated = copy(detail = value, detailCurrent = true, error = null)
+        return if (value.session.canStop || value.session.status == "working") updated.copy(dismissedExpiredApproval = detail?.expiredApproval?.id ?: dismissedExpiredApproval) else updated
+    }
 
     suspend fun refreshSelection(loadDetail: suspend () -> Unit, refreshSessions: suspend () -> Unit) {
         if (selectedSession != null) loadDetail() else refreshSessions()
@@ -280,9 +289,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         mutable.update { it.copy(actionError = null) }
         val input = mapOf("text" to text, "requestId" to requestId) + (model?.let { mapOf("model" to it) } ?: emptyMap())
         return when (val result = api.empty("/api/devices/$device/sessions/${session.id}/messages", body = input)) {
-            is RemoteResult.Success -> { loadDetail(); true }
+            is RemoteResult.Success -> {
+                mutable.update { if (it.acceptsReply(api.endpoint, device, session.id)) it.hideExpiredApproval() else it }
+                loadDetail(); true
+            }
             is RemoteResult.Failure -> { if (client === api && state.value.acceptsReply(api.endpoint, device, session.id)) handleAction(result); false }
         }
+    }
+
+    suspend fun retryExpiredApproval(requestId: String): Boolean {
+        if (!state.value.canRetryExpiredApproval) return false
+        mutable.update { it.hideExpiredApproval() }
+        return send(EXPIRED_APPROVAL_RETRY, requestId)
     }
 
     suspend fun interrupt(requestId: String): Boolean {

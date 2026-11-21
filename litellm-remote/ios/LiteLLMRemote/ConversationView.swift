@@ -12,6 +12,7 @@ struct SessionView: View {
     @State private var attachments: [DraftAttachment] = []
     @State private var sending = false
     @State private var deciding = false
+    @State private var approvalRetry: ApprovalRetry?
     @State private var stopping = false
     @State private var stopRequestId = UUID().uuidString
     @State private var requestId = UUID().uuidString
@@ -32,10 +33,49 @@ struct SessionView: View {
     private var showsStop: Bool { session.canStop }
     private var working: Bool { hasCurrentDetail && showsStop }
     private var controlsEnabled: Bool { hasCurrentDetail && session.canSend && !sending }
+    private var expiredApproval: ExpiredApproval? {
+        guard let expired = detail?.expiredApproval,
+              approvalRetry?.approvalId != expired.id || approvalRetry?.sent != true else { return nil }
+        return expired
+    }
 
     var body: some View {
+        VStack(spacing: 0) {
+            transcript
+            composer
+        }
+        .background(Palette.canvas)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) { sessionChip }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Latest message", systemImage: "arrow.down", action: scrollToLatest)
+                    .labelStyle(.iconOnly).font(Fonts.caption)
+            }
+        }
+        .toolbar(.hidden, for: .tabBar)
+        .task(id: route.deviceId) { await loadModels() }
+        .sheet(isPresented: $showingModels) { allModels }
+        .sheet(isPresented: $showingSession) { sessionSheet }
+        .fileImporter(
+            isPresented: $importingFiles,
+            allowedContentTypes: DraftAttachment.readableTypes,
+            allowsMultipleSelection: true
+        ) { attachFiles($0) }
+        .task(id: route.session.id) {
+            await update()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                if scenePhase == .active { await update() }
+            }
+        }
+    }
+
+    private var transcript: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: Space.s3) {
+            // The service bounds the transcript. Measuring it in one pass
+            // keeps the bottom offset stable when rows above it change height.
+            VStack(alignment: .leading, spacing: Space.s3) {
                 Text(statusLabel).font(Fonts.caption).foregroundStyle(Palette.inkSoft)
                 if let error = loadError ?? actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? modelError {
                     InlineError(text: error)
@@ -51,9 +91,9 @@ struct SessionView: View {
                 let streamingID = detail?.streamingReplyID
                 ForEach(detail?.messages ?? []) { message in
                     MessageView(message: message, agentName: session.agentName, streaming: message.id == streamingID)
-                        .id(message.id)
                 }
                 ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
+                if let expiredApproval { expiredApprovalCard(expiredApproval) }
                 if working {
                     HStack(spacing: Space.s2) {
                         ProgressView().controlSize(.mini)
@@ -69,31 +109,8 @@ struct SessionView: View {
         .onChange(of: detail?.messages.last?.id) {
             if !followed { scrollToLatest(); followed = true }
         }
-        .background(Palette.canvas)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) { sessionChip }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Latest message", systemImage: "arrow.down", action: scrollToLatest)
-                    .labelStyle(.iconOnly).font(Fonts.caption)
-            }
-        }
-        .toolbar(.hidden, for: .tabBar)
-        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-        .task(id: route.deviceId) { await loadModels() }
-        .sheet(isPresented: $showingModels) { allModels }
-        .sheet(isPresented: $showingSession) { sessionSheet }
-        .fileImporter(
-            isPresented: $importingFiles,
-            allowedContentTypes: DraftAttachment.readableTypes,
-            allowsMultipleSelection: true
-        ) { attachFiles($0) }
-        .task(id: route.session.id) {
-            await update()
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
-                if scenePhase == .active { await update() }
-            }
+        .onChange(of: expiredApproval?.id) { _, newId in
+            if newId != nil { scrollToLatest() }
         }
     }
 
@@ -174,7 +191,6 @@ struct SessionView: View {
             .padding(.leading, composing ? 0 : Space.s1)
             .background(Palette.surface, in: .rect(cornerRadius: composerRadius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: composerRadius, style: .continuous).strokeBorder(Palette.border))
-            .animation(.snappy(duration: 0.18), value: composing)
             .animation(.snappy(duration: 0.18), value: attachments)
             .onChange(of: attachments) { if !sending { requestId = UUID().uuidString } }
             HStack(spacing: Space.s1 + 1) {
@@ -384,6 +400,34 @@ struct SessionView: View {
 
     // MARK: Approvals
 
+    private struct ApprovalRetry {
+        let approvalId: String
+        let requestId = UUID().uuidString
+        var sent = false
+        var error: String?
+    }
+
+    private func expiredApprovalCard(_ approval: ExpiredApproval) -> some View {
+        VStack(alignment: .leading, spacing: Space.s3) {
+            Label("Approval expired", systemImage: "hand.raised").font(Fonts.title).foregroundStyle(Palette.warn)
+            Text("Approval expired because the connector restarted. The command didn’t run.")
+                .font(Fonts.body)
+            Text(verbatim: approval.summary.isEmpty ? approval.tool : approval.summary)
+                .font(Fonts.mono).textSelection(.enabled)
+            if approvalRetry?.approvalId == approval.id, let error = approvalRetry?.error {
+                InlineError(text: error)
+            }
+            Button("Retry") { Task { await retryApproval(approval) } }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                .accessibilityIdentifier("retryExpiredApproval")
+                .disabled(!controlsEnabled || showsStop)
+        }
+        .padding(Space.s4).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface, in: .rect(cornerRadius: Radius.container, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Radius.container, style: .continuous).strokeBorder(Palette.warn.opacity(0.3)))
+    }
+
     private func approvalCard(_ approval: SessionApproval) -> some View {
         VStack(alignment: .leading, spacing: Space.s3) {
             Text("APPROVAL NEEDED").font(Fonts.eyebrow).tracking(1).foregroundStyle(Palette.warn)
@@ -441,7 +485,8 @@ struct SessionView: View {
     }
 
     private func send() async {
-        guard hasCurrentDetail, !sending else { return }
+        guard sendEnabled else { return }
+        composing = false
         sending = true
         actionError = nil
         let text = DraftAttachment.compose(draft: draft, attachments: attachments)
@@ -480,6 +525,25 @@ struct SessionView: View {
         }
         await update()
         deciding = false
+    }
+
+    private func retryApproval(_ approval: ExpiredApproval) async {
+        guard controlsEnabled, !showsStop, expiredApproval?.id == approval.id else { return }
+        sending = true
+        let previous = approvalRetry.flatMap { $0.approvalId == approval.id ? $0 : nil }
+        let retry = previous ?? ApprovalRetry(approvalId: approval.id)
+        approvalRetry = retry
+        approvalRetry?.error = nil
+        let text = "The connector restarted before I could approve your last command, so it didn't run. Please try it again."
+        switch await store.send(id: session.id, deviceId: route.deviceId, text: text, requestId: retry.requestId) {
+        case .success:
+            approvalRetry?.sent = true
+            await update()
+            scrollToLatest()
+        case .failure(let failure):
+            approvalRetry?.error = failure.message
+        }
+        sending = false
     }
 
     // Scroll without an animation. An in-flight animation against a list whose

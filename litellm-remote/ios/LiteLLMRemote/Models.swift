@@ -91,12 +91,19 @@ struct SessionDetail: Decodable, Equatable, Sendable {
     let olderMessages: Bool
     let error: String?
     let approvals: [SessionApproval]
+    let expiredApproval: ExpiredApproval?
 
     var streamingReplyID: String? {
         guard session.canStop else { return nil }
         return messages.last { $0.role == "user" || $0.role == "assistant" }
             .flatMap { $0.role == "assistant" ? $0.id : nil }
     }
+}
+
+struct ExpiredApproval: Decodable, Identifiable, Equatable, Sendable {
+    let id: String
+    let tool: String
+    let summary: String
 }
 
 struct SessionApproval: Decodable, Identifiable, Equatable, Sendable {
@@ -123,6 +130,12 @@ struct LoginPoll: Decodable, Sendable {
     let token: String?
     let refreshToken: String?
     let expiresAt: Int64?
+}
+
+struct RefreshedAccess: Decodable, Sendable {
+    let token: String
+    let refreshToken: String
+    let expiresAt: Int64
 }
 
 enum PhoneBearer: Equatable {
@@ -166,11 +179,15 @@ enum MessageMarkdown {
                 failurePolicy: .returnPartiallyParsedIfPossible
             )
         ) else { return nil }
-        let unsafe = parsed.runs.compactMap { run -> Range<AttributedString.Index>? in
-            guard let link = run.link, link.scheme?.lowercased() != "https" else { return nil }
-            return run.range
+        // SwiftUI's accessibility link rotor lays out each link separately.
+        var remainingLinks = 12
+        let inactive = parsed.runs.compactMap { run -> Range<AttributedString.Index>? in
+            guard let link = run.link else { return nil }
+            guard link.scheme?.lowercased() == "https", remainingLinks > 0 else { return run.range }
+            remainingLinks -= 1
+            return nil
         }
-        for range in unsafe {
+        for range in inactive {
             parsed[range].link = nil
         }
         return parsed
