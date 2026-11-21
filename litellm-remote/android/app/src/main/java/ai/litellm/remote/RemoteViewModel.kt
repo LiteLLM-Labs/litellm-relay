@@ -332,13 +332,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             if (refreshToken != refresh) return@withLock token != null
             when (val result = api.refreshSession(refresh)) {
                 is RemoteResult.Success -> {
-                    if (client !== api || refreshToken != refresh) return@withLock false
-                    val access = result.value.token
+                    if (refreshToken != refresh) return@withLock token != null
                     val next = result.value.refreshToken
-                    if (!vault.save(state.value.endpoint, next)) return@withLock false
                     refreshToken = next
-                    token = access
+                    token = result.value.token
                     accessExpiresAt = result.value.expiresAt
+                    vault.save(state.value.endpoint, next)
                     true
                 }
                 is RemoteResult.Failure -> {

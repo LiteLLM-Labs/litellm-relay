@@ -79,6 +79,21 @@ class RefreshTest {
         }
     }
 
+    @Test fun aRotatedRefreshTokenIsNotSentAgainWhenSecureStorageRejectsIt() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"token\":\"access-2\",\"refreshToken\":\"refresh-2\",\"expiresAt\":50}"))
+            server.enqueue(MockResponse().setBody("{\"token\":\"access-3\",\"refreshToken\":\"refresh-3\",\"expiresAt\":80}"))
+            val fixture = Fixture(server.url("/").toString())
+            assertEquals("access-2", fixture.bearer())
+            assertEquals("access-3", fixture.bearer())
+            val first = fixture.api.json.decodeFromString<Map<String, String>>(server.takeRequest().body.readUtf8())
+            val second = fixture.api.json.decodeFromString<Map<String, String>>(server.takeRequest().body.readUtf8())
+            assertEquals(mapOf("refreshToken" to "refresh-credential"), first)
+            assertEquals(mapOf("refreshToken" to "refresh-2"), second)
+            assertEquals(2, server.requestCount)
+        }
+    }
+
     @Test fun simultaneousExpiredCallersShareTheRefreshFailure() = runBlocking {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
