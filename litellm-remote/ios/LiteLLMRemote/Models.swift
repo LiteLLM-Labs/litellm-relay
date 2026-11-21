@@ -127,14 +127,22 @@ struct EmptyReply: Decodable, Sendable {}
 
 enum MessageMarkdown {
     static func parse(_ text: String) -> AttributedString? {
-        try? AttributedString(
+        guard var parsed = try? AttributedString(
             markdown: text,
             options: AttributedString.MarkdownParsingOptions(
                 allowsExtendedAttributes: false,
                 interpretedSyntax: .inlineOnlyPreservingWhitespace,
                 failurePolicy: .returnPartiallyParsedIfPossible
             )
-        )
+        ) else { return nil }
+        let unsafe = parsed.runs.compactMap { run -> Range<AttributedString.Index>? in
+            guard let link = run.link, link.scheme?.lowercased() != "https" else { return nil }
+            return run.range
+        }
+        for range in unsafe {
+            parsed[range].link = nil
+        }
+        return parsed
     }
 }
 
@@ -231,9 +239,19 @@ struct DraftAttachment: Identifiable, Equatable, Sendable {
         let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !attachments.isEmpty else { return body }
         let blocks = attachments.map { attachment in
-            "<attached-file name=\"\(attachment.name)\">\n\(attachment.text)\n</attached-file>"
+            "<attached-file name=\"\(fenceName(attachment.name))\">\n\(attachment.text)\n</attached-file>"
         }
         return ((body.isEmpty ? [] : [body]) + blocks).joined(separator: "\n\n")
+    }
+
+    private static func fenceName(_ name: String) -> String {
+        let cleaned = String(name.map { character in
+            switch character {
+            case "\"", "\n", "\r", "<", ">": "_"
+            default: character
+            }
+        }).trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "file" : String(cleaned.prefix(180))
     }
 }
 

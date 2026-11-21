@@ -27,6 +27,8 @@ use super::{
     store::{RequestState, Store},
 };
 
+static CLAUDE_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Directory(PathBuf);
 
 impl Directory {
@@ -1073,7 +1075,124 @@ fn invalid_outcomes_and_endpoint_credentials_are_rejected() {
 }
 
 #[tokio::test]
+async fn claude_child_never_inherits_anthropic_credentials_without_a_litellm_key() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = CLAUDE_ENV.lock().await;
+    let _restore = CredentialEnv::set(&[
+        ("ANTHROPIC_API_KEY", Some("sk-inherited-anthropic")),
+        ("ANTHROPIC_AUTH_TOKEN", Some("sk-inherited-token")),
+        ("OPENAI_API_KEY", Some("sk-inherited-openai")),
+        ("AWS_SECRET_ACCESS_KEY", Some("aws-inherited-secret")),
+        ("LITELLM_API_KEY", None),
+    ]);
+    let directory = Directory::new();
+    let home = directory.0.join("config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        json!({"env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test"}}).to_string(),
+    )
+    .unwrap();
+    let script = directory.0.join("claude-fixture");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import json, os, sys
+if sys.argv[1:] == ['agents', '--json']:
+    print('[]')
+    sys.exit(0)
+home = os.environ['CLAUDE_CONFIG_DIR']
+open(os.path.join(home, 'child-env.json'), 'w').write(json.dumps({
+    key: os.environ.get(key)
+    for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'LITELLM_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'PATH')
+}))
+for line in sys.stdin:
+    value = json.loads(line)
+    if value.get('type') == 'control_request' and value['request']['subtype'] == 'initialize':
+        print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}}), flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let claude = claude::Claude::new(
+        script,
+        home.clone(),
+        directory.0.join("grants"),
+        Url::parse("https://gateway.example.test").unwrap(),
+    );
+    let cwd = directory.0.to_str().unwrap();
+    let absent = child_credentials(&claude, &home, cwd).await;
+    assert_eq!(absent["ANTHROPIC_API_KEY"], Value::Null);
+    assert_eq!(absent["ANTHROPIC_AUTH_TOKEN"], Value::Null);
+    assert_eq!(absent["OPENAI_API_KEY"], Value::Null);
+    assert_eq!(absent["LITELLM_API_KEY"], Value::Null);
+    assert_eq!(absent["AWS_SECRET_ACCESS_KEY"], Value::Null);
+    assert_eq!(absent["PATH"], std::env::var("PATH").unwrap());
+
+    std::env::set_var("LITELLM_API_KEY", "sk-litellm-configured");
+    let configured = child_credentials(&claude, &home, cwd).await;
+    assert_eq!(configured["ANTHROPIC_API_KEY"], Value::Null);
+    assert_eq!(configured["ANTHROPIC_AUTH_TOKEN"], "sk-litellm-configured");
+    assert_eq!(configured["OPENAI_API_KEY"], Value::Null);
+    assert_eq!(configured["LITELLM_API_KEY"], Value::Null);
+    assert_eq!(configured["AWS_SECRET_ACCESS_KEY"], Value::Null);
+}
+
+async fn child_credentials(claude: &claude::Claude, home: &std::path::Path, cwd: &str) -> Value {
+    let session = claude.create(cwd.into()).unwrap();
+    let (_, id) = protocol::split_session(&session.id).unwrap();
+    claude
+        .send(id, "Check credentials".into(), None)
+        .await
+        .unwrap();
+    let path = home.join("child-env.json");
+    for _ in 0..50 {
+        if path.exists() {
+            return serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("Claude child did not record its environment");
+}
+
+struct CredentialEnv {
+    saved: [(&'static str, Option<String>); 5],
+}
+
+impl CredentialEnv {
+    fn set(values: &[(&str, Option<&str>)]) -> Self {
+        let saved = [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "LITELLM_API_KEY",
+        ]
+        .map(|key| (key, std::env::var(key).ok()));
+        for (key, value) in values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for CredentialEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn claude_native_protocol_handoff_approvals_stop_and_route_changes() {
+    let _env = CLAUDE_ENV.lock().await;
     use std::os::unix::fs::PermissionsExt;
     let directory = Directory::new();
     let endpoint = Arc::new(std::sync::Mutex::new(

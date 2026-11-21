@@ -222,6 +222,11 @@ final class RemoteTests: XCTestCase {
         try "fn main() {}\n".write(to: source, atomically: true, encoding: .utf8)
         let attachment = try DraftAttachment.read(url: source).get()
         XCTAssertEqual(attachment.name, "proxy.rs")
+        let hostile = DraftAttachment(name: "a\"\nb<c>", text: "note")
+        XCTAssertEqual(
+            DraftAttachment.compose(draft: "prompt", attachments: [hostile]),
+            "prompt\n\n<attached-file name=\"a__b_c_\">\nnote\n</attached-file>"
+        )
 
         let composed = DraftAttachment.compose(draft: "fix this", attachments: [attachment])
         XCTAssertEqual(composed, "fix this\n\n<attached-file name=\"proxy.rs\">\nfn main() {}\n\n</attached-file>")

@@ -174,9 +174,11 @@ impl Running {
 impl Claude {
     pub(super) async fn active(&self) -> Result<Vec<Grant>> {
         let mut command = Command::new(&self.executable);
+        isolate(&mut command);
         command
             .args(["agents", "--json"])
             .env("CLAUDE_CONFIG_DIR", &self.home);
+        strip_provider_secrets(&mut command);
         let bytes = output(command).await?;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -322,6 +324,7 @@ impl Claude {
         let (endpoint, local) = self.connection(grant).await?;
         let resume = self.transcript(grant.id).is_ok();
         let mut command = Command::new(&self.executable);
+        isolate(&mut command);
         command
             .current_dir(&grant.cwd)
             .args([
@@ -355,15 +358,15 @@ impl Claude {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        if local {
-            command
-                .env_remove("LITELLM_API_KEY")
-                .env_remove("ANTHROPIC_API_KEY")
-                .env_remove("ANTHROPIC_AUTH_TOKEN");
-        } else if let Ok(key) = std::env::var("LITELLM_API_KEY") {
-            command
-                .env_remove("ANTHROPIC_API_KEY")
-                .env("ANTHROPIC_AUTH_TOKEN", key);
+        // Provider credentials never come from the host environment. The only
+        // gateway credential a child may receive is a configured LiteLLM key.
+        strip_provider_secrets(&mut command);
+        if !local {
+            if let Ok(key) = std::env::var("LITELLM_API_KEY") {
+                if !key.is_empty() {
+                    command.env("ANTHROPIC_AUTH_TOKEN", key);
+                }
+            }
         }
         if let Some(model) = &grant.model {
             command.arg("--model").arg(model);
@@ -478,6 +481,54 @@ async fn write_input(
     tokio::select! {
         _ = stopping.changed() => false,
         result = input.write_all(line.as_bytes()) => result.is_ok(),
+    }
+}
+
+const PROVIDER_SECRETS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "LITELLM_API_KEY",
+];
+
+const CHILD_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NIX_SSL_CERT_FILE",
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+fn isolate(command: &mut Command) {
+    command.env_clear();
+    for key in CHILD_ENV {
+        if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            command.env(key, value);
+        }
+    }
+}
+
+fn strip_provider_secrets(command: &mut Command) {
+    for key in PROVIDER_SECRETS {
+        command.env_remove(key);
     }
 }
 
