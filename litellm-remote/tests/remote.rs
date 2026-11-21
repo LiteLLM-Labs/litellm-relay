@@ -1170,9 +1170,8 @@ fn only_public_messages_are_exposed_and_credentials_are_redacted() {
 
 #[tokio::test]
 async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
-    let directory = Directory::new();
-    let socket_path = directory.0.join("codex.sock");
-    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let (socket, listener) = ShortSocket::listen();
+    let socket_path = socket.0.clone();
     let thread = Uuid::new_v4();
     let resumes = Arc::new(AtomicUsize::new(0));
     let observed_resumes = resumes.clone();
