@@ -5,8 +5,8 @@ struct SessionView: View {
     let store: RemoteStore
     let route: SessionRoute
     @State private var detail: SessionDetail?
-    @State private var loadError: String?
-    @State private var actionError: String?
+    @State private var loadError: RemoteFailure?
+    @State private var actionError: RemoteFailure?
     @State private var draft = ""
     @State private var sending = false
     @State private var deciding = false
@@ -43,7 +43,7 @@ struct SessionView: View {
             .background(Palette.surface)
             if !online {
                 InlineError(text: "This device is offline. Reconnect it to continue this session.").padding(.horizontal, 18).padding(.top, 8)
-            } else if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError {
+            } else if let error = actionError?.message ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError?.message ?? modelError {
                 InlineError(text: error).padding(.horizontal, 18).padding(.top, 8)
             }
             ScrollView {
@@ -106,6 +106,11 @@ struct SessionView: View {
         }
         .task(id: online) { if online { await loadModels() } }
         .sheet(isPresented: $showingModels) { allModels }
+        .onChange(of: online) {
+            guard online else { return }
+            if isOfflineFailure(loadError) { loadError = nil }
+            if isOfflineFailure(actionError) { actionError = nil }
+        }
         .task(id: online) {
             guard online else { return }
             await update()
@@ -226,8 +231,12 @@ struct SessionView: View {
             // keeps the message list from re-rendering every two seconds.
             if detail != value { detail = value }
             loadError = nil
-        case .failure(let failure): if !Task.isCancelled && failure.status != 499 { loadError = failure.message }
+        case .failure(let failure): if !Task.isCancelled && failure.status != 499 { loadError = failure }
         }
+    }
+
+    private func isOfflineFailure(_ failure: RemoteFailure?) -> Bool {
+        failure?.status == 503 && failure?.message == "This device is offline. Keep Relay Remote connected on the device."
     }
 
     private func stopTurn() async {
@@ -235,7 +244,7 @@ struct SessionView: View {
         stopping = true
         switch await store.interrupt(id: session.id, deviceId: route.deviceId, requestId: stopRequestId) {
         case .success: actionError = nil; stopRequestId = UUID().uuidString
-        case .failure(let failure): actionError = failure.message
+        case .failure(let failure): actionError = failure
         }
         await update()
         stopping = false
@@ -251,7 +260,7 @@ struct SessionView: View {
             requestId = UUID().uuidString
             await update()
             scrollToLatest()
-        case .failure(let failure): actionError = failure.message
+        case .failure(let failure): actionError = failure
         }
         sending = false
     }
@@ -275,7 +284,7 @@ struct SessionView: View {
         deciding = true
         switch await store.approve(id: session.id, deviceId: route.deviceId, approvalId: approval.id, decision: decision) {
         case .success: actionError = nil
-        case .failure(let failure): actionError = failure.message
+        case .failure(let failure): actionError = failure
         }
         await update()
         deciding = false

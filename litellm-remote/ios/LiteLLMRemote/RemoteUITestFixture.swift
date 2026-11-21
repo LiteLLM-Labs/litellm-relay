@@ -27,6 +27,10 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
     static let gateway = "https://gateway.fixture.test"
     private static let sentPrompt = Mutex<(text: String, at: ContinuousClock.Instant)?>(nil)
     private static let codexPath = "/api/devices/mac/sessions/mac-codex-history"
+    private enum ReconnectState { case initial, loaded, disconnected, reportedOffline, reconnected }
+    private static let reconnectState = Mutex(ReconnectState.initial)
+    private static let linuxPath = "/api/devices/linux/sessions"
+    private static let linuxCodexPath = linuxPath + "/codex-linux"
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
@@ -35,20 +39,34 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
         guard let url = request.url else { return }
         let mode = request.value(forHTTPHeaderField: "X-Fixture-Mode")
         let codexHistory = mode == "codex-history"
+        let linuxReconnect = mode == "linux-reconnect"
         let macOnline = mode == "online" || codexHistory
         let linuxOnline = mode != "all-offline"
         let paths = url.pathComponents
         let body: [String: Any]
         var status = 200
+        var delay: DispatchTimeInterval = .milliseconds(0)
         switch url.path {
         case "/api/me":
             let subject = request.value(forHTTPHeaderField: "X-Fixture-Subject") ?? "fixture-account"
             body = ["gateway": Self.gateway, "identity": ["subject": subject, "label": "Test account",
                 "method": "sso", "expiresAt": 4_000_000_000_000 as Int64]]
         case "/api/devices":
+            let online = linuxReconnect ? Self.reconnectState.withLock { state in
+                switch state {
+                case .disconnected:
+                    state = .reportedOffline
+                    return false
+                case .reportedOffline:
+                    state = .reconnected
+                    return true
+                default:
+                    return true
+                }
+            } : linuxOnline
             body = ["devices": [
                 ["id": "mac", "name": "Test laptop", "platform": "macOS", "online": macOnline, "lastSeen": 1],
-                ["id": "linux", "name": "Test host", "platform": "Linux", "online": linuxOnline, "lastSeen": 1]
+                ["id": "linux", "name": "Test host", "platform": "Linux", "online": online, "lastSeen": 1]
             ]]
         case "/api/devices/mac/sessions" where codexHistory:
             body = ["sessions": [historySession()]]
@@ -89,6 +107,29 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
         case "/api/devices/mac/sessions" where !macOnline:
             status = 503
             body = ["error": "This device is offline."]
+        case Self.linuxPath where linuxReconnect:
+            body = ["sessions": [linuxSession("codex")]]
+        case Self.linuxCodexPath where linuxReconnect:
+            let state = Self.reconnectState.withLock { state in
+                let previous = state
+                switch state {
+                case .initial: state = .loaded
+                case .loaded: state = .disconnected
+                default: break
+                }
+                return previous
+            }
+            switch state {
+            case .initial, .reconnected:
+                let summary = linuxSession("codex").merging(["status": "needs_approval"]) { _, value in value }
+                body = ["session": summary, "messages": [], "olderMessages": false,
+                        "approvals": [["id": "linux-approval", "title": "Run this command?",
+                                       "text": "pwd", "canAccept": true]]]
+                if state == .reconnected { delay = .seconds(6) }
+            default:
+                status = 503
+                body = ["error": "This device is offline. Keep Relay Remote connected on the device."]
+            }
         case "/api/devices/linux/sessions" where linuxOnline && request.httpMethod == "POST":
             if let input = requestBody(), let agent = input["agent"] as? String,
                ["claude", "codex"].contains(agent), input["cwd"] as? String == "/srv/project" {
@@ -118,7 +159,10 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
                 self.client?.urlProtocolDidFinishLoading(self)
             }
             if codexHistory && url.path.hasPrefix(Self.codexPath) {
-                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50), execute: respond)
+                delay = .milliseconds(50)
+            }
+            if delay != .milliseconds(0) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: respond)
             } else {
                 respond()
             }

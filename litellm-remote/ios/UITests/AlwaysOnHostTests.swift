@@ -2,6 +2,29 @@ import XCTest
 
 final class AlwaysOnHostTests: XCTestCase {
     @MainActor
+    func testOfflineBannerClearsWhenLinuxReconnects() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        launch(app, mode: "linux-reconnect", run: UUID().uuidString)
+        let row = app.buttons["sessionRow-codex-linux"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let allow = app.buttons["Allow once"]
+        XCTAssertTrue(allow.waitForExistence(timeout: 10))
+        XCTAssertTrue(allow.isEnabled)
+
+        let serviceBanner = app.staticTexts["This device is offline. Keep Relay Remote connected on the device."]
+        XCTAssertTrue(serviceBanner.waitForExistence(timeout: 10))
+        let offlineBanner = app.staticTexts["This device is offline. Reconnect it to continue this session."]
+        XCTAssertTrue(offlineBanner.waitForExistence(timeout: 12))
+        XCTAssertFalse(allow.isEnabled)
+
+        XCTAssertTrue(allow.wait(for: \.isEnabled, toEqual: true, timeout: 12))
+        XCTAssertFalse(offlineBanner.exists)
+        XCTAssertFalse(serviceBanner.exists, "The old offline error should clear before the next detail response.")
+    }
+
+    @MainActor
     func testSendInCodexHistoryWithComposerFocused() {
         continueAfterFailure = false
         let app = XCUIApplication()
