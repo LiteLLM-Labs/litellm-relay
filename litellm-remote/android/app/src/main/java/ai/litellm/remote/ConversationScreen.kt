@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun ConversationScreen(state: RemoteState, model: RemoteViewModel) {
     val session = state.detail?.session ?: state.selectedSession ?: return
+    val online = state.sessionDevice?.online == true
     var draft by rememberSaveable(session.id) { mutableStateOf("") }
     var requestId by rememberSaveable(session.id) { mutableStateOf(UUID.randomUUID().toString()) }
     var selectedModel by rememberSaveable(session.id) { mutableStateOf<String?>(null) }
@@ -68,10 +69,13 @@ import kotlinx.coroutines.launch
                 stopping = true
                 if (model.interrupt(stopRequestId)) stopRequestId = UUID.randomUUID().toString()
                 stopping = false
-            } }, enabled = !stopping) { Icon(Icons.Default.Stop, "Stop current turn", tint = RoyalBlue) }
+            } }, enabled = online && !stopping) { Icon(Icons.Default.Stop, "Stop current turn", tint = RoyalBlue) }
             IconButton(onClick = { scope.launch { scroll.animateScrollToItem((scroll.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } }) {
                 Icon(Icons.Default.ArrowDownward, "Latest message", tint = RoyalBlue, modifier = Modifier.size(19.dp))
             }
+        }
+        if (!online) Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            ErrorNotice("This session stays on its original device. Reconnect it to continue.")
         }
         (state.actionError ?: state.error ?: state.detail?.error?.takeUnless { session.status == "handoff_required" } ?: state.modelError)?.let { Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ErrorNotice(it) } }
         LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(22.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
@@ -79,7 +83,7 @@ import kotlinx.coroutines.launch
                 Surface(color = Color.White, shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Text("Set up mobile control", fontWeight = FontWeight.SemiBold)
-                        SelectionContainer { Text(state.detail?.error ?: "Finish the current turn and hand this session over from Relay on your Mac.",
+                        SelectionContainer { Text(state.detail?.error ?: "Finish the current turn and hand this session over from Relay on the device.",
                             fontSize = 13.sp, fontFamily = FontFamily.Monospace, lineHeight = 21.sp) }
                     }
                 }
@@ -96,8 +100,8 @@ import kotlinx.coroutines.launch
                             Text(approval.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace, lineHeight = 19.sp)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(onClick = { scope.launch { deciding = true; model.approve(approval, "decline"); deciding = false } }, enabled = !deciding) { Text("Decline") }
-                            if (approval.canAccept) Button(onClick = { scope.launch { deciding = true; model.approve(approval, "accept"); deciding = false } }, enabled = !deciding) { Text("Allow once") }
+                            OutlinedButton(onClick = { scope.launch { deciding = true; model.approve(approval, "decline"); deciding = false } }, enabled = online && !deciding) { Text("Decline") }
+                            if (approval.canAccept) Button(onClick = { scope.launch { deciding = true; model.approve(approval, "accept"); deciding = false } }, enabled = online && !deciding) { Text("Allow once") }
                         }
                     }
                 }
@@ -115,7 +119,7 @@ import kotlinx.coroutines.launch
                 Column {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1f)) {
-                            Row(Modifier.clickable(enabled = !sending && session.canSend) { choosingModel = true }.padding(vertical = 6.dp),
+                            Row(Modifier.clickable(enabled = online && !sending && session.canSend) { choosingModel = true }.padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(12.dp))
                                 Text(state.models.firstOrNull { it.id == (selectedModel ?: session.model) }?.label ?: selectedModel ?: session.model ?: "Session model",
@@ -136,7 +140,7 @@ import kotlinx.coroutines.launch
                     HorizontalDivider(Modifier.padding(horizontal = 12.dp), color = Border.copy(alpha = 0.6f))
                 Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.Bottom) {
                     TextField(value = draft, onValueChange = { draft = it; requestId = UUID.randomUUID().toString() }, placeholder = { Text("Message ${session.agentName}…", fontSize = 15.sp) },
-                        modifier = Modifier.weight(1f), maxLines = 6, enabled = !sending && session.canSend,
+                        modifier = Modifier.weight(1f), maxLines = 6, enabled = online && !sending && session.canSend,
                         colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
                             disabledContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent))
                     FilledIconButton(onClick = { scope.launch {
@@ -146,7 +150,7 @@ import kotlinx.coroutines.launch
                             scroll.animateScrollToItem((scroll.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
                         }
                         sending = false
-                    } }, enabled = draft.isNotBlank() && draft.length <= 32000 && !sending && session.canSend, shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(bottom = 3.dp).size(39.dp)) {
+                    } }, enabled = online && draft.isNotBlank() && draft.length <= 32000 && !sending && session.canSend, shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(bottom = 3.dp).size(39.dp)) {
                         if (sending) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
                         else Icon(Icons.Default.ArrowUpward, "Send message", modifier = Modifier.size(19.dp))
                     }

@@ -13,13 +13,26 @@ import kotlinx.coroutines.launch
 data class RemoteState(
     val gateway: String = "", val controlAddress: String = "", val endpoint: String = "",
     val workspace: Workspace? = null, val devices: List<Device> = emptyList(), val deviceId: String? = null,
-    val sessions: List<CodingSession> = emptyList(), val nextCursor: String? = null,
+    val sessionPages: Map<String, SessionPage> = emptyMap(),
     val login: LoginStart? = null, val teams: List<Team> = emptyList(),
     val selectedSession: CodingSession? = null, val sessionDeviceId: String? = null, val detail: SessionDetail? = null,
     val busy: Boolean = false, val loading: Boolean = false, val error: String? = null,
     val models: List<ModelOption> = emptyList(), val modelError: String? = null, val actionError: String? = null,
 ) {
     val device get() = devices.firstOrNull { it.id == deviceId }
+    private val selectedPage get() = deviceId?.let { sessionPages[it] }
+    val sessions get() = selectedPage?.sessions.orEmpty()
+    val nextCursor get() = selectedPage?.nextCursor
+    val sessionListWarning get() = selectedPage?.warnings.orEmpty()
+        .takeIf { device?.online == true && it.isNotEmpty() }?.joinToString("\n")
+    val sessionDevice get() = devices.firstOrNull { it.id == sessionDeviceId }
+    val newSessionDevice get() = device?.let { selected ->
+        when {
+            selected.online -> selected
+            selected.platform == "macOS" -> devices.firstOrNull { it.online && it.platform == "Linux" }
+            else -> null
+        }
+    }
 }
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
@@ -105,64 +118,79 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     suspend fun refresh() {
         val api = client ?: return
-        when (val result = api.request<Devices>("/api/devices")) {
+        val result = api.request<Devices>("/api/devices")
+        if (client !== api) return
+        val sessionWasOnline = state.value.sessionDevice?.online == true
+        when (result) {
             is RemoteResult.Success -> mutable.update { previous ->
                 val selected = previous.deviceId?.takeIf { id -> result.value.devices.any { it.id == id } }
                     ?: result.value.devices.firstOrNull { it.online }?.id ?: result.value.devices.firstOrNull()?.id
+                val ids = result.value.devices.map { it.id }.toSet()
                 previous.copy(devices = result.value.devices, deviceId = selected,
-                    sessions = if (selected == previous.deviceId) previous.sessions else emptyList())
+                    sessionPages = previous.sessionPages.filterKeys { it in ids },
+                    loading = previous.loading && result.value.devices.any { it.id == selected && it.online })
             }
             is RemoteResult.Failure -> { handle(result); return }
         }
-        if (state.value.selectedSession != null) loadDetail() else refreshSessions()
+        if (state.value.selectedSession != null) {
+            loadDetail()
+            if (!sessionWasOnline && state.value.sessionDevice?.online == true) loadModels()
+        } else refreshSessions()
     }
 
     fun selectDevice(id: String) { viewModelScope.launch {
-        mutable.update { it.copy(deviceId = id, sessions = emptyList(), nextCursor = null, error = null) }
+        mutable.update { it.copy(deviceId = id, loading = false, error = null) }
         refreshSessions()
     } }
 
     suspend fun refreshSessions(older: Boolean = false) {
         val api = client ?: return
-        val id = state.value.deviceId ?: return
+        val id = state.value.device?.takeIf { it.online }?.id ?: return
         val base = "/api/devices/$id/sessions"
         val path = if (older) state.value.nextCursor?.let { ApiClient.query(base, "cursor", it) } ?: base else base
         mutable.update { it.copy(loading = it.sessions.isEmpty()) }
-        when (val result = api.request<SessionPage>(path)) {
-            is RemoteResult.Success -> if (state.value.deviceId == id) mutable.update {
-                it.copy(sessions = if (older) (it.sessions + result.value.sessions).distinctBy { session -> session.id } else result.value.sessions,
-                    nextCursor = result.value.nextCursor, loading = false, error = result.value.warnings.takeIf { warnings -> warnings.isNotEmpty() }?.joinToString("\n"))
+        val result = api.request<SessionPage>(path)
+        if (client !== api || state.value.devices.none { it.id == id }) return
+        when (result) {
+            is RemoteResult.Success -> mutable.update {
+                val page = if (older) result.value.copy(
+                    sessions = (it.sessionPages[id]?.sessions.orEmpty() + result.value.sessions).distinctBy { session -> session.id }
+                ) else result.value
+                val updated = it.copy(sessionPages = it.sessionPages + (id to page))
+                if (it.deviceId == id) updated.copy(loading = false, error = null)
+                else updated
             }
-            is RemoteResult.Failure -> handle(result)
+            is RemoteResult.Failure -> if (state.value.deviceId == id) handle(result)
         }
     }
 
-    fun openSession(session: CodingSession) { viewModelScope.launch {
-        mutable.update { it.copy(selectedSession = session, sessionDeviceId = it.deviceId, detail = null, error = null, actionError = null) }
+    fun openSession(device: String, session: CodingSession) { viewModelScope.launch {
+        mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, error = null, actionError = null, models = emptyList(), modelError = null) }
         loadDetail()
         loadModels()
     } }
-    fun closeSession() { mutable.update { it.copy(selectedSession = null, detail = null, error = null) } }
+    fun closeSession() { mutable.update { it.copy(selectedSession = null, sessionDeviceId = null, detail = null, error = null) } }
 
     private suspend fun loadDetail() {
         val api = client ?: return
         val session = state.value.selectedSession ?: return
-        val device = state.value.sessionDeviceId ?: return
+        val device = state.value.sessionDevice?.takeIf { it.online }?.id ?: return
         when (val result = api.request<SessionDetail>("/api/devices/$device/sessions/${session.id}")) {
-            is RemoteResult.Success -> if (state.value.selectedSession?.id == session.id) mutable.update { it.copy(detail = result.value, error = null) }
-            is RemoteResult.Failure -> handle(result)
+            is RemoteResult.Success -> if (state.value.sessionDeviceId == device && state.value.selectedSession?.id == session.id)
+                mutable.update { it.copy(detail = result.value, error = null) }
+            is RemoteResult.Failure -> if (state.value.sessionDeviceId == device && state.value.selectedSession?.id == session.id) handle(result)
         }
     }
 
-    suspend fun create(cwd: String, agent: String, requestId: String): Boolean {
+    suspend fun create(device: String, cwd: String, agent: String, requestId: String): Boolean {
         val api = client ?: return false
-        val device = state.value.deviceId ?: return false
+        if (state.value.devices.none { it.id == device && it.online }) return false
         mutable.update { it.copy(busy = true, error = null) }
         return when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
             is RemoteResult.Success -> {
-                mutable.update { it.copy(selectedSession = result.value, sessionDeviceId = device, detail = null, busy = false) }
-                loadDetail()
-                loadModels()
+                mutable.update { it.copy(selectedSession = result.value, sessionDeviceId = device, detail = null, busy = false,
+                    models = emptyList(), modelError = null, actionError = null) }
+                viewModelScope.launch { loadDetail(); loadModels() }
                 true
             }
             is RemoteResult.Failure -> { handle(result); false }
@@ -171,14 +199,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     suspend fun loadModels() {
         val api = client ?: return
-        val device = state.value.sessionDeviceId ?: return
+        val device = state.value.sessionDevice?.takeIf { it.online }?.id ?: return
         var cursor: String? = null
         val loaded = mutableListOf<ModelOption>()
         do {
             val base = "/api/devices/$device/models"
             when (val page = api.request<ModelPage>(cursor?.let { ApiClient.query(base, "cursor", it) } ?: base)) {
                 is RemoteResult.Success -> { loaded.addAll(page.value.models); cursor = page.value.nextCursor }
-                is RemoteResult.Failure -> { mutable.update { it.copy(modelError = page.message) }; return }
+                is RemoteResult.Failure -> {
+                    if (device == state.value.sessionDeviceId) mutable.update { it.copy(modelError = page.message) }
+                    return
+                }
             }
         } while (cursor != null)
         if (device == state.value.sessionDeviceId) mutable.update { it.copy(models = loaded.toList(), modelError = null) }
