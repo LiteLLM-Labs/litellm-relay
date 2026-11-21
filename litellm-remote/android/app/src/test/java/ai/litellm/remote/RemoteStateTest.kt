@@ -1,8 +1,8 @@
 package ai.litellm.remote
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
-import kotlinx.coroutines.runBlocking
 
 class RemoteStateTest {
     private val session = CodingSession("codex:one", "Task", "repo", "/repo", "codex", "working", true, true, 1)
@@ -10,6 +10,11 @@ class RemoteStateTest {
         devices = listOf(Device("host", "Host", true, 1, "Linux")), selectedSession = session, detailCurrent = true,
         detail = SessionDetail(session, listOf(Message("reply", "assistant", "Still here")), false,
             approvals = listOf(Approval("approval", "Run", "echo ok", true))))
+    private val laptop = Device("laptop", "Laptop", false, 0, "macOS")
+    private val host = Device("host", "Always-on host", true, 0, "Linux")
+    private val laptopSession = CodingSession("codex:one", "Laptop work", "repo", "/Users/me/repo",
+        "codex", "ready", true, false, 0)
+    private val hostSession = laptopSession.copy(title = "Host work", cwd = "/home/me/repo")
 
     @Test fun unavailableDevicesAndFailedRequestsDisableStaleControlsWithoutLosingHistory() {
         assertTrue(connected.hasCurrentDetail)
@@ -86,5 +91,31 @@ class RemoteStateTest {
         var sessionPolls = 0
         RemoteState().refreshSelection({ fail("No conversation selected") }, { sessionPolls++ })
         assertEquals(1, sessionPolls)
+    }
+
+    @Test fun offlineLaptopKeepsItsSessionsWhileOnlyCreationFallsBack() {
+        val state = RemoteState(devices = listOf(laptop, host), deviceId = laptop.id,
+            sessionDeviceId = laptop.id, selectedSession = laptopSession,
+            sessionPages = mapOf(laptop.id to SessionPage(listOf(laptopSession), "older", listOf("Cannot reach Codex.")),
+                host.id to SessionPage(listOf(hostSession))))
+
+        assertEquals(host, state.newSessionDevice)
+        assertEquals(laptop, state.device)
+        assertEquals(laptop, state.sessionDevice)
+        assertEquals(listOf(laptopSession), state.sessions)
+        assertEquals("older", state.nextCursor)
+        assertNull(state.sessionListWarning)
+        assertEquals("Cannot reach Codex.", state.copy(devices = listOf(laptop.copy(online = true), host)).sessionListWarning)
+        assertEquals(listOf(hostSession), state.copy(deviceId = host.id).sessions)
+        assertEquals(laptop, state.copy(deviceId = host.id).sessionDevice)
+    }
+
+    @Test fun onlineSelectionWinsAndAnotherMacIsNotAnAlwaysOnFallback() {
+        val onlineLaptop = laptop.copy(online = true)
+        assertEquals(onlineLaptop, RemoteState(devices = listOf(onlineLaptop, host), deviceId = laptop.id).newSessionDevice)
+        assertNull(RemoteState(devices = listOf(laptop, onlineLaptop.copy(id = "other"), host.copy(online = false)),
+            deviceId = laptop.id).newSessionDevice)
+        assertNull(RemoteState(devices = listOf(host, host.copy(id = "offline-host", online = false)),
+            deviceId = "offline-host").newSessionDevice)
     }
 }

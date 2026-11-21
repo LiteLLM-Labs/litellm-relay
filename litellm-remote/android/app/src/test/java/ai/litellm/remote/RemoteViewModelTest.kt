@@ -75,9 +75,10 @@ class RemoteViewModelTest {
             @Suppress("UNCHECKED_CAST")
             val state = RemoteViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
                 .get(model) as MutableStateFlow<RemoteState>
-            state.value = RemoteState(endpoint = endpoint, deviceId = "host")
+            state.value = RemoteState(endpoint = endpoint, deviceId = "host",
+                devices = listOf(Device("host", "Host", true, 1, "Linux")))
             try {
-                sheet.launch { model.create("/repo", agent, "create-once") }
+                sheet.launch { model.create("host", "/repo", agent, "create-once") }
                 withTimeout(5000) { model.state.first { it.selectedSession != null } }
                 assertTrue(withContext(Dispatchers.IO) { detailStarted.await(5, TimeUnit.SECONDS) })
                 sheet.cancel()

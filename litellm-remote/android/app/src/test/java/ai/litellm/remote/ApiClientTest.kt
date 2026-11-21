@@ -84,7 +84,7 @@ class ApiClientTest {
             {"id":"claude:session","agent":"claude","title":"Task","project":"repo","cwd":"/repo","status":"handoff_required","canSend":false,"canStop":false,"updatedAt":1},
             {"id":"codex:session","agent":"codex","title":"Task","project":"repo","cwd":"/repo","status":"needs_approval","canSend":true,"canStop":true,"updatedAt":1}
         ]}""")
-        assertEquals("Set up on Mac", page.sessions[0].activity)
+        assertEquals("Set up on device", page.sessions[0].activity)
         assertFalse(page.sessions[0].canSend)
         assertTrue(page.sessions[0].needsAttention)
         assertEquals("Needs approval", page.sessions[1].activity)
