@@ -14,6 +14,7 @@ data class RemoteState(
     val gateway: String = "", val controlAddress: String = "", val endpoint: String = "",
     val workspace: Workspace? = null, val devices: List<Device> = emptyList(), val deviceId: String? = null,
     val sessionPages: Map<String, SessionPage> = emptyMap(),
+    val cachedSessions: Map<String, List<CodingSession>> = emptyMap(),
     val login: LoginStart? = null, val teams: List<Team> = emptyList(),
     val selectedSession: CodingSession? = null, val sessionDeviceId: String? = null, val detail: SessionDetail? = null,
     val busy: Boolean = false, val loading: Boolean = false, val error: String? = null,
@@ -38,11 +39,14 @@ data class RemoteState(
     }
 
     private val selectedPage get() = deviceId?.let { sessionPages[it] }
-    val sessions get() = selectedPage?.sessions.orEmpty()
+    val sessions get() = deviceId?.let(::sessionsFor).orEmpty()
     val nextCursor get() = selectedPage?.nextCursor
     val sessionListWarning get() = selectedPage?.warnings.orEmpty()
         .takeIf { device?.online == true && it.isNotEmpty() }?.joinToString("\n")
     val sessionDevice get() = devices.firstOrNull { it.id == sessionDeviceId }
+    fun sessionsFor(id: String): List<CodingSession> =
+        sessionPages[id]?.sessions?.takeIf { devices.any { device -> device.id == id && device.online } }
+            ?: (cachedSessions[id] ?: sessionPages[id]?.sessions).orEmpty()
     val newSessionDevice get() = device?.let { selected ->
         when {
             selected.online -> selected
@@ -55,6 +59,7 @@ data class RemoteState(
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = application.getSharedPreferences("remote.settings", Context.MODE_PRIVATE)
     private val vault = SessionVault(application)
+    private val sessionCache = SessionCache(application)
     private val mutable = MutableStateFlow(RemoteState(gateway = preferences.getString("gateway", "").orEmpty(),
         controlAddress = preferences.getString("controlAddress", "").orEmpty()))
     val state = mutable.asStateFlow()
@@ -88,7 +93,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 if (workspaceAddress(reply.value.gateway, true) != gateway) { fail("This remote service is connected to a different gateway."); return@launch }
                 client = connection
                 preferences.edit().putString("gateway", gateway).putString("controlAddress", override).apply()
-                mutable.update { it.copy(workspace = reply.value, endpoint = endpoint, busy = false) }
+                restoreWorkspace(endpoint, reply.value)
                 if (reply.value.identity != null) refresh()
             }
             is RemoteResult.Failure -> fail(reply.message)
@@ -122,7 +127,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 if (!vault.save(state.value.endpoint, value.token)) { fail("Couldn’t securely save your sign-in."); return }
                 token = value.token
                 when (val workspace = api.request<Workspace>("/api/me")) {
-                    is RemoteResult.Success -> { mutable.update { it.copy(workspace = workspace.value, login = null, teams = emptyList(), error = null) }; refresh() }
+                    is RemoteResult.Success -> {
+                        if (client !== api) return
+                        restoreWorkspace(api.endpoint, workspace.value)
+                        refresh()
+                    }
                     is RemoteResult.Failure -> fail(workspace.message)
                 }
             }
@@ -131,6 +140,26 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 fail(result.message)
             }
         }
+    }
+
+    internal fun restoreWorkspace(endpoint: String, workspace: Workspace) {
+        val cached = workspace.identity?.let { identity ->
+            workspaceAddress(workspace.gateway, true)?.let { sessionCache.load(endpoint, it, identity.subject) }
+        }
+        mutable.update {
+            RemoteState(gateway = it.gateway, controlAddress = it.controlAddress, endpoint = endpoint, workspace = workspace,
+                devices = cached?.devices.orEmpty().map { device -> device.copy(online = false) },
+                deviceId = cached?.selectedDevice, cachedSessions = cached?.sessions.orEmpty())
+        }
+    }
+
+    private fun persistSessions(clear: Boolean = false) {
+        val current = state.value
+        val identity = current.workspace?.identity ?: return
+        val gateway = workspaceAddress(current.workspace.gateway, true) ?: return
+        if (clear) sessionCache.clear(current.endpoint, gateway, identity.subject)
+        else sessionCache.save(current.endpoint, gateway, identity.subject, OfflineSessions(
+            current.devices.map { it.copy(online = false) }, current.deviceId, current.cachedSessions))
     }
 
     suspend fun refresh() {
@@ -145,10 +174,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 val ids = result.value.devices.map { it.id }.toSet()
                 previous.copy(devices = result.value.devices, deviceId = selected,
                     sessionPages = previous.sessionPages.filterKeys { it in ids },
+                    cachedSessions = previous.cachedSessions.filterKeys { it in ids },
                     loading = previous.loading && result.value.devices.any { it.id == selected && it.online })
             }
             is RemoteResult.Failure -> { handle(result); return }
         }
+        persistSessions()
         if (state.value.selectedSession != null) {
             loadDetail()
             if (!sessionWasOnline && state.value.sessionDevice?.online == true) loadModels()
@@ -157,6 +188,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectDevice(id: String) { viewModelScope.launch {
         mutable.update { it.copy(deviceId = id, loading = false, error = null) }
+        persistSessions()
         refreshSessions()
     } }
 
@@ -165,20 +197,40 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val id = state.value.device?.takeIf { it.online }?.id ?: return
         val base = "/api/devices/$id/sessions"
         val path = if (older) state.value.nextCursor?.let { ApiClient.query(base, "cursor", it) } ?: base else base
+        val cachedAtRequest = state.value.cachedSessions[id].orEmpty().toSet()
         mutable.update { it.copy(loading = it.sessions.isEmpty()) }
         val result = api.request<SessionPage>(path)
         if (client !== api || state.value.devices.none { it.id == id }) return
         when (result) {
             is RemoteResult.Success -> mutable.update {
-                val page = if (older) result.value.copy(
-                    sessions = (it.sessionPages[id]?.sessions.orEmpty() + result.value.sessions).distinctBy { session -> session.id }
-                ) else result.value
-                val updated = it.copy(sessionPages = it.sessionPages + (id to page))
+                val cached = it.cachedSessions[id].orEmpty()
+                val listed = if (older) it.sessionPages[id]?.sessions.orEmpty() + result.value.sessions else result.value.sessions
+                val rows = (cached.filterNot { session -> session in cachedAtRequest } + listed).distinctBy { session -> session.id }
+                val complete = !older && result.value.nextCursor == null && result.value.warnings.isEmpty()
+                val lastSeen = if (complete) rows else (rows + cached).distinctBy { session -> session.id }
+                val updated = it.copy(sessionPages = it.sessionPages + (id to result.value.copy(sessions = rows)),
+                    cachedSessions = it.cachedSessions + (id to lastSeen))
                 if (it.deviceId == id) updated.copy(loading = false, error = null)
                 else updated
             }
             is RemoteResult.Failure -> if (state.value.deviceId == id) handle(result)
         }
+        if (result is RemoteResult.Success) persistSessions()
+    }
+
+    internal fun rememberSession(device: String, session: CodingSession) {
+        fun upsert(rows: List<CodingSession>): List<CodingSession> =
+            if (rows.any { it.id == session.id }) rows.map { if (it.id == session.id) session else it }
+            else listOf(session) + rows
+        mutable.update {
+            if (it.devices.none { row -> row.id == device }) return@update it
+            val page = it.sessionPages[device]
+            it.copy(
+                sessionPages = if (page == null) it.sessionPages else it.sessionPages + (device to page.copy(sessions = upsert(page.sessions))),
+                cachedSessions = it.cachedSessions + (device to upsert(it.cachedSessions[device].orEmpty())),
+            )
+        }
+        persistSessions()
     }
 
     fun openSession(device: String, session: CodingSession) { viewModelScope.launch {
@@ -193,9 +245,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val session = state.value.selectedSession ?: return
         val device = state.value.sessionDevice?.takeIf { it.online }?.id ?: return
         when (val result = api.request<SessionDetail>("/api/devices/$device/sessions/${session.id}")) {
-            is RemoteResult.Success -> if (state.value.sessionDeviceId == device && state.value.selectedSession?.id == session.id)
+            is RemoteResult.Success -> if (client === api && state.value.sessionDeviceId == device && state.value.selectedSession?.id == session.id) {
+                rememberSession(device, result.value.session)
                 mutable.update { it.detailReceived(result.value) }
-            is RemoteResult.Failure -> if (state.value.sessionDeviceId == device && state.value.selectedSession?.id == session.id) handle(result)
+            }
+            is RemoteResult.Failure -> if (client === api && state.value.sessionDeviceId == device && state.value.selectedSession?.id == session.id) handle(result)
         }
     }
 
@@ -203,8 +257,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val api = client ?: return false
         if (state.value.devices.none { it.id == device && it.online }) return false
         mutable.update { it.copy(busy = true, error = null) }
-        return when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
+        val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))
+        if (client !== api) return false
+        if (state.value.devices.none { it.id == device }) {
+            mutable.update { it.copy(busy = false) }
+            return false
+        }
+        return when (result) {
             is RemoteResult.Success -> {
+                rememberSession(device, result.value)
                 mutable.update { it.copy(selectedSession = result.value, sessionDeviceId = device, detail = null, busy = false,
                     models = emptyList(), modelError = null, actionError = null) }
                 viewModelScope.launch { loadDetail(); loadModels() }
@@ -274,15 +335,28 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun removeDevice(id: String) { viewModelScope.launch {
-        when (val result = client?.empty("/api/devices/$id", "DELETE")) {
-            is RemoteResult.Success -> refresh()
+        val api = client ?: return@launch
+        val result = api.empty("/api/devices/$id", "DELETE")
+        if (client !== api) return@launch
+        when (result) {
+            is RemoteResult.Success -> {
+                mutable.update { previous ->
+                    val devices = previous.devices.filterNot { it.id == id }
+                    previous.copy(devices = devices, sessionPages = previous.sessionPages - id, cachedSessions = previous.cachedSessions - id,
+                        deviceId = if (previous.deviceId == id) devices.firstOrNull { it.online }?.id ?: devices.firstOrNull()?.id else previous.deviceId)
+                }
+                persistSessions()
+                refresh()
+            }
             is RemoteResult.Failure -> handle(result)
-            null -> Unit
         }
     } }
 
     fun signOut() { viewModelScope.launch {
-        when (val result = client?.empty("/api/auth/logout")) {
+        val api = client
+        val result = api?.empty("/api/auth/logout")
+        if (client !== api) return@launch
+        when (result) {
             is RemoteResult.Success -> disconnect()
             is RemoteResult.Failure -> if (result.status == 401) disconnect() else fail("Couldn’t revoke this sign-in. Reconnect and try again.")
             null -> disconnect()
@@ -290,6 +364,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     } }
 
     fun disconnect() {
+        persistSessions(clear = true)
         vault.remove(state.value.endpoint)
         token = null
         client = null

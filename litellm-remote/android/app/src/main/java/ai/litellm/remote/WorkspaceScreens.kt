@@ -145,7 +145,7 @@ import kotlinx.coroutines.launch
 }
 
 @Composable private fun NewSessionSheet(state: RemoteState, target: Device, model: RemoteViewModel, close: () -> Unit) {
-    val sessions = state.sessionPages[target.id]?.sessions.orEmpty()
+    val sessions = state.sessionsFor(target.id)
     var cwd by rememberSaveable(target.id) { mutableStateOf(sessions.firstOrNull()?.cwd.orEmpty()) }
     var agent by rememberSaveable { mutableStateOf("codex") }
     var requestId by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }

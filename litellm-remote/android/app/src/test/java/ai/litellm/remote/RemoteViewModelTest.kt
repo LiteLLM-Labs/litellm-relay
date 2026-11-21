@@ -15,6 +15,73 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RemoteViewModelTest {
+    @Test fun cachedSessionsSurviveNewViewModelAndAreRemovedOnDisconnect() = runBlocking {
+        val disk = mutableMapOf<String, MutableMap<String, String>>()
+        fun newModel() = RemoteViewModel(object : Application() {
+            override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+                val rows = disk.getOrPut(requireNotNull(name)) { mutableMapOf() }
+                val editor = Proxy.newProxyInstance(SharedPreferences.Editor::class.java.classLoader,
+                    arrayOf(SharedPreferences.Editor::class.java)) { proxy, method, args ->
+                    when (method.name) {
+                        "putString" -> { rows[args!![0] as String] = args[1] as String; proxy }
+                        "remove" -> { rows.remove(args!![0]); proxy }
+                        "apply" -> null
+                        else -> error("Unexpected editor call ${method.name}")
+                    }
+                }
+                return Proxy.newProxyInstance(SharedPreferences::class.java.classLoader, arrayOf(SharedPreferences::class.java)) { _, method, args ->
+                    when (method.name) {
+                        "getString" -> rows[args!![0]] ?: args[1]
+                        "edit" -> editor
+                        else -> error("Unexpected preferences call ${method.name}")
+                    }
+                } as SharedPreferences
+            }
+        })
+        val session = CodingSession("claude:one", "Mac work", "repo", "/repo", "claude", "ready", true, false, 1)
+        val fresh = session.copy(id = "claude:two", title = "New Mac session")
+        val hostSession = session.copy(title = "Linux work")
+        val laptop = Device("mac", "Mac", true, 1, "macOS")
+        val host = Device("host", "Linux", true, 1, "Linux")
+        val workspace = Workspace(Identity("account", "Account", 1), "https://gateway.example")
+        MockWebServer().use { server ->
+            val endpoint = server.url("/").toString().trimEnd('/')
+            val clientField = RemoteViewModel::class.java.getDeclaredField("client").apply { isAccessible = true }
+            fun restored(value: Workspace = workspace) = newModel().apply {
+                restoreWorkspace(endpoint, value)
+                clientField.set(this, ApiClient(endpoint) { null })
+            }
+            val warm = restored()
+            server.enqueue(MockResponse().setBody(Json.encodeToString(Devices(listOf(laptop, host)))))
+            server.enqueue(MockResponse().setBody(Json.encodeToString(SessionPage(listOf(session)))))
+            warm.refresh()
+            warm.rememberSession(laptop.id, fresh)
+            warm.rememberSession(host.id, hostSession)
+
+            val cold = restored()
+            assertEquals(laptop.copy(online = false), cold.state.value.device)
+            assertEquals(listOf(fresh, session), cold.state.value.sessions)
+            assertEquals(listOf(hostSession), cold.state.value.sessionsFor(host.id))
+            assertNull(cold.state.value.newSessionDevice)
+            server.enqueue(MockResponse().setBody(Json.encodeToString(Devices(listOf(laptop.copy(online = false), host)))))
+            cold.refresh()
+            assertEquals(host, cold.state.value.newSessionDevice)
+            assertEquals(listOf(fresh, session), cold.state.value.sessions)
+            assertEquals(3, server.requestCount)
+            assertTrue(restored(workspace.copy(identity = workspace.identity!!.copy(subject = "another"))).state.value.sessions.isEmpty())
+
+            val liveSession = session.copy(title = "New title from device")
+            server.enqueue(MockResponse().setBody(Json.encodeToString(Devices(listOf(laptop)))))
+            server.enqueue(MockResponse().setBody(Json.encodeToString(SessionPage(listOf(liveSession)))))
+            cold.refresh()
+            assertEquals(listOf(liveSession), cold.state.value.sessions)
+            assertTrue(restored().state.value.sessionsFor(host.id).isEmpty())
+            cold.disconnect()
+            assertNull(cold.state.value.workspace)
+            assertTrue(restored().state.value.devices.isEmpty())
+        }
+    }
+
     @Test fun retrySendsOneNewUserTurnAndHidesNoticeEvenIfSendingFails() = runBlocking {
         val session = CodingSession("claude:one", "Task", "repo", "/repo", "claude", "ready", true, false, 1)
         val expired = ExpiredApproval("tool-1", "Bash", "Bash\necho ok")
