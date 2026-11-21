@@ -85,7 +85,7 @@ codex --version
 codex app-server daemon --help
 ```
 
-The unit examples assume Relay and Codex are installed in `~/.local/bin`. Use the actual absolute executable paths if they differ. If Codex was installed with npm, make sure its Node binary is also on the services' explicit `PATH`. Do not rely on an interactive shell or a version manager's shell initialization to set it.
+The unit examples assume Relay and Codex are installed in `~/.local/bin`. Use the actual absolute executable paths if they differ. Keep the complete Codex installation. Copying the native executable out of its npm package can pass `codex --version` but fail to start the daemon. If Codex was installed with npm, make sure its Node binary is also on the services' explicit `PATH`. Do not rely on an interactive shell or a version manager's shell initialization to set it.
 
 ### Configure inference and clone projects
 
@@ -188,6 +188,8 @@ test -S "$HOME/.codex/app-server-control/app-server-control.sock"
 ```
 
 Expect `Linger=yes`, two `active` lines, and a successful socket check. Then confirm the host shows online in the apps.
+
+For an unattended boot check, reboot the VM and confirm the host comes online in the app before anyone logs in as the host user. To test logout, close the host user's login session normally or terminate only that session with `loginctl terminate-session <session-id>`. Do not use `loginctl terminate-user` as a logout test. It stops the user's service manager and both services even if lingering is enabled. To recover without a login or reboot, an administrator can run `sudo systemctl start "user@$(id -u relayuser).service"`, replacing `relayuser` with the host username, then check that the host is online again.
 
 ## Existing Claude sessions
 
