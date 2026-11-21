@@ -17,7 +17,7 @@ class RemoteStateTest {
         val session = CodingSession("claude:one", "Task", "repo", "/repo", "claude", "ready", true, false, 1)
         val expired = ExpiredApproval("tool-1", "Bash", "Bash\n{\"command\":\"echo ok\"}")
         val ready = connected.copy(selectedSession = session, detail = SessionDetail(session, emptyList(), false, expiredApproval = expired))
-        assertEquals("Approval expired because the connector restarted. The command didn't run.", EXPIRED_APPROVAL_NOTICE)
+        assertEquals("Approval expired because Relay restarted. The command didn't run.", EXPIRED_APPROVAL_NOTICE)
         assertEquals(expired, ready.expiredApproval)
         assertTrue(ready.canRetryExpiredApproval)
         val offline = ready.copy(devices = ready.devices.map { it.copy(online = false) })
