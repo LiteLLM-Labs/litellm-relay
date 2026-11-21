@@ -581,6 +581,23 @@ impl Drop for Directory {
     }
 }
 
+struct ShortSocket(PathBuf);
+
+impl ShortSocket {
+    fn listen() -> (Self, tokio::net::UnixListener) {
+        let id = Uuid::new_v4().simple().to_string();
+        let path = PathBuf::from(format!("/tmp/r{}.sock", &id[..8]));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        (Self(path), listener)
+    }
+}
+
+impl Drop for ShortSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 struct Server {
     url: Url,
     task: tokio::task::JoinHandle<()>,
