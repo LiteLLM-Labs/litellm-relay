@@ -8,6 +8,7 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::{
     net::UnixStream,
     sync::{mpsc, oneshot, Mutex as AsyncMutex},
@@ -284,7 +285,17 @@ impl Events {
         if thread.is_empty() || self.approvals.len() >= 128 {
             return Some(json!({"id":request,"result":{"decision":"decline"}}));
         }
-        let id = Uuid::new_v4();
+        let identity = json!([
+            "codex-approval",
+            method,
+            thread,
+            params["turnId"],
+            item,
+            request
+        ]);
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&Sha256::digest(identity.to_string().as_bytes())[..16]);
+        let id = uuid::Builder::from_custom_bytes(bytes).into_uuid();
         self.approvals.insert(
             id,
             ApprovalRequest {
