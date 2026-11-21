@@ -4,18 +4,18 @@ import Observation
 actor RemoteTransport {
     private let baseURL: URL
     private let session: URLSession
-    private var token: String?
+    var workspace: String { baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
 
-    init(baseURL: URL, token: String?, session: URLSession? = nil) {
+    init(baseURL: URL, session: URLSession? = nil) {
         self.baseURL = baseURL
-        self.token = token
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
         self.session = session ?? URLSession(configuration: configuration)
     }
 
     func request<Value: Decodable & Sendable>(
-        _ path: String, method: String = "GET", body: [String: String] = [:], as type: Value.Type
+        _ path: String, method: String = "GET", body: [String: String] = [:],
+        token: String? = nil, as type: Value.Type
     ) async -> Result<Value, RemoteFailure> {
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
               url.host == baseURL.host, url.port == baseURL.port, url.scheme == baseURL.scheme
@@ -50,8 +50,6 @@ actor RemoteTransport {
             return .failure(RemoteFailure(message: "Couldn’t reach your workspace. Check your connection and try again.", status: nil))
         }
     }
-
-    func use(_ token: String?) { self.token = token }
 }
 
 @MainActor @Observable
@@ -73,12 +71,16 @@ final class RemoteStore {
     var error: String?
     private var transport: RemoteTransport?
     private var phone = PhoneSession()
+    private var refreshTask: Task<Result<RefreshedAccess, RemoteFailure>, Never>?
     private let defaults: UserDefaults
     private let session: URLSession?
+    private let saveRefresh: (String, String) -> Bool
 
-    init(defaults: UserDefaults = .standard, session: URLSession? = nil) {
+    init(defaults: UserDefaults = .standard, session: URLSession? = nil,
+         saveRefresh: @escaping (String, String) -> Bool = SessionVault.save(_:workspace:)) {
         self.defaults = defaults
         self.session = session
+        self.saveRefresh = saveRefresh
         self.address = defaults.string(forKey: "workspaceAddress")
             ?? ""
         let gateway = defaults.string(forKey: "gatewayAddress") ?? ""
@@ -123,8 +125,8 @@ final class RemoteStore {
         } else {
             phone = PhoneSession(legacyToken: saved)
         }
-        let connection = RemoteTransport(baseURL: url, token: nil, session: session)
-        transport = connection
+        resetRefresh()
+        transport = RemoteTransport(baseURL: url, session: session)
         let result = await call("/api/me", as: ServiceConfiguration.self)
         guard normalizedGateway(gatewayAddress) == gateway, serviceOverride == override else { return }
         switch result {
@@ -286,6 +288,7 @@ final class RemoteStore {
 
     func disconnect() {
         forgetRefresh(address)
+        resetRefresh()
         phone = PhoneSession()
         SessionVault.remove(workspace: address)
         hasSavedSession = false
@@ -319,48 +322,77 @@ final class RemoteStore {
     }
 
     private func call<T: Decodable & Sendable>(_ path: String, method: String = "GET", body: [String: String] = [:], as type: T.Type) async -> Result<T, RemoteFailure> {
-        guard await ensureAccess() else {
-            return .failure(RemoteFailure(message: "Couldn’t refresh your sign-in. Check your connection and try again.", status: nil))
-        }
         guard let transport else { return .failure(disconnected) }
-        let result = await transport.request(path, method: method, body: body, as: type)
+        let access: String?
+        switch await accessToken(using: transport) {
+        case .success(let token): access = token
+        case .failure(let failure): return .failure(failure)
+        }
+        guard self.transport === transport else { return .failure(disconnected) }
+        let result = await transport.request(path, method: method, body: body, token: access, as: type)
         if case .failure(let failure) = result, failure.status == 401, phone.refreshToken != nil {
-            phone.accessToken = nil
-            phone.accessExpiresAt = nil
-            guard await ensureAccess(), let transport = self.transport else { return result }
-            return await transport.request(path, method: method, body: body, as: type)
+            guard self.transport === transport else { return .failure(disconnected) }
+            if phone.accessToken == access {
+                phone.accessToken = nil
+                phone.accessExpiresAt = nil
+            }
+            switch await accessToken(using: transport) {
+            case .success(let token):
+                guard self.transport === transport else { return .failure(disconnected) }
+                return await transport.request(path, method: method, body: body, token: token, as: type)
+            case .failure(let failure):
+                return .failure(failure)
+            }
         }
         return result
     }
 
-    private func ensureAccess() async -> Bool {
+    private func accessToken(using transport: RemoteTransport) async -> Result<String?, RemoteFailure> {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         switch phone.bearer(now: now) {
         case .current(let token):
-            await transport?.use(token)
-            return true
+            return .success(token)
         case .refresh:
-            guard let refresh = phone.refreshToken, let transport else { return false }
-            switch await transport.request("/api/auth/refresh", method: "POST", body: ["refreshToken": refresh], as: LoginPoll.self) {
-            case .success(let value):
-                guard let access = value.token, let next = value.refreshToken, let expires = value.expiresAt,
-                      SessionVault.save(next, workspace: address) else { return false }
-                phone.rotated(access: access, refresh: next, expiresAt: expires)
-                await transport.use(access)
-                return true
+            return await refreshAccess(using: transport).map { $0.token }
+        case .signedOut:
+            return .success(nil)
+        }
+    }
+
+    private func refreshAccess(using transport: RemoteTransport) async -> Result<RefreshedAccess, RemoteFailure> {
+        if let refreshTask { return await refreshTask.value }
+        guard let refresh = phone.refreshToken else { return .failure(disconnected) }
+        let task = Task<Result<RefreshedAccess, RemoteFailure>, Never> { @MainActor in
+            let workspace = await transport.workspace
+            let reply = await transport.request("/api/auth/refresh", method: "POST", body: ["refreshToken": refresh], as: RefreshedAccess.self)
+            guard self.transport === transport, !Task.isCancelled else { return .failure(self.disconnected) }
+            defer { self.refreshTask = nil }
+            switch reply {
+            case .success(let access):
+                self.phone.rotated(access: access.token, refresh: access.refreshToken, expiresAt: access.expiresAt)
+                self.hasSavedSession = self.saveRefresh(access.refreshToken, workspace)
+                if !self.hasSavedSession { SessionVault.remove(workspace: workspace) }
             case .failure(let failure):
                 if failure.status == 401 {
-                    phone.refreshToken = nil
-                    SessionVault.remove(workspace: address)
-                    forgetRefresh(address)
-                    hasSavedSession = false
+                    self.phone = PhoneSession()
+                    SessionVault.remove(workspace: workspace)
+                    self.forgetRefresh(workspace)
+                    self.hasSavedSession = false
+                    if self.configuration?.identity != nil, workspace == self.address {
+                        self.disconnect()
+                        self.error = failure.message
+                    }
                 }
-                return false
             }
-        case .signedOut:
-            await transport?.use(nil)
-            return true
+            return reply
         }
+        refreshTask = task
+        return await task.value
+    }
+
+    private func resetRefresh() {
+        refreshTask?.cancel()
+        refreshTask = nil
     }
 
     private func resolveService(gateway: URL) async -> Result<URL, RemoteFailure> {

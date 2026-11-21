@@ -12,6 +12,7 @@ struct SessionView: View {
     @State private var attachments: [DraftAttachment] = []
     @State private var sending = false
     @State private var deciding = false
+    @State private var approvalRetry: ApprovalRetry?
     @State private var stopping = false
     @State private var stopRequestId = UUID().uuidString
     @State private var requestId = UUID().uuidString
@@ -32,6 +33,11 @@ struct SessionView: View {
     private var showsStop: Bool { session.canStop }
     private var working: Bool { hasCurrentDetail && showsStop }
     private var controlsEnabled: Bool { hasCurrentDetail && session.canSend && !sending }
+    private var expiredApproval: ExpiredApproval? {
+        guard let expired = detail?.expiredApproval,
+              approvalRetry?.approvalId != expired.id || approvalRetry?.sent != true else { return nil }
+        return expired
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,6 +93,7 @@ struct SessionView: View {
                     MessageView(message: message, agentName: session.agentName, streaming: message.id == streamingID)
                 }
                 ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
+                if let expiredApproval { expiredApprovalCard(expiredApproval) }
                 if working {
                     HStack(spacing: Space.s2) {
                         ProgressView().controlSize(.mini)
@@ -101,6 +108,9 @@ struct SessionView: View {
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: detail?.messages.last?.id) {
             if !followed { scrollToLatest(); followed = true }
+        }
+        .onChange(of: expiredApproval?.id) { _, newId in
+            if newId != nil { scrollToLatest() }
         }
     }
 
@@ -390,6 +400,34 @@ struct SessionView: View {
 
     // MARK: Approvals
 
+    private struct ApprovalRetry {
+        let approvalId: String
+        let requestId = UUID().uuidString
+        var sent = false
+        var error: String?
+    }
+
+    private func expiredApprovalCard(_ approval: ExpiredApproval) -> some View {
+        VStack(alignment: .leading, spacing: Space.s3) {
+            Label("Approval expired", systemImage: "hand.raised").font(Fonts.title).foregroundStyle(Palette.warn)
+            Text("Approval expired because the connector restarted. The command didn’t run.")
+                .font(Fonts.body)
+            Text(verbatim: approval.summary.isEmpty ? approval.tool : approval.summary)
+                .font(Fonts.mono).textSelection(.enabled)
+            if approvalRetry?.approvalId == approval.id, let error = approvalRetry?.error {
+                InlineError(text: error)
+            }
+            Button("Retry") { Task { await retryApproval(approval) } }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                .accessibilityIdentifier("retryExpiredApproval")
+                .disabled(!controlsEnabled || showsStop)
+        }
+        .padding(Space.s4).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface, in: .rect(cornerRadius: Radius.container, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Radius.container, style: .continuous).strokeBorder(Palette.warn.opacity(0.3)))
+    }
+
     private func approvalCard(_ approval: SessionApproval) -> some View {
         VStack(alignment: .leading, spacing: Space.s3) {
             Text("APPROVAL NEEDED").font(Fonts.eyebrow).tracking(1).foregroundStyle(Palette.warn)
@@ -487,6 +525,25 @@ struct SessionView: View {
         }
         await update()
         deciding = false
+    }
+
+    private func retryApproval(_ approval: ExpiredApproval) async {
+        guard controlsEnabled, !showsStop, expiredApproval?.id == approval.id else { return }
+        sending = true
+        let previous = approvalRetry.flatMap { $0.approvalId == approval.id ? $0 : nil }
+        let retry = previous ?? ApprovalRetry(approvalId: approval.id)
+        approvalRetry = retry
+        approvalRetry?.error = nil
+        let text = "The connector restarted before I could approve your last command, so it didn't run. Please try it again."
+        switch await store.send(id: session.id, deviceId: route.deviceId, text: text, requestId: retry.requestId) {
+        case .success:
+            approvalRetry?.sent = true
+            await update()
+            scrollToLatest()
+        case .failure(let failure):
+            approvalRetry?.error = failure.message
+        }
+        sending = false
     }
 
     // Scroll without an animation. An in-flight animation against a list whose
