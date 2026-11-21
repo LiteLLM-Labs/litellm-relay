@@ -45,6 +45,17 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.litellm.remote.v0.tests
         GENERATE_INFOPLIST_FILE: YES
+  LiteLLMRemoteUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: LiteLLMRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.litellm.remote.v0.uitests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   LiteLLMRemote:
     build:
@@ -53,3 +64,4 @@ schemes:
     test:
       targets:
         - LiteLLMRemoteTests
+        - LiteLLMRemoteUITests

@@ -184,13 +184,13 @@ final class RemoteTests: XCTestCase {
                         "pathological markup must still return a usable value")
     }
 
-    func testMarkdownQueueParsesEveryDistinctString() async {
+    func testMarkdownQueueParsesEveryDistinctString() async throws {
         async let earlier = MarkdownQueue.shared.parse("alpha")
         async let later = MarkdownQueue.shared.parse("beta")
         let (first, second) = await (earlier, later)
-        XCTAssertTrue(String(first?.characters ?? "").contains("alpha"),
+        XCTAssertEqual(String(try XCTUnwrap(first).characters), "alpha",
                       "an earlier bubble must not stay unparsed because a newer string was queued")
-        XCTAssertTrue(String(second?.characters ?? "").contains("beta"))
+        XCTAssertEqual(String(try XCTUnwrap(second).characters), "beta")
     }
 
     func testCachedMarkdownNeverShowsForNewerStreamedText() throws {
@@ -200,6 +200,16 @@ final class RemoteTests: XCTestCase {
         let grown = cached.display(for: "**bold** start and more")
         XCTAssertEqual(String(grown.characters), "**bold** start and more",
                        "newer text must render plainly instead of showing the stale parse")
+    }
+
+    func testStreamingPreviewKeepsTheNewestOutputWithoutChangingTheMessage() {
+        let text = String(repeating: "🧑🏽‍💻", count: 900) + "\nline 2\nline 3\nline 4\nline 5"
+        let message = SessionMessage(id: "reply", role: "assistant", text: text)
+        XCTAssertEqual(message.streamingPreview, "line 2\nline 3\nline 4\nline 5")
+        XCTAssertEqual(message.text, text)
+
+        let longLine = SessionMessage(id: "other", role: "assistant", text: String(repeating: "🧑🏽‍💻", count: 900))
+        XCTAssertEqual(longLine.streamingPreview, String(repeating: "🧑🏽‍💻", count: 600))
     }
 
     func testTeamSelectionAndPaginationPreserveOpaqueValues() {

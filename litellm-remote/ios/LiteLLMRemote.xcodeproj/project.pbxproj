@@ -18,10 +18,18 @@
 		B353C6980210EEDEBDB8C89B /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1AF3A53AB795E8DB0913DB3 /* ConnectionView.swift */; };
 		D0ABFF0C2836B6049E25B888 /* RemoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */; };
 		E59607B355EBC8011B403D33 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CFCC18FB031202D1C353E36 /* Components.swift */; };
+		EA7E62F87CDD71D60ADFB54B /* StreamingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74034B9D27BB10A5D244E7E5 /* StreamingTests.swift */; };
 		FC005057BCECF27F78FE8D32 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		164F9484E5CDEB7C32154194 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CBBEA23A99DDC45E9540E792 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 745EC38EBF1C163381FFC485;
+			remoteInfo = LiteLLMRemote;
+		};
 		850A2CAA5E6E7CB70C1E46E7 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = CBBEA23A99DDC45E9540E792 /* Project object */;
@@ -36,10 +44,12 @@
 		23002AD1A66750DDE13B0A1C /* DeviceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceViews.swift; sourceTree = "<group>"; };
 		2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTests.swift; sourceTree = "<group>"; };
 		25D2FDFA9A0568BCE0EFB9B7 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		2D9E4A891D46E6592FC97DF6 /* LiteLLMRemoteUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = LiteLLMRemoteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3DD3A4062935FC23761757F3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4CFCC18FB031202D1C353E36 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		576637DE9C9CB401D6191F50 /* SessionVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVault.swift; sourceTree = "<group>"; };
 		65F7629045C8E3822363E45B /* RemoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStore.swift; sourceTree = "<group>"; };
+		74034B9D27BB10A5D244E7E5 /* StreamingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingTests.swift; sourceTree = "<group>"; };
 		81636B9DC1927B76F84E0A5C /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LiteLLMRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		99525DFBF30EDD5B995C1393 /* SessionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionViews.swift; sourceTree = "<group>"; };
@@ -55,6 +65,7 @@
 			children = (
 				92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */,
 				00F4295C283EF3A7F83C8BD6 /* LiteLLMRemoteTests.xctest */,
+				2D9E4A891D46E6592FC97DF6 /* LiteLLMRemoteUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -83,6 +94,7 @@
 			children = (
 				1AE82CEFA6F574C99B50DA41 /* LiteLLMRemote */,
 				D230B4D3A86FB139F38833F7 /* Tests */,
+				ED15A7C24D54617C2FFE8900 /* UITests */,
 				000C151A937B6578F335EB03 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -93,6 +105,14 @@
 				2563D6F12CECF8C2E9F14874 /* RemoteTests.swift */,
 			);
 			path = Tests;
+			sourceTree = "<group>";
+		};
+		ED15A7C24D54617C2FFE8900 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				74034B9D27BB10A5D244E7E5 /* StreamingTests.swift */,
+			);
+			path = UITests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -115,6 +135,24 @@
 			productName = LiteLLMRemote;
 			productReference = 92AFD5A35CD1F7AA62D3FA87 /* LiteLLMRemote.app */;
 			productType = "com.apple.product-type.application";
+		};
+		AEBF89F200554F45B75A996B /* LiteLLMRemoteUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 15399F3B69D66A32874FEBF3 /* Build configuration list for PBXNativeTarget "LiteLLMRemoteUITests" */;
+			buildPhases = (
+				045107D79A661C97C29C1E54 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				281CC15C00A16B54566C2259 /* PBXTargetDependency */,
+			);
+			name = LiteLLMRemoteUITests;
+			packageProductDependencies = (
+			);
+			productName = LiteLLMRemoteUITests;
+			productReference = 2D9E4A891D46E6592FC97DF6 /* LiteLLMRemoteUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 		C5E8B72DEC1767EB9A7075CA /* LiteLLMRemoteTests */ = {
 			isa = PBXNativeTarget;
@@ -141,10 +179,14 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1430;
+				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					745EC38EBF1C163381FFC485 = {
 						ProvisioningStyle = Automatic;
+					};
+					AEBF89F200554F45B75A996B = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 745EC38EBF1C163381FFC485;
 					};
 					C5E8B72DEC1767EB9A7075CA = {
 						ProvisioningStyle = Automatic;
@@ -167,6 +209,7 @@
 			targets = (
 				745EC38EBF1C163381FFC485 /* LiteLLMRemote */,
 				C5E8B72DEC1767EB9A7075CA /* LiteLLMRemoteTests */,
+				AEBF89F200554F45B75A996B /* LiteLLMRemoteUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -183,6 +226,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		045107D79A661C97C29C1E54 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EA7E62F87CDD71D60ADFB54B /* StreamingTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B75130F3EBF37D672CD0671E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -211,6 +262,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		281CC15C00A16B54566C2259 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 745EC38EBF1C163381FFC485 /* LiteLLMRemote */;
+			targetProxy = 164F9484E5CDEB7C32154194 /* PBXContainerItemProxy */;
+		};
 		A293DA9F05A92B74CA731058 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 745EC38EBF1C163381FFC485 /* LiteLLMRemote */;
@@ -234,6 +290,23 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
+		};
+		6DD58891D6495C9F3AFDDBAA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = LiteLLMRemote;
+			};
+			name = Debug;
 		};
 		8D95D2A923FA84375747D5D0 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -412,9 +485,35 @@
 			};
 			name = Release;
 		};
+		FE4988C58C94CF6499959B16 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.litellm.remote.v0.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = LiteLLMRemote;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		15399F3B69D66A32874FEBF3 /* Build configuration list for PBXNativeTarget "LiteLLMRemoteUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6DD58891D6495C9F3AFDDBAA /* Debug */,
+				FE4988C58C94CF6499959B16 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		74E46387AA0E8BC22345D7E2 /* Build configuration list for PBXNativeTarget "LiteLLMRemote" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

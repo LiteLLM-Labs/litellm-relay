@@ -68,6 +68,24 @@ jobs:
       - name: Test
         run: swift test --package-path macos/RelayBarGlass
 
+  remote-ios:
+    name: Remote iOS tests
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on an available iPhone simulator
+        working-directory: litellm-remote/ios
+        run: |
+          destinations=$(xcodebuild -project LiteLLMRemote.xcodeproj -scheme LiteLLMRemote -showdestinations)
+          device=$(awk '/platform:iOS Simulator,.*name:iPhone / { split($0, fields, "id:"); split(fields[2], id, ","); print id[1]; exit }' <<< "$destinations")
+          if [ -z "$device" ]; then
+            echo "::error::No iPhone simulator is available"
+            exit 1
+          fi
+          xcodebuild -project LiteLLMRemote.xcodeproj -scheme LiteLLMRemote \
+            -destination "id=$device" -parallel-testing-enabled NO CODE_SIGN_IDENTITY=- test -quiet
+
   proxy-smoke:
     name: Proxy/TLS smoke
     runs-on: ubuntu-latest

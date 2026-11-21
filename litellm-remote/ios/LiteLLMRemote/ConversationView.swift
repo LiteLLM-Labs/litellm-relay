@@ -14,7 +14,7 @@ struct SessionView: View {
     @State private var stopRequestId = UUID().uuidString
     @State private var requestId = UUID().uuidString
     @State private var followed = false
-    @State private var scrollRequest = 0
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var selectedModel: String?
     @State private var models: [ModelOption] = []
     @State private var modelError: String?
@@ -36,35 +36,35 @@ struct SessionView: View {
             .foregroundStyle(Palette.secondary).padding(.horizontal, 22).padding(.vertical, 13)
             .background(Palette.surface)
             if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError { InlineError(text: error).padding(.horizontal, 18).padding(.top, 8) }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 22) {
-                        if detail?.olderMessages == true { Text("Latest messages").font(.caption2).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity) }
-                        if session.status == "handoff_required" {
-                            VStack(alignment: .leading, spacing: 14) {
-                                Label("Set up mobile control", systemImage: "laptopcomputer").font(.headline)
-                                Text(detail?.error ?? "Finish the current turn and hand this session over from Relay on your Mac.")
-                                    .font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
-                            }
-                            .padding(20).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18))
-                        } else if detail?.messages.isEmpty == true {
-                            EmptyWorkspace(title: "What are we building?", text: "Send a message to start working in \(session.project).", symbol: "terminal")
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 22) {
+                    if detail?.olderMessages == true { Text("Latest messages").font(.caption2).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity) }
+                    if session.status == "handoff_required" {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Label("Set up mobile control", systemImage: "laptopcomputer").font(.headline)
+                            Text(detail?.error ?? "Finish the current turn and hand this session over from Relay on your Mac.")
+                                .font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
                         }
-                        ForEach(detail?.messages ?? []) { message in MessageView(message: message, agentName: session.agentName).id(message.id) }
-                        ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
-                        if session.status == "working" {
-                            HStack(spacing: 10) { ProgressView().controlSize(.mini); Text("\(session.agentName) is working").font(.caption) }.foregroundStyle(Palette.secondary)
-                        }
-                        Color.clear.frame(height: 1).id("latest")
+                        .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18))
+                    } else if detail?.messages.isEmpty == true {
+                        EmptyWorkspace(title: "What are we building?", text: "Send a message to start working in \(session.project).", symbol: "terminal")
                     }
-                    .padding(.horizontal, 22).padding(.vertical, 26)
+                    let streamingID = detail?.streamingReplyID
+                    ForEach(detail?.messages ?? []) { message in
+                        MessageView(message: message, agentName: session.agentName, streaming: message.id == streamingID)
+                    }
+                    ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
+                    if session.status == "working" {
+                        HStack(spacing: 10) { ProgressView().controlSize(.mini); Text("\(session.agentName) is working").font(.caption) }.foregroundStyle(Palette.secondary)
+                    }
                 }
-                .scrollDismissesKeyboard(.interactively)
-                .onChange(of: detail?.messages.last?.id) {
-                    if !followed { scrollToLatest(proxy); followed = true }
-                }
-                .onChange(of: scrollRequest) { scrollToLatest(proxy) }
+                .padding(.horizontal, 22).padding(.vertical, 26)
+            }
+            .scrollPosition($scrollPosition)
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: detail?.messages.last?.id) {
+                if !followed { scrollToLatest(); followed = true }
             }
         }
         .background(Palette.background)
@@ -81,7 +81,7 @@ struct SessionView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Latest message", systemImage: "arrow.down") { scrollRequest += 1 }.labelStyle(.iconOnly)
+                Button("Latest message", systemImage: "arrow.down", action: scrollToLatest).labelStyle(.iconOnly)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
@@ -229,7 +229,7 @@ struct SessionView: View {
             draft = ""
             requestId = UUID().uuidString
             await update()
-            scrollRequest += 1
+            scrollToLatest()
         case .failure(let failure): actionError = failure.message
         }
         sending = false
@@ -260,15 +260,11 @@ struct SessionView: View {
         deciding = false
     }
 
-    // ScrollViewProxy.scrollTo animates by default. An in-flight animation
-    // against a LazyVStack whose height is still changing (Stop, or a send
-    // that replaces the streamed turn) retriggers layout until the process
-    // is killed.
-    private func scrollToLatest(_ proxy: ScrollViewProxy) {
+    private func scrollToLatest() {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            proxy.scrollTo("latest", anchor: .bottom)
+            scrollPosition.scrollTo(edge: .bottom)
         }
     }
 }
@@ -276,6 +272,7 @@ struct SessionView: View {
 private struct MessageView: View {
     let message: SessionMessage
     let agentName: String
+    let streaming: Bool
     @State private var expanded = false
 
     private var visibleText: String {
@@ -319,10 +316,20 @@ private struct MessageView: View {
                         .background(.white, in: RoundedRectangle(cornerRadius: 10))
                     Text(agentName).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.ink)
                 }
-                MarkdownText(text: visibleText)
+                Group {
+                    if streaming {
+                        // Keep the live row's layout fixed while its text changes.
+                        Text(verbatim: message.streamingPreview)
+                            .lineLimit(8, reservesSpace: true)
+                            .truncationMode(.head)
+                            .accessibilityIdentifier("streamingReply")
+                    } else {
+                        MarkdownText(text: visibleText)
+                    }
+                }
                     .font(.system(size: 15)).lineSpacing(7).tint(Palette.accent)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if message.text.count > 8000 && !expanded { Button("Show full message") { expanded = true }.font(.caption) }
+                if !streaming && message.text.count > 8000 && !expanded { Button("Show full message") { expanded = true }.font(.caption) }
             }
             .padding(17).frame(maxWidth: .infinity, alignment: .leading)
             .background(Palette.surface, in: RoundedRectangle(cornerRadius: 20))

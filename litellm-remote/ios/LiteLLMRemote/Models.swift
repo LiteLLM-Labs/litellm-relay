@@ -66,6 +66,11 @@ struct SessionMessage: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let role: String
     let text: String
+
+    var streamingPreview: String {
+        text.suffix(600).split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .suffix(4).joined(separator: "\n")
+    }
 }
 
 struct ModelOption: Decodable, Identifiable, Sendable {
@@ -85,6 +90,12 @@ struct SessionDetail: Decodable, Equatable, Sendable {
     let olderMessages: Bool
     let error: String?
     let approvals: [SessionApproval]
+
+    var streamingReplyID: String? {
+        guard session.canStop else { return nil }
+        return messages.last { $0.role == "user" || $0.role == "assistant" }
+            .flatMap { $0.role == "assistant" ? $0.id : nil }
+    }
 }
 
 struct SessionApproval: Decodable, Identifiable, Equatable, Sendable {

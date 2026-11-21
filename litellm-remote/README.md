@@ -73,6 +73,8 @@ Open `litellm-remote/ios/LiteLLMRemote.xcodeproj` in Xcode and select your signi
 
 Both agents support history, new sessions, messages, incremental public assistant text, tool activity, one-time approvals, model selection above the composer, and stopping the current turn. Hidden reasoning and raw tool results are omitted. Common credential patterns are redacted. Transcripts remain on the Mac and are read on demand by the app.
 
+On iOS, the latest assistant reply shows a short plain-text preview while a turn is active. The conversation displays the formatted reply available from the connector once the turn ends.
+
 The model picker uses the signed-in account’s gateway catalog. Sign in again to refresh access. Changing models or sending another message while a turn is active is refused. New Codex sessions use workspace-write sandboxing and on-request approvals. Resumed Codex sessions preserve their existing permissions, with one exception: a thread whose approval policy is `never` would deny mobile tool requests without showing a card, so sending from the phone raises it to `on-request`, still subject to administrator constraints and the unchanged sandbox. Claude uses its normal settings and default permission mode, without bypass flags.
 
 File approvals require the complete diff. Oversized requests, broad persistent-access grants, and unsupported interactive dialogs must be reviewed on the Mac. Stopping or declining remains possible if Relay changes environments. New input and approval acceptance verify that the agent still routes to the paired gateway, including Relay’s current broker gateway rather than a stale account snapshot.
@@ -85,11 +87,13 @@ Mutations carry request IDs and their outcomes are persisted. Uncertain requests
 cargo fmt --all --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
-xcodebuild -project litellm-remote/ios/LiteLLMRemote.xcodeproj -scheme LiteLLMRemote -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath litellm-remote/.local/DerivedData test
+xcodebuild -project litellm-remote/ios/LiteLLMRemote.xcodeproj -scheme LiteLLMRemote -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath litellm-remote/.local/DerivedData -parallel-testing-enabled NO CODE_SIGN_IDENTITY=- test
 cd litellm-remote/android
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
 
 Rust tests exercise persisted ownership and deduplication, gateway SSO and model authorization, outbound WebSocket routing, current Relay environment checks, public-message filtering, shared Codex RPC, and native Claude control messages. Protocol fixtures do not substitute for a live end-to-end check with the installed agents and a real gateway.
+
+The iOS UI regression uses a local service fixture to exercise a long Codex reply, Stop, and a follow-up send without requiring gateway or provider credentials.
 
 The MCP SDK is pinned to the reviewed chrono-optional commit from [upstream PR 1474](https://github.com/modelcontextprotocol/rust-sdk/pull/1474). Default features remain disabled, so chrono is not included. Move back to a published SDK release once that change ships.
