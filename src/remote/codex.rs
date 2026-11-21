@@ -247,6 +247,13 @@ impl Events {
                 json!({"id":request,"error":{"code":-32601,"message":"Review this request on the device."}}),
             );
         }
+        if self
+            .approvals
+            .values()
+            .any(|approval| approval.request == *request)
+        {
+            return None;
+        }
         let command = method == "item/commandExecution/requestApproval";
         let changes = self.changes.get(&format!("{thread}/{item}"));
         let full = if command {
@@ -639,6 +646,25 @@ impl Codex {
     pub async fn read(&self, id: Uuid) -> Result<Detail> {
         let rpc = self.connection().await?;
         let thread = self.metadata(&rpc, id).await?;
+        if !self
+            .events
+            .lock()
+            .expect("Codex event lock")
+            .tracked
+            .contains(&id.to_string())
+        {
+            let resumed: ThreadReply = rpc
+                .request("thread/resume", json!({"threadId":id,"excludeTurns":true}))
+                .await?;
+            if resumed.thread.id != id || resumed.thread.model_provider != self.provider {
+                return Err(Failure::new(404, "Session not found."));
+            }
+            self.events
+                .lock()
+                .expect("Codex event lock")
+                .tracked
+                .insert(id.to_string());
+        }
         let draft = self
             .drafts
             .lock()

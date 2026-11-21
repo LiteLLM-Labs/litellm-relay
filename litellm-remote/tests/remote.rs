@@ -1116,6 +1116,116 @@ fn only_public_messages_are_exposed_and_credentials_are_redacted() {
 }
 
 #[tokio::test]
+async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
+    let directory = Directory::new();
+    let socket_path = directory.0.join("codex.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let thread = Uuid::new_v4();
+    let resumes = Arc::new(AtomicUsize::new(0));
+    let observed_resumes = resumes.clone();
+    let server = tokio::spawn(async move {
+        let mut pending = false;
+        let mut completed = false;
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Frame::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                if request.get("method").is_none() {
+                    assert_eq!(request["id"], 17);
+                    assert_eq!(request["result"]["decision"], "accept");
+                    pending = false;
+                    completed = true;
+                    socket
+                        .send(Frame::Text(
+                            json!({"method":"serverRequest/resolved","params":{"requestId":17}})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let method = request["method"].as_str().unwrap();
+                if method == "initialized" {
+                    continue;
+                }
+                let metadata = json!({"id":thread,"cwd":"/repo","preview":"Approval reconnect","modelProvider":"litellm","updatedAt":1,"status":if pending {json!({"type":"active","activeFlags":["waitingOnApproval"]})} else {json!({"type":"idle"})}});
+                let result = match method {
+                    "initialize" => json!({}),
+                    "thread/read" => json!({"thread":metadata}),
+                    "config/read" => {
+                        json!({"config":{"model_providers":{"litellm":{"base_url":"https://gateway.example.test"}}}})
+                    }
+                    "thread/resume" => {
+                        observed_resumes.fetch_add(1, Ordering::SeqCst);
+                        json!({"thread":metadata,"approvalPolicy":"on-request"})
+                    }
+                    "turn/start" => {
+                        pending = true;
+                        json!({"turn":{"id":"turn"}})
+                    }
+                    "thread/turns/list" => {
+                        json!({"data":[{"id":"turn","status":if completed {"completed"} else {"inProgress"},"items":[],"error":null}]})
+                    }
+                    _ => panic!("Unexpected method {method}"),
+                };
+                socket
+                    .send(Frame::Text(
+                        json!({"id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                if pending && matches!(method, "turn/start" | "thread/resume") {
+                    let approval = Frame::Text(json!({"id":17,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"turnId":"turn","itemId":"command","command":"printf reconnect-ok","availableDecisions":["accept","decline"]}}).to_string().into());
+                    socket.send(approval.clone()).await.unwrap();
+                    socket.send(approval).await.unwrap();
+                }
+            }
+        }
+    });
+    let gateway = Url::parse("https://gateway.example.test").unwrap();
+    let original = codex::Codex::new(socket_path.clone(), "litellm".into(), gateway.clone());
+    original
+        .send(thread, "Run the command".into(), None)
+        .await
+        .unwrap();
+    assert_eq!(original.read(thread).await.unwrap().approvals.len(), 1);
+    drop(original);
+
+    let restarted = codex::Codex::new(socket_path, "litellm".into(), gateway);
+    let restored = restarted.read(thread).await.unwrap();
+    assert_eq!(restored.session.status, "needs_approval");
+    assert_eq!(
+        restored.approvals.len(),
+        1,
+        "The daemon still holds an answerable approval"
+    );
+    assert!(restored.approvals[0].can_accept);
+    assert_eq!(restarted.read(thread).await.unwrap().approvals.len(), 1);
+    assert_eq!(
+        resumes.load(Ordering::SeqCst),
+        2,
+        "Attach once per connection, not on every poll"
+    );
+    restarted
+        .approve(
+            thread,
+            Uuid::parse_str(&restored.approvals[0].id).unwrap(),
+            Decision::Accept,
+        )
+        .await
+        .unwrap();
+    let resolved = restarted.read(thread).await.unwrap();
+    assert!(resolved.approvals.is_empty());
+    assert_eq!(resolved.session.status, "ready");
+    assert!(!resolved.session.can_stop);
+    server.abort();
+}
+
+#[tokio::test]
 async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
     let directory = Directory::new();
     let socket_name = format!(".remote-{}.sock", Uuid::new_v4().simple());
