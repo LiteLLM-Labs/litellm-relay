@@ -174,7 +174,6 @@ mod tests {
             test_support::{service_on, FakeUpstream},
         },
     };
-    use std::env;
     use tokio::task::JoinHandle;
     use uuid::Uuid;
 
@@ -220,7 +219,7 @@ mod tests {
             tool("github-create_issue", "Open an issue"),
         ]);
         let (rig, service) = service_on(static_key_settings("sk-static"), &upstream);
-        let path = env::temp_dir()
+        let path = PathBuf::from("/tmp")
             .join(format!("rm-{}", Uuid::new_v4().simple()))
             .join(SOCKET_FILE);
         let listener = bind(&path).expect("bind");

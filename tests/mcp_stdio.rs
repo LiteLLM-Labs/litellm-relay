@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -20,7 +20,7 @@ use tokio::{
 const RELAY: &str = env!("CARGO_BIN_EXE_litellm-relay");
 
 fn scratch_home(label: &str) -> PathBuf {
-    let home = env::temp_dir().join(format!("rmh-{}-{label}", std::process::id()));
+    let home = PathBuf::from("/tmp").join(format!("rmh-{}-{label}", std::process::id()));
     let _ = fs::remove_dir_all(&home);
     fs::create_dir_all(home.join(".litellm-relay")).unwrap();
     home

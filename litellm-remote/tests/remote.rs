@@ -35,7 +35,7 @@ fn claude_supervisor_releases_its_lock_while_a_forked_child_has_the_fd() {
     use claude::supervisor::Server as Supervisor;
     use std::{io::Write, os::fd::AsRawFd, os::unix::net::UnixStream};
 
-    let directory = Directory::new();
+    let directory = Directory::short();
     let socket = directory.0.join("supervisor.sock");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -71,7 +71,7 @@ async fn claude_supervisor_restart_approvals_permissions_lock_and_eviction() {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
 
-    let directory = Directory::new();
+    let directory = Directory::short();
     let relay = serve(Router::new().route("/api/status", get(|| async {
         Json(json!({"runtime":"rust","gateway_url":"https://gateway.example.test","broker":{"gateway_url":"https://gateway.example.test"}}))
     }))).await;
@@ -139,6 +139,7 @@ for line in sys.stdin:
         let _ = shutdown.await;
     }));
     let fresh = || Client::new(socket.clone(), false, None);
+    drop(tokio::net::UnixStream::connect(&socket).await.unwrap());
     assert_eq!(
         fresh().call(Request::Hello).await.unwrap()["pid"],
         std::process::id()
@@ -285,7 +286,7 @@ for line in sys.stdin:
     })
     .await
     .unwrap();
-    // A disconnected approval request must still complete.
+    // A half-closed request must complete without consuming its response.
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let mut bytes = serde_json::to_vec(&Request::Approve {
         id: fifth,
@@ -295,7 +296,7 @@ for line in sys.stdin:
     .unwrap();
     bytes.push(b'\n');
     stream.write_all(&bytes).await.unwrap();
-    drop(stream);
+    stream.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if fresh().call(Request::Read { id: fifth }).await.unwrap()["session"]["status"]
@@ -312,6 +313,7 @@ for line in sys.stdin:
         std::fs::read_to_string(home.join("tools")).unwrap(),
         format!("{}\n{fifth}\n", ids[0])
     );
+    drop(stream);
     assert_eq!(
         fresh()
             .call(Request::Approve {
@@ -336,7 +338,7 @@ for line in sys.stdin:
 async fn claude_supervisor_rejects_bad_frames_and_exits_when_idle() {
     use claude::supervisor::{Client, Request, Server as Supervisor};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let directory = Directory::new();
+    let directory = Directory::short();
     let socket = directory.0.join("private/supervisor.sock");
     let server = Supervisor::bind(&socket).unwrap().unwrap();
     let claude = Arc::new(claude::Claude::new(
@@ -413,7 +415,7 @@ fn claude_supervisor_process_fixture() {
 async fn claude_supervisor_crash_expires_only_lost_approvals() {
     use claude::supervisor::{Client, Request};
     use std::{os::unix::fs::PermissionsExt, process::Stdio};
-    let directory = Directory::new();
+    let directory = Directory::short();
     let root = &directory.0;
     let home = root.join("config");
     std::fs::create_dir(&home).unwrap();
@@ -567,6 +569,12 @@ for line in sys.stdin:
 }
 
 impl Directory {
+    fn short() -> Self {
+        let path = PathBuf::from("/tmp").join(format!("remote-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(std::fs::canonicalize(path).unwrap())
+    }
+
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("remote-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -771,7 +779,7 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
 
 #[tokio::test]
 async fn codex_starts_only_when_enabled_and_socket_is_missing() {
-    let directory = Directory::new();
+    let directory = Directory::short();
     let socket = directory.0.join("control.sock");
     let gateway = Url::parse("https://gateway.example.com").unwrap();
     let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway.clone());

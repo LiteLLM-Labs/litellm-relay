@@ -169,7 +169,6 @@ mod tests {
     };
     use serde_json::Value;
     use std::{
-        env,
         io::{BufRead, BufReader as StdBufReader, Write},
         os::unix::net::UnixStream as StdUnixStream,
         path::PathBuf,
@@ -177,7 +176,7 @@ mod tests {
     use uuid::Uuid;
 
     fn scratch_socket() -> PathBuf {
-        let dir = env::temp_dir().join(format!("rb-{}", Uuid::new_v4().simple()));
+        let dir = PathBuf::from("/tmp").join(format!("rb-{}", Uuid::new_v4().simple()));
         dir.join(SOCKET_FILE)
     }
 

@@ -563,9 +563,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn should_see_a_daemon_only_while_something_listens_on_the_socket() {
-        use std::{fs, io::Write, os::unix::net::UnixListener, thread};
+        use std::{fs, io::Write, os::unix::net::UnixListener, path::PathBuf, thread};
 
-        let dir = env::temp_dir().join(format!("relay-probe-{}", std::process::id()));
+        let dir = PathBuf::from("/tmp").join(format!("relay-probe-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("b.sock");

@@ -183,6 +183,7 @@ impl Server {
                     };
                     let credentials = match stream.peer_cred() {
                         Ok(credentials) => credentials,
+                        Err(error) if error.kind() == io::ErrorKind::NotConnected => continue,
                         Err(error) => {
                             eprintln!("Cannot identify Claude supervisor peer: {error}");
                             continue;
