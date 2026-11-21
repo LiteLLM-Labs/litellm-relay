@@ -33,10 +33,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.noties.markwon.Markwon
 import java.util.UUID
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+private val markdownParsing = Mutex()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun ConversationScreen(state: RemoteState, model: RemoteViewModel) {
     val session = state.detail?.session ?: state.selectedSession ?: return
+    val available = state.hasCurrentDetail
     var draft by rememberSaveable(session.id) { mutableStateOf("") }
     var requestId by rememberSaveable(session.id) { mutableStateOf(UUID.randomUUID().toString()) }
     var selectedModel by rememberSaveable(session.id) { mutableStateOf<String?>(null) }
@@ -66,9 +73,9 @@ import kotlinx.coroutines.launch
             }
             if (session.canStop) IconButton(onClick = { scope.launch {
                 stopping = true
-                if (model.interrupt(stopRequestId)) stopRequestId = UUID.randomUUID().toString()
-                stopping = false
-            } }, enabled = !stopping) { Icon(Icons.Default.Stop, "Stop current turn", tint = RoyalBlue) }
+                try { if (model.interrupt(stopRequestId)) stopRequestId = UUID.randomUUID().toString() }
+                finally { stopping = false }
+            } }, enabled = available && !stopping) { Icon(Icons.Default.Stop, "Stop current turn", tint = RoyalBlue) }
             IconButton(onClick = { scope.launch { scroll.animateScrollToItem((scroll.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } }) {
                 Icon(Icons.Default.ArrowDownward, "Latest message", tint = RoyalBlue, modifier = Modifier.size(19.dp))
             }
@@ -96,13 +103,13 @@ import kotlinx.coroutines.launch
                             Text(approval.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace, lineHeight = 19.sp)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(onClick = { scope.launch { deciding = true; model.approve(approval, "decline"); deciding = false } }, enabled = !deciding) { Text("Decline") }
-                            if (approval.canAccept) Button(onClick = { scope.launch { deciding = true; model.approve(approval, "accept"); deciding = false } }, enabled = !deciding) { Text("Allow once") }
+                            OutlinedButton(onClick = { scope.launch { deciding = true; try { model.approve(approval, "decline") } finally { deciding = false } } }, enabled = available && !deciding) { Text("Decline") }
+                            if (approval.canAccept) Button(onClick = { scope.launch { deciding = true; try { model.approve(approval, "accept") } finally { deciding = false } } }, enabled = available && !deciding) { Text("Allow once") }
                         }
                     }
                 }
             }
-            if (session.status == "working") item {
+            if (available && session.status == "working") item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
                     Text("${session.agentName} is working", fontSize = 12.sp, color = Secondary)
@@ -115,7 +122,7 @@ import kotlinx.coroutines.launch
                 Column {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1f)) {
-                            Row(Modifier.clickable(enabled = !sending && session.canSend) { choosingModel = true }.padding(vertical = 6.dp),
+                            Row(Modifier.clickable(enabled = available && !sending && session.canSend) { choosingModel = true }.padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(12.dp))
                                 Text(state.models.firstOrNull { it.id == (selectedModel ?: session.model) }?.label ?: selectedModel ?: session.model ?: "Session model",
@@ -136,17 +143,18 @@ import kotlinx.coroutines.launch
                     HorizontalDivider(Modifier.padding(horizontal = 12.dp), color = Border.copy(alpha = 0.6f))
                 Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.Bottom) {
                     TextField(value = draft, onValueChange = { draft = it; requestId = UUID.randomUUID().toString() }, placeholder = { Text("Message ${session.agentName}…", fontSize = 15.sp) },
-                        modifier = Modifier.weight(1f), maxLines = 6, enabled = !sending && session.canSend,
+                        modifier = Modifier.weight(1f), maxLines = 6, enabled = available && !sending && session.canSend,
                         colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
                             disabledContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent))
                     FilledIconButton(onClick = { scope.launch {
                         sending = true
+                        try {
                         if (model.send(draft, requestId, selectedModel)) {
                             draft = ""; requestId = UUID.randomUUID().toString()
                             scroll.animateScrollToItem((scroll.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
                         }
-                        sending = false
-                    } }, enabled = draft.isNotBlank() && draft.length <= 32000 && !sending && session.canSend, shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(bottom = 3.dp).size(39.dp)) {
+                        } finally { sending = false }
+                    } }, enabled = available && draft.isNotBlank() && draft.length <= 32000 && !sending && session.canSend, shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(bottom = 3.dp).size(39.dp)) {
                         if (sending) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
                         else Icon(Icons.Default.ArrowUpward, "Send message", modifier = Modifier.size(19.dp))
                     }
@@ -163,7 +171,7 @@ import kotlinx.coroutines.launch
                 singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp))
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 440.dp)) {
                 items(state.models.filter { modelSearch.isBlank() || "${it.label} ${it.id}".contains(modelSearch, true) }, key = { it.id }) { option ->
-                    ListItem(headlineContent = { Text(option.label, fontSize = 14.sp) }, modifier = Modifier.clickable {
+                    ListItem(headlineContent = { Text(option.label, fontSize = 14.sp) }, modifier = Modifier.clickable(enabled = available && !sending && session.canSend) {
                         selectedModel = option.id; requestId = UUID.randomUUID().toString(); choosingAllModels = false
                     }, trailingContent = { if ((selectedModel ?: session.model) == option.id) Icon(Icons.Default.Check, null, tint = RoyalBlue) },
                         colors = ListItemDefaults.colors(containerColor = Canvas))
@@ -176,6 +184,7 @@ import kotlinx.coroutines.launch
 
 @Composable private fun ChatMessage(message: Message, agentName: String) {
     var expanded by remember(message.id) { mutableStateOf(false) }
+    var page by remember(message.id) { mutableIntStateOf(0) }
     if (message.role == "activity") {
         Surface(onClick = { expanded = !expanded }, color = Border.copy(alpha = 0.3f), shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -208,10 +217,21 @@ import kotlinx.coroutines.launch
             }
             val context = LocalContext.current
             val markdown = remember(context) { Markwon.create(context) }
-            val text = if (expanded) message.text else message.text.take(8000)
+            val pages = remember(message.text) { replyPages(message.text) }
+            val text = pages[page.coerceAtMost(pages.lastIndex)]
+            val parsed by produceState<CharSequence>(text, text, markdown) {
+                value = text
+                value = withContext(Dispatchers.Default) {
+                    markdownParsing.withLock { markdown.toMarkdown(text) }
+                }
+            }
             AndroidView(factory = { TextView(it).apply { textSize = 15f; setTextColor(Ink.toArgb()); setTextIsSelectable(true); setLineSpacing(6f, 1.08f) } },
-                update = { markdown.setMarkdown(it, text) }, modifier = Modifier.fillMaxWidth())
-            if (message.text.length > 8000 && !expanded) TextButton(onClick = { expanded = true }) { Text("Show full message", fontSize = 12.sp) }
+                update = { if (it.tag !== parsed) { it.text = parsed; it.tag = parsed } }, modifier = Modifier.fillMaxWidth())
+            if (pages.size > 1) Row {
+                TextButton(onClick = { page-- }, enabled = page > 0) { Text("Previous") }
+                Text("${page.coerceAtMost(pages.lastIndex) + 1} / ${pages.size}")
+                TextButton(onClick = { page++ }, enabled = page < pages.lastIndex) { Text("Next") }
+            }
         }
     }
 }

@@ -1,13 +1,58 @@
 package ai.litellm.remote
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.*
 import org.junit.Test
 
+@Serializable(with = DecodedReplySerializer::class)
+data class DecodedReply(val text: String, val thread: Thread)
+
+object DecodedReplySerializer : KSerializer<DecodedReply> {
+    override val descriptor = PrimitiveSerialDescriptor("DecodedReply", PrimitiveKind.STRING)
+    override fun deserialize(decoder: Decoder) = DecodedReply(decoder.decodeString(), Thread.currentThread())
+    override fun serialize(encoder: Encoder, value: DecodedReply) = encoder.encodeString(value.text)
+}
+
 class ApiClientTest {
+    @Test fun largeResponseDecodingDoesNotRunOnTheCallingUiThread() = runBlocking {
+        MockWebServer().use { server ->
+            val text = "long reply ".repeat(10000)
+            server.enqueue(MockResponse().setBody(Json.encodeToString(kotlinx.serialization.serializer<String>(), text)))
+            val caller = Thread.currentThread()
+            val result = ApiClient(server.url("/").toString()) { null }.request<DecodedReply>("/api/session")
+            assertTrue(result is RemoteResult.Success)
+            val reply = (result as RemoteResult.Success).value
+            assertEquals(text, reply.text)
+            assertNotEquals(caller, reply.thread)
+        }
+    }
+    @Test fun cancellationIsNotReportedAsANetworkFailure() = runBlocking {
+        MockWebServer().use { server ->
+            try {
+                ApiClient(server.url("/").toString()) { throw CancellationException("Cancelled") }.exchange("/api/me", "GET", emptyMap())
+                fail("Cancellation must propagate to the caller")
+            } catch (expected: CancellationException) {
+                assertEquals("Cancelled", expected.message)
+            }
+        }
+    }
+    @Test fun workspacePortsAndIpv6AreValidatedBeforeConnecting() {
+        assertNull(workspaceAddress("https://example.com:65536", true))
+        assertNull(workspaceAddress("https://example.com:0", true))
+        assertEquals("https://[::1]:8443", workspaceAddress("https://[::1]:8443/v1/", true))
+        assertEquals("http://[::1]:4174", workspaceAddress("http://[::1]:4174/"))
+        assertNull(workspaceAddress("http://[::1]:4174", true))
+    }
     @Test fun workspaceAddressesRejectCredentialsAndPlaintextRemoteHosts() {
         assertNull(workspaceAddress("https://user:password@example.com"))
         assertNull(workspaceAddress("http://192.168.1.5:4174"))

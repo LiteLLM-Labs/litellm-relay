@@ -4,6 +4,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -12,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 fun workspaceAddress(text: String, gateway: Boolean = false): String? = runCatching {
     val input = text.trim().let { if ("://" in it) it else "https://$it" }
     val uri = URI(input)
+    require(uri.port == -1 || uri.port in 1..65535)
     val loopback = uri.host in listOf("localhost", "127.0.0.1", "[::1]")
     require(!uri.host.isNullOrBlank() && uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null)
     require(uri.scheme == "https" || (!gateway && uri.scheme == "http" && loopback))
@@ -27,8 +29,10 @@ class ApiClient(val endpoint: String, private val token: () -> String?) {
         path: String, method: String = "GET", body: Map<String, String> = emptyMap(),
     ): RemoteResult<T> = when (val result = exchange(path, method, body)) {
         is RemoteResult.Failure -> result
-        is RemoteResult.Success -> runCatching { RemoteResult.Success(json.decodeFromString<T>(result.value)) }
-            .getOrElse { RemoteResult.Failure("Update the app to connect to this workspace.") }
+        is RemoteResult.Success -> withContext(Dispatchers.Default) {
+            runCatching { RemoteResult.Success(json.decodeFromString<T>(result.value)) }
+                .getOrElse { RemoteResult.Failure("Update the app to connect to this workspace.") }
+        }
     }
 
     suspend fun exchange(path: String, method: String, body: Map<String, String>): RemoteResult<String> = withContext(Dispatchers.IO) {
@@ -57,6 +61,8 @@ class ApiClient(val endpoint: String, private val token: () -> String?) {
             if (code in 200..299) RemoteResult.Success(text)
             else RemoteResult.Failure(runCatching { json.decodeFromString<ErrorReply>(text).error }
                 .getOrDefault("This request couldn’t be completed."), code)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             RemoteResult.Failure("Couldn’t reach your workspace. Check your connection and try again.")
         } finally { connection.disconnect() }

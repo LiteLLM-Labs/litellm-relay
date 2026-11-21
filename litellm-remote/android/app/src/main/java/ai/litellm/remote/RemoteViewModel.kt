@@ -18,8 +18,17 @@ data class RemoteState(
     val selectedSession: CodingSession? = null, val sessionDeviceId: String? = null, val detail: SessionDetail? = null,
     val busy: Boolean = false, val loading: Boolean = false, val error: String? = null,
     val models: List<ModelOption> = emptyList(), val modelError: String? = null, val actionError: String? = null,
+    val detailCurrent: Boolean = false,
 ) {
     val device get() = devices.firstOrNull { it.id == deviceId }
+    val hasCurrentDetail get() = detailCurrent && detail != null && error == null && devices.firstOrNull { it.id == sessionDeviceId }?.online == true
+
+    fun acceptsReply(endpoint: String, device: String, session: String?) =
+        this.endpoint == endpoint && sessionDeviceId == device && selectedSession?.id == session
+
+    fun requestFailed(failure: RemoteResult.Failure): RemoteState = if (failure.status == 401) {
+        RemoteState(gateway = gateway, controlAddress = controlAddress, error = failure.message)
+    } else copy(error = failure.message, detailCurrent = false, busy = false, loading = false)
 }
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
@@ -30,6 +39,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val state = mutable.asStateFlow()
     private var client: ApiClient? = null
     private var token: String? = null
+    private val detailReplies = ReplyGate()
+    private val sessionReplies = ReplyGate()
+    private val deviceReplies = ReplyGate()
 
     init { if (state.value.gateway.isNotEmpty()) connect() }
 
@@ -58,7 +70,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 if (workspaceAddress(reply.value.gateway, true) != gateway) { fail("This remote service is connected to a different gateway."); return@launch }
                 client = connection
                 preferences.edit().putString("gateway", gateway).putString("controlAddress", override).apply()
-                mutable.update { it.copy(workspace = reply.value, endpoint = endpoint, busy = false) }
+                if (reply.value.identity == null) { vault.remove(endpoint); token = null }
+                mutable.update { RemoteState(gateway = it.gateway, controlAddress = override, workspace = reply.value, endpoint = endpoint) }
                 if (reply.value.identity != null) refresh()
             }
             is RemoteResult.Failure -> fail(reply.message)
@@ -93,7 +106,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 token = value.token
                 when (val workspace = api.request<Workspace>("/api/me")) {
                     is RemoteResult.Success -> { mutable.update { it.copy(workspace = workspace.value, login = null, teams = emptyList(), error = null) }; refresh() }
-                    is RemoteResult.Failure -> fail(workspace.message)
+                    is RemoteResult.Failure -> handle(workspace)
                 }
             }
             is RemoteResult.Failure -> {
@@ -105,14 +118,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     suspend fun refresh() {
         val api = client ?: return
+        val ticket = deviceReplies.next()
         when (val result = api.request<Devices>("/api/devices")) {
-            is RemoteResult.Success -> mutable.update { previous ->
+            is RemoteResult.Success -> if (client === api && deviceReplies.accepts(ticket)) mutable.update { previous ->
                 val selected = previous.deviceId?.takeIf { id -> result.value.devices.any { it.id == id } }
                     ?: result.value.devices.firstOrNull { it.online }?.id ?: result.value.devices.firstOrNull()?.id
                 previous.copy(devices = result.value.devices, deviceId = selected,
                     sessions = if (selected == previous.deviceId) previous.sessions else emptyList())
             }
-            is RemoteResult.Failure -> { handle(result); return }
+            is RemoteResult.Failure -> { if (client === api && deviceReplies.accepts(ticket)) handle(result); return }
         }
         if (state.value.selectedSession != null) loadDetail() else refreshSessions()
     }
@@ -125,32 +139,37 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     suspend fun refreshSessions(older: Boolean = false) {
         val api = client ?: return
         val id = state.value.deviceId ?: return
+        val ticket = sessionReplies.next()
         val base = "/api/devices/$id/sessions"
         val path = if (older) state.value.nextCursor?.let { ApiClient.query(base, "cursor", it) } ?: base else base
         mutable.update { it.copy(loading = it.sessions.isEmpty()) }
-        when (val result = api.request<SessionPage>(path)) {
-            is RemoteResult.Success -> if (state.value.deviceId == id) mutable.update {
+        try { when (val result = api.request<SessionPage>(path)) {
+            is RemoteResult.Success -> if (client === api && sessionReplies.accepts(ticket) && state.value.deviceId == id) mutable.update {
                 it.copy(sessions = if (older) (it.sessions + result.value.sessions).distinctBy { session -> session.id } else result.value.sessions,
                     nextCursor = result.value.nextCursor, loading = false, error = result.value.warnings.takeIf { warnings -> warnings.isNotEmpty() }?.joinToString("\n"))
             }
-            is RemoteResult.Failure -> handle(result)
+            is RemoteResult.Failure -> if (client === api && sessionReplies.accepts(ticket) && state.value.deviceId == id) handle(result)
+        } } finally {
+            if (sessionReplies.accepts(ticket)) mutable.update { it.copy(loading = false) }
         }
     }
 
     fun openSession(session: CodingSession) { viewModelScope.launch {
-        mutable.update { it.copy(selectedSession = session, sessionDeviceId = it.deviceId, detail = null, error = null, actionError = null) }
+        detailReplies.next()
+        mutable.update { it.copy(selectedSession = session, sessionDeviceId = it.deviceId, detail = null, models = emptyList(), modelError = null, error = null, actionError = null) }
         loadDetail()
         loadModels()
     } }
-    fun closeSession() { mutable.update { it.copy(selectedSession = null, detail = null, error = null) } }
+    fun closeSession() { detailReplies.next(); mutable.update { it.copy(selectedSession = null, sessionDeviceId = null, detail = null, models = emptyList(), modelError = null, error = null) } }
 
     private suspend fun loadDetail() {
         val api = client ?: return
         val session = state.value.selectedSession ?: return
         val device = state.value.sessionDeviceId ?: return
+        val ticket = detailReplies.next()
         when (val result = api.request<SessionDetail>("/api/devices/$device/sessions/${session.id}")) {
-            is RemoteResult.Success -> if (state.value.selectedSession?.id == session.id) mutable.update { it.copy(detail = result.value, error = null) }
-            is RemoteResult.Failure -> handle(result)
+            is RemoteResult.Success -> mutable.update { if (client === api && detailReplies.accepts(ticket) && it.acceptsReply(api.endpoint, device, session.id)) it.copy(detail = result.value, detailCurrent = true, error = null) else it }
+            is RemoteResult.Failure -> if (client === api && detailReplies.accepts(ticket) && state.value.acceptsReply(api.endpoint, device, session.id)) handle(result)
         }
     }
 
@@ -158,7 +177,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val api = client ?: return false
         val device = state.value.deviceId ?: return false
         mutable.update { it.copy(busy = true, error = null) }
-        return when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
+        return try { when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
             is RemoteResult.Success -> {
                 mutable.update { it.copy(selectedSession = result.value, sessionDeviceId = device, detail = null, busy = false) }
                 loadDetail()
@@ -166,25 +185,32 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 true
             }
             is RemoteResult.Failure -> { handle(result); false }
-        }
+        } } finally { mutable.update { it.copy(busy = false) } }
     }
 
     suspend fun loadModels() {
         val api = client ?: return
         val device = state.value.sessionDeviceId ?: return
+        val session = state.value.selectedSession?.id ?: return
         var cursor: String? = null
         val loaded = mutableListOf<ModelOption>()
         do {
             val base = "/api/devices/$device/models"
             when (val page = api.request<ModelPage>(cursor?.let { ApiClient.query(base, "cursor", it) } ?: base)) {
                 is RemoteResult.Success -> { loaded.addAll(page.value.models); cursor = page.value.nextCursor }
-                is RemoteResult.Failure -> { mutable.update { it.copy(modelError = page.message) }; return }
+                is RemoteResult.Failure -> {
+                    if (state.value.acceptsReply(api.endpoint, device, session)) {
+                        if (page.status == 401) handle(page) else mutable.update { it.copy(modelError = page.message) }
+                    }
+                    return
+                }
             }
         } while (cursor != null)
-        if (device == state.value.sessionDeviceId) mutable.update { it.copy(models = loaded.toList(), modelError = null) }
+        mutable.update { if (it.acceptsReply(api.endpoint, device, session)) it.copy(models = loaded.distinctBy { option -> option.id }, modelError = null) else it }
     }
 
     suspend fun send(text: String, requestId: String, model: String? = null): Boolean {
+        if (!state.value.hasCurrentDetail) return false
         val api = client ?: return false
         val session = state.value.selectedSession ?: return false
         val device = state.value.sessionDeviceId ?: return false
@@ -192,27 +218,29 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val input = mapOf("text" to text, "requestId" to requestId) + (model?.let { mapOf("model" to it) } ?: emptyMap())
         return when (val result = api.empty("/api/devices/$device/sessions/${session.id}/messages", body = input)) {
             is RemoteResult.Success -> { loadDetail(); true }
-            is RemoteResult.Failure -> { mutable.update { it.copy(actionError = result.message) }; false }
+            is RemoteResult.Failure -> { if (state.value.acceptsReply(api.endpoint, device, session.id)) handle(result); false }
         }
     }
 
     suspend fun interrupt(requestId: String): Boolean {
+        if (!state.value.hasCurrentDetail) return false
         val api = client ?: return false
         val session = state.value.selectedSession ?: return false
         val device = state.value.sessionDeviceId ?: return false
         return when (val result = api.empty("/api/devices/$device/sessions/${session.id}/interrupt", body = mapOf("requestId" to requestId))) {
             is RemoteResult.Success -> { loadDetail(); true }
-            is RemoteResult.Failure -> { mutable.update { it.copy(actionError = result.message) }; false }
+            is RemoteResult.Failure -> { if (state.value.acceptsReply(api.endpoint, device, session.id)) handle(result); false }
         }
     }
 
     suspend fun approve(approval: Approval, decision: String) {
+        if (!state.value.hasCurrentDetail) return
         val api = client ?: return
         val session = state.value.selectedSession ?: return
         val device = state.value.sessionDeviceId ?: return
         when (val result = api.empty("/api/devices/$device/sessions/${session.id}/approvals/${approval.id}", body = mapOf("decision" to decision))) {
             is RemoteResult.Success -> loadDetail()
-            is RemoteResult.Failure -> handle(result)
+            is RemoteResult.Failure -> if (state.value.acceptsReply(api.endpoint, device, session.id)) handle(result)
         }
     }
 
@@ -233,11 +261,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     } }
 
     fun disconnect() {
+        detailReplies.next()
+        sessionReplies.next()
+        deviceReplies.next()
         vault.remove(state.value.endpoint)
         token = null
         client = null
         mutable.update { RemoteState(gateway = it.gateway, controlAddress = it.controlAddress) }
     }
     private fun fail(message: String) { mutable.update { it.copy(error = message, busy = false, loading = false) } }
-    private fun handle(failure: RemoteResult.Failure) { if (failure.status == 401) disconnect(); fail(failure.message) }
+    private fun handle(failure: RemoteResult.Failure) {
+        if (failure.status == 401) disconnect()
+        mutable.update { it.requestFailed(failure) }
+    }
 }
