@@ -68,7 +68,7 @@ class RemoteViewModelTest {
                 val request = server.takeRequest(5, TimeUnit.SECONDS)!!
                 assertEquals("POST", request.method)
                 assertEquals("/api/devices/host/sessions/claude:one/messages", request.path)
-                assertEquals(Json.parseToJsonElement("""{"text":"The connector restarted before I could approve your last command, so it didn't run. Please try it again.","requestId":"retry-once"}"""), Json.parseToJsonElement(request.body.readUtf8()))
+                assertEquals(Json.parseToJsonElement("""{"text":"Relay restarted before I could approve your last command, so it didn't run. Please try it again.","requestId":"retry-once"}"""), Json.parseToJsonElement(request.body.readUtf8()))
                 if (success) assertEquals("GET", server.takeRequest(5, TimeUnit.SECONDS)!!.method)
                 assertNull(model.state.value.expiredApproval)
                 assertFalse(model.retryExpiredApproval("duplicate"))

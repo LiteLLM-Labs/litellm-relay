@@ -1225,6 +1225,10 @@ async fn codex_stop_then_send_shows_the_new_turn_instead_of_interrupted_live_tex
                         {"type":"agentMessage","id":"draft","text":"finalized partial"}
                     ]});
                     match stage.load(Ordering::SeqCst) {
+                        3 => {
+                            socket.send(Frame::Text(json!({"method":"item/completed","params":{"threadId":thread,"turnId":"old-turn","item":{"type":"agentMessage","id":"draft"}}}).to_string().into())).await.unwrap();
+                            json!({"data":[{"id":"old-turn","status":"inProgress","items":[{"type":"agentMessage","id":"draft","text":"stale draft output"}]}],"nextCursor":null})
+                        }
                         0 => {
                             json!({"data":[{"id":"old-turn","status":"inProgress","items":[{"type":"userMessage","id":"input","content":[{"type":"text","text":"First"}]}]}],"nextCursor":null})
                         }
@@ -1262,6 +1266,10 @@ async fn codex_stop_then_send_shows_the_new_turn_instead_of_interrupted_live_tex
         .await
         .unwrap();
     let streaming = codex.read(thread).await.unwrap();
+    assert_eq!(
+        streaming.streaming_reply_id.as_deref(),
+        Some("old-turn/draft")
+    );
     assert!(
         streaming
             .messages
@@ -1269,6 +1277,13 @@ async fn codex_stop_then_send_shows_the_new_turn_instead_of_interrupted_live_tex
             .any(|message| message.text == "stale draft output"),
         "the in-progress turn is visible while it streams"
     );
+    phase.store(3, Ordering::SeqCst);
+    let completed_item = codex.read(thread).await.unwrap();
+    assert!(completed_item.streaming_reply_id.is_none());
+    assert!(completed_item
+        .messages
+        .iter()
+        .any(|message| message.text == "stale draft output"));
     assert_eq!(codex.interrupt(thread).await.unwrap()["stopped"], true);
     assert_eq!(phase.load(Ordering::SeqCst), 1);
     codex
@@ -1988,6 +2003,9 @@ for line in sys.stdin:
             emit({'type':'stream_event','event':{'type':'content_block_delta','index':3,'delta':{'type':'text_delta','text':'aaaaaaaaaa done'}}})
             second += 'aaaaaaaaaa done'
             (home / 'streamed').touch()
+            while not (home / 'finish-block').exists():
+                time.sleep(0.01)
+            emit({'type':'stream_event','event':{'type':'content_block_stop','index':3}})
             while not (home / 'complete-stream').exists():
                 time.sleep(0.01)
             reply = {'type':'assistant','uuid':'blocks-complete','message':{'id':'blocks','content':[{'type':'text','text':'First part'},{'type':'tool_use','id':'blocks-tool','name':'Edit','input':{'file_path':'fixture.txt'}},{'type':'text','text':second}]}}
@@ -2373,6 +2391,7 @@ for line in sys.stdin:
         streamed = fresh.read(streaming_id).await.unwrap();
     }
     assert_eq!(streamed.session.status, "working");
+    assert_eq!(streamed.streaming_reply_id.as_deref(), Some("blocks/1"));
     let live = streamed
         .messages
         .iter()
@@ -2383,6 +2402,19 @@ for line in sys.stdin:
     assert!(live[1].text.starts_with("Second block"));
     assert!(live[1].text.ends_with("[credential redacted] done"));
     assert!(!live[1].text.contains("sk-a"));
+    std::fs::write(home.join("finish-block"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let detail = fresh.read(streaming_id).await.unwrap();
+            assert!(detail.session.can_stop);
+            if detail.streaming_reply_id.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     std::fs::write(home.join("complete-stream"), "").unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while fresh.read(streaming_id).await.unwrap().session.status == "working" {

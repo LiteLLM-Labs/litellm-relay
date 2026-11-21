@@ -4,7 +4,7 @@ import Observation
 actor RemoteTransport {
     private let baseURL: URL
     private let session: URLSession
-    var workspace: String { baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+    nonisolated var workspace: String { baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
 
     init(baseURL: URL, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -107,28 +107,35 @@ final class RemoteStore {
     }
 
     func connect() async {
+        guard !busy else { return }
         guard let gateway = normalizedGateway(gatewayAddress) else { error = "Enter your LiteLLM gateway’s HTTPS address."; return }
         busy = true
         defer { busy = false }
         error = nil
         let override = serviceOverride
+        let previous = transport
         let resolved: Result<URL, RemoteFailure> = if let service = savedService { .success(service) } else { await resolveService(gateway: gateway) }
         guard case .success(let url) = resolved else {
             if case .failure(let failure) = resolved { error = failure.message }
             return
         }
         let normalized = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let saved = SessionVault.load(workspace: normalized)
-        hasSavedSession = saved != nil
-        if remembersRefresh(normalized), let saved {
-            phone = PhoneSession(refreshToken: saved)
-        } else {
-            phone = PhoneSession(legacyToken: saved)
+        if previous?.workspace != normalized {
+            if let refreshTask { _ = await refreshTask.value }
+            guard self.transport === previous, !Task.isCancelled,
+                  normalizedGateway(gatewayAddress) == gateway, serviceOverride == override else { return }
+            let saved = SessionVault.load(workspace: normalized)
+            hasSavedSession = saved != nil
+            if remembersRefresh(normalized), let saved {
+                phone = PhoneSession(refreshToken: saved)
+            } else {
+                phone = PhoneSession(legacyToken: saved)
+            }
+            transport = RemoteTransport(baseURL: url, session: session)
         }
-        resetRefresh()
-        transport = RemoteTransport(baseURL: url, session: session)
+        guard let connection = transport, connection.workspace == normalized else { return }
         let result = await call("/api/me", as: ServiceConfiguration.self)
-        guard normalizedGateway(gatewayAddress) == gateway, serviceOverride == override else { return }
+        guard transport === connection, normalizedGateway(gatewayAddress) == gateway, serviceOverride == override else { return }
         switch result {
         case .success(let value):
             guard normalizedGateway(value.gateway) == gateway else {
@@ -139,7 +146,7 @@ final class RemoteStore {
             address = normalized
             if value.identity == nil {
                 hasSavedSession = false
-                if phone.refreshToken == nil, saved != nil {
+                if phone.refreshToken == nil {
                     SessionVault.remove(workspace: normalized)
                     forgetRefresh(normalized)
                 }
@@ -182,7 +189,7 @@ final class RemoteStore {
             if let refresh = value.refreshToken {
                 guard SessionVault.save(refresh, workspace: address) else { error = "Couldn’t securely save your sign-in. Please try again."; return }
                 rememberRefresh(address)
-                phone.rotated(access: token, refresh: refresh, expiresAt: value.expiresAt ?? 0)
+                phone.rotated(access: token, refresh: refresh, expiresAt: value.identity?.expiresAt ?? value.expiresAt ?? 0)
             } else {
                 guard SessionVault.save(token, workspace: address) else { error = "Couldn’t securely save your sign-in. Please try again."; return }
                 forgetRefresh(address)
@@ -363,7 +370,7 @@ final class RemoteStore {
         if let refreshTask { return await refreshTask.value }
         guard let refresh = phone.refreshToken else { return .failure(disconnected) }
         let task = Task<Result<RefreshedAccess, RemoteFailure>, Never> { @MainActor in
-            let workspace = await transport.workspace
+            let workspace = transport.workspace
             let reply = await transport.request("/api/auth/refresh", method: "POST", body: ["refreshToken": refresh], as: RefreshedAccess.self)
             guard self.transport === transport, !Task.isCancelled else { return .failure(self.disconnected) }
             defer { self.refreshTask = nil }

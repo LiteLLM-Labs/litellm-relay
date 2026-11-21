@@ -11,7 +11,13 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-class SessionVault(context: Context) {
+interface SessionStorage {
+    fun save(workspace: String, token: String): Boolean
+    fun load(workspace: String): String?
+    fun remove(workspace: String): Boolean
+}
+
+class SessionVault(context: Context) : SessionStorage {
     private val preferences = context.getSharedPreferences("remote.sessions", Context.MODE_PRIVATE)
     private val alias = "ai.litellm.remote.session"
     private fun key(): SecretKey {
@@ -25,18 +31,18 @@ class SessionVault(context: Context) {
 
     private fun id(workspace: String) = MessageDigest.getInstance("SHA-256").digest(workspace.toByteArray()).joinToString("") { "%02x".format(it) }
 
-    fun save(workspace: String, token: String): Boolean = runCatching {
+    override fun save(workspace: String, token: String): Boolean = runCatching {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
         val encrypted = cipher.iv + cipher.doFinal(token.toByteArray(Charsets.UTF_8))
         preferences.edit().putString(id(workspace), Base64.encodeToString(encrypted, Base64.NO_WRAP)).commit()
     }.getOrDefault(false)
 
-    fun load(workspace: String): String? = runCatching {
+    override fun load(workspace: String): String? = runCatching {
         val value = preferences.getString(id(workspace), null) ?: return null
         val bytes = Base64.decode(value, Base64.NO_WRAP)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))) }
         String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
     }.getOrNull()
 
-    fun remove(workspace: String) { preferences.edit().remove(id(workspace)).apply() }
+    override fun remove(workspace: String): Boolean = preferences.edit().remove(id(workspace)).commit()
 }

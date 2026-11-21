@@ -12,6 +12,7 @@ use uuid::Uuid;
 #[derive(Default)]
 pub(super) struct Transcript {
     pub(super) messages: Vec<Message>,
+    pub(super) streaming_reply: Option<(u64, String)>,
     block: String,
     text_blocks: usize,
     ordinals: HashMap<u64, usize>,
@@ -56,6 +57,9 @@ impl Transcript {
 
     pub(super) fn append(&mut self, value: &Value) {
         let role = value["type"].as_str().unwrap_or("");
+        if role == "assistant" {
+            self.streaming_reply = None;
+        }
         let id = value["uuid"].as_str().unwrap_or("");
         let block = value["message"]["id"].as_str().unwrap_or(id);
         if role == "assistant" && self.block != block {
@@ -74,6 +78,7 @@ impl Transcript {
 
     pub(super) fn stream(&mut self, event: &Value) {
         if event["type"] == "message_start" {
+            self.streaming_reply = None;
             self.block = event["message"]["id"].as_str().unwrap_or("").into();
             self.text_blocks = 0;
             self.ordinals.clear();
@@ -84,14 +89,25 @@ impl Transcript {
             let index = event["index"].as_u64().unwrap_or(0);
             let next = self.ordinals.len();
             let ordinal = *self.ordinals.entry(index).or_insert(next);
+            let id = format!("{}/{ordinal}", self.block);
+            self.streaming_reply = Some((index, id.clone()));
             self.message(
                 Message {
-                    id: format!("{}/{ordinal}", self.block),
+                    id,
                     role: "assistant".into(),
                     text: event["delta"]["text"].as_str().unwrap_or("").into(),
                 },
                 true,
             );
+        }
+        if event["type"] == "message_stop"
+            || (event["type"] == "content_block_stop"
+                && self
+                    .streaming_reply
+                    .as_ref()
+                    .is_some_and(|(index, _)| event["index"].as_u64() == Some(*index)))
+        {
+            self.streaming_reply = None;
         }
     }
 }

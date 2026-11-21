@@ -88,7 +88,7 @@ struct SessionView: View {
                 } else if detail?.messages.isEmpty == true {
                     EmptyWorkspace(title: "What are we building?", text: "Send a message to start working in \(session.project).", symbol: "terminal")
                 }
-                let streamingID = detail?.streamingReplyID
+                let streamingID = detail?.streamingReplyId
                 ForEach(detail?.messages ?? []) { message in
                     MessageView(message: message, agentName: session.agentName, streaming: message.id == streamingID)
                 }
@@ -410,7 +410,7 @@ struct SessionView: View {
     private func expiredApprovalCard(_ approval: ExpiredApproval) -> some View {
         VStack(alignment: .leading, spacing: Space.s3) {
             Label("Approval expired", systemImage: "hand.raised").font(Fonts.title).foregroundStyle(Palette.warn)
-            Text("Approval expired because the connector restarted. The command didn’t run.")
+            Text("Approval expired because Relay restarted. The command didn't run.")
                 .font(Fonts.body)
             Text(verbatim: approval.summary.isEmpty ? approval.tool : approval.summary)
                 .font(Fonts.mono).textSelection(.enabled)
@@ -534,7 +534,7 @@ struct SessionView: View {
         let retry = previous ?? ApprovalRetry(approvalId: approval.id)
         approvalRetry = retry
         approvalRetry?.error = nil
-        let text = "The connector restarted before I could approve your last command, so it didn't run. Please try it again."
+        let text = "Relay restarted before I could approve your last command, so it didn't run. Please try it again."
         switch await store.send(id: session.id, deviceId: route.deviceId, text: text, requestId: retry.requestId) {
         case .success:
             approvalRetry?.sent = true

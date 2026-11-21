@@ -190,6 +190,8 @@ pub struct Detail {
     pub older_messages: bool,
     pub approvals: Vec<Approval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_reply_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expired_approval: Option<ExpiredApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
