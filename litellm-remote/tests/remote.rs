@@ -219,8 +219,14 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
 
 #[tokio::test]
 async fn codex_starts_only_when_enabled_and_socket_is_missing() {
-    let directory = Directory::new();
-    let socket = directory.0.join("control.sock");
+    let socket = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
+    struct SocketFile(PathBuf);
+    impl Drop for SocketFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _file = SocketFile(socket.clone());
     let gateway = Url::parse("https://gateway.example.com").unwrap();
     let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway.clone());
     let no_start = || async { panic!("must not start a daemon") };
