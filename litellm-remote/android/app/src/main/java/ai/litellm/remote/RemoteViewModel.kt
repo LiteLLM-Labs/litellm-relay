@@ -163,9 +163,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun openSession(session: CodingSession) { viewModelScope.launch {
+    fun openSession(session: CodingSession) { openSession(session, state.value.deviceId) }
+
+    private fun openSession(session: CodingSession, device: String?) { viewModelScope.launch {
         detailReplies.next()
-        mutable.update { it.copy(selectedSession = session, sessionDeviceId = it.deviceId, detail = null, models = emptyList(), modelError = null, error = null, actionError = null) }
+        mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, models = emptyList(), modelError = null, error = null, actionError = null) }
         loadDetail()
         loadModels()
     } }
@@ -188,9 +190,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         mutable.update { it.copy(busy = true, error = null) }
         return try { when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
             is RemoteResult.Success -> {
-                mutable.update { it.copy(selectedSession = result.value, sessionDeviceId = device, detail = null, busy = false) }
-                loadDetail()
-                loadModels()
+                openSession(result.value, device)
                 true
             }
             is RemoteResult.Failure -> { handle(result); false }
