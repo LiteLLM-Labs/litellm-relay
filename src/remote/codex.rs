@@ -426,18 +426,32 @@ impl Codex {
     }
 
     async fn start_daemon() -> std::io::Result<()> {
-        let status = Command::new("codex")
-            .args(["app-server", "daemon", "start"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status()
-            .await?;
+        let status = Self::daemon_command("codex").status().await?;
         if !status.success() {
             return Err(std::io::Error::other("Codex daemon did not start"));
         }
         Ok(())
+    }
+
+    pub(super) fn daemon_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+        let mut command = Command::new(program);
+        super::claude::process::isolate(&mut command);
+        super::claude::process::strip_provider_secrets(&mut command);
+        if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+            command.env("CODEX_HOME", home);
+        }
+        if let Ok(key) = std::env::var("LITELLM_API_KEY") {
+            if !key.is_empty() {
+                command.env("LITELLM_API_KEY", key);
+            }
+        }
+        command
+            .args(["app-server", "daemon", "start"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command
     }
 
     async fn connection(&self) -> Result<Rpc> {

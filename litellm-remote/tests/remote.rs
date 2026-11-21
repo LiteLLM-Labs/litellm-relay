@@ -1231,6 +1231,53 @@ for line in sys.stdin:
     assert_eq!(configured["AWS_SECRET_ACCESS_KEY"], Value::Null);
 }
 
+#[tokio::test]
+async fn codex_daemon_receives_only_the_configured_litellm_key() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = CLAUDE_ENV.lock().await;
+    let directory = Directory::new();
+    let home = directory.0.join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _restore = CredentialEnv::set(&[
+        ("ANTHROPIC_API_KEY", Some("sk-inherited-anthropic")),
+        ("ANTHROPIC_AUTH_TOKEN", Some("sk-inherited-token")),
+        ("OPENAI_API_KEY", Some("sk-inherited-openai")),
+        ("AWS_SECRET_ACCESS_KEY", Some("aws-inherited-secret")),
+        ("LITELLM_API_KEY", Some("sk-litellm-configured")),
+    ]);
+    let previous_home = std::env::var_os("CODEX_HOME");
+    std::env::set_var("CODEX_HOME", &home);
+    let script = directory.0.join("codex");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import json, os
+print(json.dumps({key: os.environ.get(key) for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'LITELLM_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'CODEX_HOME', 'PATH')}))
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = codex::Codex::daemon_command(&script).output().await;
+    match previous_home {
+        Some(value) => std::env::set_var("CODEX_HOME", value),
+        None => std::env::remove_var("CODEX_HOME"),
+    }
+    let output = output.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let child: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(child["ANTHROPIC_API_KEY"], Value::Null);
+    assert_eq!(child["ANTHROPIC_AUTH_TOKEN"], Value::Null);
+    assert_eq!(child["OPENAI_API_KEY"], Value::Null);
+    assert_eq!(child["AWS_SECRET_ACCESS_KEY"], Value::Null);
+    assert_eq!(child["LITELLM_API_KEY"], "sk-litellm-configured");
+    assert_eq!(child["CODEX_HOME"], home.to_str().unwrap());
+    assert_eq!(child["PATH"], std::env::var("PATH").unwrap());
+}
+
 async fn child_credentials(claude: &claude::Claude, home: &std::path::Path, cwd: &str) -> Value {
     let session = claude.create(cwd.into()).unwrap();
     let (_, id) = protocol::split_session(&session.id).unwrap();

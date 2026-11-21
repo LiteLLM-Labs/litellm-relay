@@ -517,7 +517,7 @@ const CHILD_ENV: &[&str] = &[
     "all_proxy",
 ];
 
-fn isolate(command: &mut Command) {
+pub(in crate::remote) fn isolate(command: &mut Command) {
     command.env_clear();
     for key in CHILD_ENV {
         if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
@@ -526,7 +526,7 @@ fn isolate(command: &mut Command) {
     }
 }
 
-fn strip_provider_secrets(command: &mut Command) {
+pub(in crate::remote) fn strip_provider_secrets(command: &mut Command) {
     for key in PROVIDER_SECRETS {
         command.env_remove(key);
     }

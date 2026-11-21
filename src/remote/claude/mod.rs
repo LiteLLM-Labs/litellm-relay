@@ -1,5 +1,5 @@
 mod history;
-mod process;
+pub(in crate::remote) mod process;
 
 use super::protocol::{now_ms, redact, Agent, Decision, Detail, Failure, Message, Result, Session};
 use process::Running;
