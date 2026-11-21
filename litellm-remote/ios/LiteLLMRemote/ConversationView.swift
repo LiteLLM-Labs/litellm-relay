@@ -108,10 +108,12 @@ struct SessionView: View {
                     .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.inkSoft)
             }
             .padding(.horizontal, Space.s3 + 2).padding(.vertical, Space.s2 - 1)
+            .frame(maxWidth: 168)
             .background(Palette.surface, in: Capsule())
             .overlay(Capsule().strokeBorder(Palette.border))
         }
         .accessibilityLabel("Session details")
+        .accessibilityValue(session.title)
         .accessibilityIdentifier("sessionChip")
     }
 

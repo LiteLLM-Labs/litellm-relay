@@ -13,6 +13,12 @@ final class StreamingTests: XCTestCase {
 
         let reply = app.staticTexts["streamingReply"]
         XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        let back = app.navigationBars.buttons.element(boundBy: 0)
+        let latest = app.buttons["Latest message"]
+        let chip = app.buttons["sessionChip"]
+        XCTAssertTrue(chip.isHittable)
+        XCTAssertGreaterThanOrEqual(chip.frame.minX, back.frame.maxX)
+        XCTAssertLessThanOrEqual(chip.frame.maxX, latest.frame.minX)
         // The fixture sends hundreds of lines per poll. The live bubble should
         // stay small and show fresh output rather than the beginning of the reply.
         let initial = reply.label
@@ -20,7 +26,6 @@ final class StreamingTests: XCTestCase {
         XCTAssertTrue(initial.contains("Stream tail"))
         let changes = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", initial), object: reply)
         XCTAssertEqual(XCTWaiter.wait(for: [changes], timeout: 8), .completed)
-        let latest = app.buttons["Latest message"]
         XCTAssertTrue(latest.isHittable)
         latest.tap()
 
@@ -39,7 +44,7 @@ final class StreamingTests: XCTestCase {
         app.buttons["sendMessageButton"].tap()
         XCTAssertTrue(app.staticTexts["Follow-up acknowledged"].waitForExistence(timeout: 8))
         XCTAssertEqual(service.sentText, "Follow up after stop")
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        back.tap()
         XCTAssertTrue(session.waitForExistence(timeout: 5))
     }
 
@@ -99,7 +104,7 @@ final class StreamingTests: XCTestCase {
 // substituted; the app uses its normal workspace, transport and session views.
 private final class StreamingService: @unchecked Sendable {
     static let gateway = "https://gateway.example.test"
-    static let title = "Long Codex turn"
+    static let title = "Generate a complete set of test scenarios for native Codex control from an iPhone on a different network"
     static let offlineMessage = "This device is offline. Keep Relay Remote connected on your Mac."
 
     private let queue = DispatchQueue(label: "RemoteUITests.StreamingService")
