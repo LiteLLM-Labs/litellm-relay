@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
+    io::ErrorKind,
     path::PathBuf,
+    process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,6 +13,7 @@ use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use tokio::{
     net::UnixStream,
+    process::Command,
     sync::{mpsc, oneshot, Mutex as AsyncMutex},
 };
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message as Frame};
@@ -240,7 +244,7 @@ impl Events {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
         ) {
             return Some(
-                json!({"id":request,"error":{"code":-32601,"message":"Review this request on the Mac."}}),
+                json!({"id":request,"error":{"code":-32601,"message":"Review this request on the device."}}),
             );
         }
         if self
@@ -257,7 +261,7 @@ impl Events {
         } else {
             changes
                 .cloned()
-                .unwrap_or_else(|| "Review the complete request on your Mac.".into())
+                .unwrap_or_else(|| "Review the complete request on the device.".into())
         };
         let can_review = if command {
             params["command"].is_string()
@@ -353,11 +357,15 @@ impl Rpc {
 }
 
 fn disconnected() -> Failure {
-    Failure::new(503, "Cannot reach Codex. Keep Codex running on this Mac.")
+    Failure::new(
+        503,
+        "Cannot reach Codex. Keep Codex running on this device.",
+    )
 }
 
 pub struct Codex {
     path: PathBuf,
+    auto_start: bool,
     provider: String,
     gateway: Url,
     rpc: AsyncMutex<Option<Rpc>>,
@@ -377,6 +385,7 @@ impl Codex {
     pub fn new(path: PathBuf, provider: String, gateway: Url) -> Self {
         Self {
             path,
+            auto_start: false,
             provider,
             gateway,
             rpc: AsyncMutex::new(None),
@@ -387,6 +396,50 @@ impl Codex {
         }
     }
 
+    pub fn auto_start(mut self, enabled: bool) -> Self {
+        self.auto_start = enabled;
+        self
+    }
+
+    pub(super) async fn control_stream(
+        &self,
+        start: impl Future<Output = std::io::Result<()>>,
+    ) -> std::io::Result<UnixStream> {
+        match UnixStream::connect(&self.path).await {
+            Err(error) if self.auto_start && error.kind() == ErrorKind::NotFound => {}
+            result => return result,
+        }
+        start.await?;
+        loop {
+            match UnixStream::connect(&self.path).await {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn start_daemon() -> std::io::Result<()> {
+        let status = Command::new("codex")
+            .args(["app-server", "daemon", "start"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await?;
+        if !status.success() {
+            return Err(std::io::Error::other("Codex daemon did not start"));
+        }
+        Ok(())
+    }
+
     async fn connection(&self) -> Result<Rpc> {
         let mut current = self.rpc.lock().await;
         if let Some(rpc) = current.as_ref().filter(|rpc| !rpc.sender.is_closed()) {
@@ -394,10 +447,13 @@ impl Codex {
         }
         self.drafts.lock().expect("Codex draft lock").clear();
         self.starting.lock().expect("Codex starting lock").clear();
-        let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&self.path))
-            .await
-            .map_err(|_| disconnected())?
-            .map_err(|_| disconnected())?;
+        let stream = tokio::time::timeout(
+            Duration::from_secs(8),
+            self.control_stream(Self::start_daemon()),
+        )
+        .await
+        .map_err(|_| disconnected())?
+        .map_err(|_| disconnected())?;
         let config = WebSocketConfig::default().max_message_size(Some(32 * 1024 * 1024));
         let (socket, _) =
             tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(config))
@@ -725,7 +781,7 @@ impl Codex {
                 .filter(|request| request.thread == id.to_string())
                 .ok_or_else(|| Failure::new(409, "This approval was already resolved."))?;
             if decision == Decision::Accept && !pending.approval.can_accept {
-                return Err(Failure::new(400, "Review this request on your Mac."));
+                return Err(Failure::new(400, "Review this request on the device."));
             }
             events
                 .approvals

@@ -33,7 +33,7 @@ pub fn validate_directory(cwd: &str) -> Result<()> {
     if !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() {
         return Err(Failure::new(
             400,
-            "Choose an existing project folder on your Mac.",
+            "Choose an existing project folder on the device.",
         ));
     }
     Ok(())
@@ -72,7 +72,7 @@ impl Sessions {
                 if codex.is_err() && claude.is_err() {
                     return Err(Failure::new(
                         503,
-                        "Neither coding agent is available on this Mac.",
+                        "Neither coding agent is available on this device.",
                     ));
                 }
                 let warnings = [codex.as_ref().err(), claude.as_ref().err()]

@@ -1,11 +1,11 @@
 use std::{path::Path, sync::Mutex};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::protocol::{digest, token, Failure, Outcome, Result};
+use super::protocol::{digest, token, Failure, Outcome, Platform, Result};
 
 pub struct Store {
     connection: Mutex<Connection>,
@@ -26,6 +26,7 @@ pub struct Device {
     pub subject: String,
     pub name: String,
     pub last_seen: i64,
+    pub platform: Platform,
 }
 
 pub enum RequestState {
@@ -48,18 +49,35 @@ impl Store {
                     .map_err(|_| Failure::new(503, "Cannot create the remote state file."))?;
             }
         }
-        let connection =
+        let mut connection =
             Connection::open(path).map_err(|_| Failure::new(503, "Cannot open remote state."))?;
         connection.execute_batch("PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, subject TEXT NOT NULL, label TEXT NOT NULL, expires_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS catalogs (token_hash TEXT PRIMARY KEY, models TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, subject TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, subject TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen INTEGER NOT NULL, platform TEXT NOT NULL DEFAULT 'macOS');
             CREATE INDEX IF NOT EXISTS devices_subject ON devices(subject);
             CREATE TABLE IF NOT EXISTS requests (subject TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT, expires_at INTEGER NOT NULL, PRIMARY KEY(subject, request_id));")
             .map_err(|_| Failure::new(503, "Cannot initialize remote state."))?;
+        Self::migrate_devices(&mut connection)
+            .map_err(|_| Failure::new(503, "Cannot migrate remote device state."))?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    fn migrate_devices(connection: &mut Connection) -> rusqlite::Result<()> {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let has_platform: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('devices') WHERE name = 'platform')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_platform {
+            transaction.execute_batch(
+                "ALTER TABLE devices ADD COLUMN platform TEXT NOT NULL DEFAULT 'macOS';",
+            )?;
+        }
+        transaction.commit()
     }
 
     fn db<T>(&self, operation: impl FnOnce(&mut Connection) -> rusqlite::Result<T>) -> Result<T> {
@@ -133,18 +151,25 @@ impl Store {
         })
     }
 
-    pub fn enroll(&self, subject: &str, name: &str, now: i64) -> Result<(Device, String)> {
+    pub fn enroll(
+        &self,
+        subject: &str,
+        name: &str,
+        platform: Platform,
+        now: i64,
+    ) -> Result<(Device, String)> {
         let device = Device {
             id: Uuid::new_v4(),
             subject: subject.into(),
             name: name.into(),
             last_seen: now,
+            platform,
         };
         let token = token();
         self.db(|connection| {
             connection.execute(
-                "INSERT INTO devices VALUES (?, ?, ?, ?, ?)",
-                params![device.id.to_string(), subject, name, digest(&token), now],
+                "INSERT INTO devices (id, subject, name, token_hash, last_seen, platform) VALUES (?, ?, ?, ?, ?, ?)",
+                params![device.id.to_string(), subject, name, digest(&token), now, platform.label()],
             )
         })?;
         Ok((device, token))
@@ -153,7 +178,7 @@ impl Store {
     pub fn devices(&self, subject: &str) -> Result<Vec<Device>> {
         self.db(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, subject, name, last_seen FROM devices WHERE subject = ? ORDER BY name",
+                "SELECT id, subject, name, last_seen, platform FROM devices WHERE subject = ? ORDER BY name",
             )?;
             let rows = statement.query_map([subject], device_row)?;
             rows.collect()
@@ -164,7 +189,7 @@ impl Store {
         self.db(|connection| {
             connection
                 .query_row(
-                    "SELECT id, subject, name, last_seen FROM devices WHERE token_hash = ?",
+                    "SELECT id, subject, name, last_seen, platform FROM devices WHERE token_hash = ?",
                     [digest(token)],
                     device_row,
                 )
@@ -262,5 +287,6 @@ fn device_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
         subject: row.get(1)?,
         name: row.get(2)?,
         last_seen: row.get(3)?,
+        platform: Platform::from(row.get::<_, String>(4)?.as_str()),
     })
 }
