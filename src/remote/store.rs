@@ -7,6 +7,10 @@ use uuid::Uuid;
 
 use super::protocol::{digest, token, Failure, Outcome, Result};
 
+pub const ACCESS_TTL_MS: i64 = 15 * 60 * 1000;
+pub const REFRESH_ABSOLUTE_MS: i64 = 30 * 86_400_000;
+pub const REFRESH_IDLE_MS: i64 = 7 * 86_400_000;
+
 pub struct Store {
     connection: Mutex<Connection>,
 }
@@ -34,6 +38,12 @@ pub enum RequestState {
     Unconfirmed,
 }
 
+pub struct Issued {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub identity: Identity,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if path != Path::new(":memory:") {
@@ -55,7 +65,13 @@ impl Store {
             CREATE TABLE IF NOT EXISTS catalogs (token_hash TEXT PRIMARY KEY, models TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, subject TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS devices_subject ON devices(subject);
-            CREATE TABLE IF NOT EXISTS requests (subject TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT, expires_at INTEGER NOT NULL, PRIMARY KEY(subject, request_id));")
+            CREATE TABLE IF NOT EXISTS requests (subject TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT, expires_at INTEGER NOT NULL, PRIMARY KEY(subject, request_id));
+            CREATE TABLE IF NOT EXISTS session_family (token_hash TEXT PRIMARY KEY, family TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS family_catalogs (family TEXT PRIMARY KEY, models TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS refresh_tokens (token_hash TEXT PRIMARY KEY, family TEXT NOT NULL, subject TEXT NOT NULL, absolute_expires_at INTEGER NOT NULL, idle_expires_at INTEGER NOT NULL, replaced INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS refresh_family ON refresh_tokens(family);
+            CREATE TABLE IF NOT EXISTS device_access (token_hash TEXT PRIMARY KEY, device_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS device_access_device ON device_access(device_id);")
             .map_err(|_| Failure::new(503, "Cannot initialize remote state."))?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -71,50 +87,174 @@ impl Store {
             .map_err(|_| Failure::new(503, "The remote state operation failed."))
     }
 
-    pub fn issue(&self, subject: &str, models: &[String], now: i64) -> Result<(String, Identity)> {
-        let token = token();
+    pub fn issue(&self, subject: &str, models: &[String], now: i64) -> Result<Issued> {
+        let access_token = token();
+        let refresh_token = token();
         let identity = Identity {
             subject: subject.into(),
             label: subject.into(),
             method: "sso",
-            expires_at: now + 7 * 86_400_000,
+            expires_at: now + ACCESS_TTL_MS,
         };
+        let family = Uuid::new_v4().to_string();
         let catalog = serde_json::to_string(models)
             .map_err(|_| Failure::new(500, "Cannot save the model catalog."))?;
+        let access_hash = digest(&access_token);
         self.db(|connection| {
             let transaction = connection.transaction()?;
-            transaction.execute("DELETE FROM sessions WHERE expires_at <= ?", [now])?;
-            transaction.execute(
-                "DELETE FROM catalogs WHERE token_hash NOT IN (SELECT token_hash FROM sessions)",
-                [],
-            )?;
+            purge(&transaction, now)?;
             transaction.execute(
                 "INSERT INTO sessions VALUES (?, ?, ?, ?)",
-                params![digest(&token), subject, subject, identity.expires_at],
+                params![access_hash, subject, subject, identity.expires_at],
             )?;
             transaction.execute(
-                "INSERT INTO catalogs VALUES (?, ?)",
-                params![digest(&token), catalog],
+                "INSERT INTO session_family VALUES (?, ?)",
+                params![access_hash, family],
+            )?;
+            transaction.execute(
+                "INSERT INTO family_catalogs VALUES (?, ?)",
+                params![family, catalog],
+            )?;
+            transaction.execute(
+                "INSERT INTO refresh_tokens VALUES (?, ?, ?, ?, ?, 0)",
+                params![
+                    digest(&refresh_token),
+                    family,
+                    subject,
+                    now + REFRESH_ABSOLUTE_MS,
+                    now + REFRESH_IDLE_MS
+                ],
             )?;
             transaction.commit()
         })?;
-        Ok((token, identity))
+        Ok(Issued {
+            access_token,
+            refresh_token,
+            identity,
+        })
+    }
+
+    pub fn refresh(&self, presented: &str, now: i64) -> Result<Issued> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| Failure::new(503, "Remote state is unavailable."))?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        purge(&transaction, now)
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        let current: Option<(String, String, i64, i64, i64)> = transaction
+            .query_row(
+                "SELECT family, subject, absolute_expires_at, idle_expires_at, replaced FROM refresh_tokens WHERE token_hash = ?",
+                [digest(presented)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        let Some((family, subject, absolute, idle, replaced)) = current else {
+            return Err(Failure::new(401, "Sign in again."));
+        };
+        if replaced != 0 {
+            revoke_family(&transaction, &family)
+                .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+            transaction
+                .commit()
+                .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+            return Err(Failure::new(401, "Sign in again."));
+        }
+        if absolute <= now || idle <= now {
+            transaction
+                .execute(
+                    "DELETE FROM refresh_tokens WHERE token_hash = ?",
+                    [digest(presented)],
+                )
+                .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+            transaction
+                .commit()
+                .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+            return Err(Failure::new(401, "Sign in again."));
+        }
+        let access_token = token();
+        let refresh_token = token();
+        let identity = Identity {
+            subject: subject.clone(),
+            label: subject.clone(),
+            method: "sso",
+            expires_at: now + ACCESS_TTL_MS,
+        };
+        let access_hash = digest(&access_token);
+        transaction
+            .execute(
+                "UPDATE refresh_tokens SET replaced = 1 WHERE token_hash = ?",
+                [digest(presented)],
+            )
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        transaction
+            .execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+                params![access_hash, subject, subject, identity.expires_at],
+            )
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        transaction
+            .execute(
+                "INSERT INTO session_family VALUES (?, ?)",
+                params![access_hash, family],
+            )
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        transaction
+            .execute(
+                "INSERT INTO refresh_tokens VALUES (?, ?, ?, ?, ?, 0)",
+                params![
+                    digest(&refresh_token),
+                    family,
+                    subject,
+                    absolute,
+                    (now + REFRESH_IDLE_MS).min(absolute)
+                ],
+            )
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        transaction
+            .commit()
+            .map_err(|_| Failure::new(503, "The remote state operation failed."))?;
+        Ok(Issued {
+            access_token,
+            refresh_token,
+            identity,
+        })
     }
 
     pub fn identity(&self, token: &str, now: i64) -> Result<Option<Identity>> {
-        self.db(|connection| connection.query_row("SELECT subject, label, expires_at FROM sessions WHERE token_hash = ? AND expires_at > ?",
-            params![digest(token), now], |row| Ok(Identity { subject: row.get(0)?, label: row.get(1)?, method: "sso", expires_at: row.get(2)? })).optional())
+        self.db(|connection| {
+            let transaction = connection.transaction()?;
+            purge(&transaction, now)?;
+            let identity = transaction.query_row("SELECT subject, label, expires_at FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                params![digest(token), now], |row| Ok(Identity { subject: row.get(0)?, label: row.get(1)?, method: "sso", expires_at: row.get(2)? })).optional()?;
+            transaction.commit()?;
+            Ok(identity)
+        })
     }
 
     pub fn models(&self, token: &str) -> Result<Vec<String>> {
+        let hash = digest(token);
         let catalog: Option<String> = self.db(|connection| {
             connection
                 .query_row(
-                    "SELECT models FROM catalogs WHERE token_hash = ?",
-                    [digest(token)],
+                    "SELECT models FROM family_catalogs WHERE family = (SELECT family FROM session_family WHERE token_hash = ?)",
+                    [&hash],
                     |row| row.get(0),
                 )
                 .optional()
+                .and_then(|found| match found {
+                    Some(models) => Ok(Some(models)),
+                    None => connection
+                        .query_row(
+                            "SELECT models FROM catalogs WHERE token_hash = ?",
+                            [&hash],
+                            |row| row.get(0),
+                        )
+                        .optional(),
+                })
         })?;
         catalog
             .map(|value| {
@@ -125,10 +265,22 @@ impl Store {
     }
 
     pub fn logout(&self, token: &str) -> Result<()> {
+        let hash = digest(token);
         self.db(|connection| {
             let transaction = connection.transaction()?;
-            transaction.execute("DELETE FROM sessions WHERE token_hash = ?", [digest(token)])?;
-            transaction.execute("DELETE FROM catalogs WHERE token_hash = ?", [digest(token)])?;
+            let family: Option<String> = transaction
+                .query_row(
+                    "SELECT family FROM session_family WHERE token_hash = ?",
+                    [&hash],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(family) = family {
+                revoke_family(&transaction, &family)?;
+            } else {
+                transaction.execute("DELETE FROM sessions WHERE token_hash = ?", [&hash])?;
+                transaction.execute("DELETE FROM catalogs WHERE token_hash = ?", [&hash])?;
+            }
             transaction.commit()
         })
     }
@@ -189,14 +341,53 @@ impl Store {
         .map(|_| ())
     }
 
+    pub fn exchange_device(&self, device_token: &str, now: i64) -> Result<(String, i64)> {
+        let Some(device) = self.authenticate_device(device_token)? else {
+            return Err(Failure::new(401, "Device authentication failed."));
+        };
+        let access = token();
+        let expires = now + ACCESS_TTL_MS;
+        self.db(|connection| {
+            let transaction = connection.transaction()?;
+            purge(&transaction, now)?;
+            transaction.execute(
+                "INSERT INTO device_access VALUES (?, ?, ?)",
+                params![digest(&access), device.id.to_string(), expires],
+            )?;
+            transaction.commit()
+        })?;
+        Ok((access, expires))
+    }
+
+    pub fn authenticate_access(&self, token: &str, now: i64) -> Result<Option<(Device, i64)>> {
+        self.db(|connection| {
+            let transaction = connection.transaction()?;
+            purge(&transaction, now)?;
+            let device = transaction
+                .query_row(
+                    "SELECT devices.id, devices.subject, devices.name, devices.last_seen, device_access.expires_at FROM device_access JOIN devices ON devices.id = device_access.device_id WHERE device_access.token_hash = ? AND device_access.expires_at > ?",
+                    params![digest(token), now],
+                    |row| Ok((device_row(row)?, row.get(4)?)),
+                )
+                .optional()?;
+            transaction.commit()?;
+            Ok(device)
+        })
+    }
+
     pub fn revoke(&self, id: Uuid, subject: &str) -> Result<()> {
         self.db(|connection| {
-            connection.execute(
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "DELETE FROM device_access WHERE device_id = ?",
+                [id.to_string()],
+            )?;
+            transaction.execute(
                 "DELETE FROM devices WHERE id = ? AND subject = ?",
                 params![id.to_string(), subject],
-            )
+            )?;
+            transaction.commit()
         })
-        .map(|_| ())
     }
 
     pub fn begin(
@@ -250,6 +441,39 @@ impl Store {
         })
         .map(|_| ())
     }
+}
+
+fn purge(connection: &rusqlite::Connection, now: i64) -> rusqlite::Result<()> {
+    connection.execute("DELETE FROM sessions WHERE expires_at <= ?", [now])?;
+    connection.execute(
+        "DELETE FROM catalogs WHERE token_hash NOT IN (SELECT token_hash FROM sessions)",
+        [],
+    )?;
+    connection.execute("DELETE FROM device_access WHERE expires_at <= ?", [now])?;
+    connection.execute(
+        "DELETE FROM refresh_tokens WHERE absolute_expires_at <= ? OR (replaced = 0 AND idle_expires_at <= ?)",
+        [now, now],
+    )?;
+    connection.execute(
+        "DELETE FROM session_family WHERE token_hash NOT IN (SELECT token_hash FROM sessions)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM family_catalogs WHERE family NOT IN (SELECT family FROM refresh_tokens UNION SELECT family FROM session_family)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn revoke_family(connection: &rusqlite::Connection, family: &str) -> rusqlite::Result<()> {
+    connection.execute(
+        "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM session_family WHERE family = ?)",
+        [family],
+    )?;
+    connection.execute("DELETE FROM session_family WHERE family = ?", [family])?;
+    connection.execute("DELETE FROM refresh_tokens WHERE family = ?", [family])?;
+    connection.execute("DELETE FROM family_catalogs WHERE family = ?", [family])?;
+    Ok(())
 }
 
 fn device_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {

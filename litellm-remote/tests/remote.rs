@@ -173,9 +173,10 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
     let request = Uuid::new_v4();
     let (token, device_token, id, expires) = {
         let store = Store::open(&path).unwrap();
-        let (token, identity) = store
+        let issued = store
             .issue("owner", &["fixture-model".into()], 100)
             .unwrap();
+        let token = issued.access_token;
         let (device, device_token) = store.enroll("owner", "Mac", 100).unwrap();
         assert!(store.device(device.id, "other").is_err());
         assert!(matches!(
@@ -190,9 +191,10 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
         store
             .finish("owner", request, Ok(json!({"turnId":"one-turn"})))
             .unwrap();
-        (token, device_token, device.id, identity.expires_at)
+        (token, device_token, device.id, issued.identity.expires_at)
     };
     let store = Store::open(&path).unwrap();
+    assert_eq!(store.models(&token).unwrap(), vec!["fixture-model"]);
     assert_eq!(
         store
             .identity(&token, expires - 1)
@@ -202,7 +204,6 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
         "owner"
     );
     assert!(store.identity(&token, expires).unwrap().is_none());
-    assert_eq!(store.models(&token).unwrap(), vec!["fixture-model"]);
     match store.begin("owner", request, "input", 102).unwrap() {
         RequestState::Cached(outcome) => {
             assert_eq!(outcome.into_result().unwrap()["turnId"], "one-turn")
@@ -234,6 +235,207 @@ fn persisted_identity_expiry_revocation_and_request_replay() {
     assert!(!saved.contains(&token));
 }
 
+#[test]
+fn short_lived_credentials_expire_rotate_and_revoke_without_sleeping() {
+    let directory = Directory::new();
+    let store = Store::open(&directory.0.join("control.sqlite")).unwrap();
+    let issued = store
+        .issue("owner", &["fixture-model".into()], 1_000)
+        .unwrap();
+    assert_eq!(
+        issued.identity.expires_at,
+        1_000 + super::store::ACCESS_TTL_MS
+    );
+    assert_eq!(
+        store.models(&issued.access_token).unwrap(),
+        vec!["fixture-model"]
+    );
+    let saved = directory
+        .0
+        .read_dir()
+        .unwrap()
+        .filter_map(|entry| std::fs::read(entry.ok()?.path()).ok())
+        .fold(String::new(), |mut saved, bytes| {
+            saved.push_str(&String::from_utf8_lossy(&bytes));
+            saved
+        });
+    assert!(!saved.contains(&issued.access_token));
+    assert!(!saved.contains(&issued.refresh_token));
+    assert!(store
+        .identity(&issued.access_token, issued.identity.expires_at - 1)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .identity(&issued.access_token, issued.identity.expires_at)
+        .unwrap()
+        .is_none());
+
+    let first = store.issue("owner", &["fixture-model".into()], 0).unwrap();
+    let rotated = store.refresh(&first.refresh_token, 1_000).unwrap();
+    assert_ne!(rotated.refresh_token, first.refresh_token);
+    assert_ne!(rotated.access_token, first.access_token);
+    assert_eq!(
+        store.models(&rotated.access_token).unwrap(),
+        vec!["fixture-model"]
+    );
+    assert!(store.refresh(&first.refresh_token, 2_000).is_err());
+    assert!(store
+        .identity(&rotated.access_token, 2_000)
+        .unwrap()
+        .is_none());
+    assert!(store.refresh(&rotated.refresh_token, 2_000).is_err());
+
+    let idle = store.issue("owner", &["fixture-model".into()], 0).unwrap();
+    assert!(store
+        .refresh(&idle.refresh_token, super::store::REFRESH_IDLE_MS)
+        .is_err());
+    let absolute = store.issue("owner", &["fixture-model".into()], 0).unwrap();
+    let moved = store.refresh(&absolute.refresh_token, 1_000).unwrap();
+    assert!(store
+        .refresh(&moved.refresh_token, super::store::REFRESH_ABSOLUTE_MS)
+        .is_err());
+
+    let legacy = protocol::token();
+    {
+        let db = rusqlite::Connection::open(directory.0.join("control.sqlite")).unwrap();
+        db.execute(
+            "INSERT INTO sessions VALUES (?, 'legacy', 'legacy', ?)",
+            rusqlite::params![protocol::digest(&legacy), 5_000 + 7 * 86_400_000],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO catalogs VALUES (?, ?)",
+            rusqlite::params![protocol::digest(&legacy), "[\"legacy-model\"]"],
+        )
+        .unwrap();
+    }
+    let reopened = Store::open(&directory.0.join("control.sqlite")).unwrap();
+    assert_eq!(
+        reopened.identity(&legacy, 5_000).unwrap().unwrap().subject,
+        "legacy"
+    );
+    assert_eq!(
+        reopened.models(&legacy).unwrap(),
+        vec!["legacy-model".to_string()]
+    );
+
+    let (device, device_token) = reopened.enroll("owner", "Mac", 1_000).unwrap();
+    let (access, expires) = reopened.exchange_device(&device_token, 1_000).unwrap();
+    assert_eq!(expires, 1_000 + super::store::ACCESS_TTL_MS);
+    assert!(reopened
+        .authenticate_access(&device_token, 1_000)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        reopened
+            .authenticate_access(&access, expires - 1)
+            .unwrap()
+            .unwrap()
+            .0
+            .id,
+        device.id
+    );
+    assert!(reopened
+        .authenticate_access(&access, expires)
+        .unwrap()
+        .is_none());
+    reopened.revoke(device.id, "owner").unwrap();
+    assert!(reopened
+        .authenticate_access(&access, 1_000)
+        .unwrap()
+        .is_none());
+    assert!(reopened.exchange_device(&device_token, 1_000).is_err());
+}
+
+#[test]
+fn connector_refreshes_before_expiry_and_after_rejection() {
+    let mut access = super::connector::DeviceAccess::new("device-credential");
+    assert!(access.needs_refresh(0));
+    let ttl = 15 * 60 * 1000;
+    access.remember("cached", 0, ttl);
+    assert!(!access.needs_refresh(ttl * 4 / 5 - 1));
+    assert!(access.needs_refresh(ttl * 4 / 5));
+    access.reject();
+    assert!(access.needs_refresh(0));
+}
+
+#[tokio::test]
+async fn agent_socket_rejects_the_device_credential_and_expired_access_tokens() {
+    let gateway = gateway().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let service = Service::open(
+        gateway.url.clone(),
+        url.clone(),
+        std::path::Path::new(":memory:"),
+    )
+    .unwrap();
+    service.set_clock(1_000_000);
+    let served = service.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            served
+                .router()
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let server = Server {
+        url: url.clone(),
+        task,
+    };
+    let owner = sign_in(&server).await;
+    let device: Value = client()
+        .post(server.url.join("/api/devices").unwrap())
+        .bearer_auth(&owner)
+        .json(&json!({"name":"QA Mac"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device_token = device["deviceToken"].as_str().unwrap();
+    let mut endpoint = server.url.join("/agent").unwrap();
+    endpoint.set_scheme("ws").unwrap();
+    let connect = |bearer: &str| {
+        let mut request = endpoint.as_str().into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        request
+    };
+    assert!(tokio_tungstenite::connect_async(connect(device_token))
+        .await
+        .is_err());
+    let mut session = super::connector::DeviceAccess::new(device_token);
+    let (access, expires) =
+        super::connector::ensure_device_access(&server.url, &mut session, 1_000_000)
+            .await
+            .unwrap();
+    assert!(tokio_tungstenite::connect_async(connect(&access))
+        .await
+        .is_ok());
+    session.remember("stale-token", 1_000_000, expires);
+    session.reject();
+    let (renewed, _) = super::connector::ensure_device_access(&server.url, &mut session, 1_000_000)
+        .await
+        .unwrap();
+    assert_ne!(renewed, "stale-token");
+    assert_ne!(renewed, access);
+    service.set_clock(expires);
+    assert!(tokio_tungstenite::connect_async(connect(&access))
+        .await
+        .is_err());
+    assert!(tokio_tungstenite::connect_async(connect(&renewed))
+        .await
+        .is_err());
+}
+
 #[tokio::test]
 async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
     let gateway = gateway().await;
@@ -253,6 +455,17 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
         .await
         .unwrap();
     let id = device["deviceId"].as_str().unwrap();
+    let device_access: Value = client()
+        .post(server.url.join("/api/auth/device").unwrap())
+        .bearer_auth(device["deviceToken"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let path = server
         .url
         .join(&format!("/api/devices/{id}/sessions"))
@@ -311,7 +524,7 @@ async fn sso_owner_isolation_websocket_routing_and_mutation_deduplication() {
     let mut request = endpoint.as_str().into_client_request().unwrap();
     request.headers_mut().insert(
         "authorization",
-        format!("Bearer {}", device["deviceToken"].as_str().unwrap())
+        format!("Bearer {}", device_access["token"].as_str().unwrap())
             .parse()
             .unwrap(),
     );

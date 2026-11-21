@@ -34,7 +34,25 @@ import kotlinx.serialization.Serializable
 )
 @Serializable data class LoginStart(val flowToken: String, val code: String, val verificationUrl: String)
 @Serializable data class Team(val id: String, val name: String)
-@Serializable data class LoginPoll(val status: String, val token: String? = null, val teams: List<Team> = emptyList())
+@Serializable data class LoginPoll(
+    val status: String,
+    val token: String? = null,
+    val refreshToken: String? = null,
+    val expiresAt: Long? = null,
+    val teams: List<Team> = emptyList(),
+)
+
+internal sealed class PhoneBearer {
+    data class Current(val token: String) : PhoneBearer()
+    data object Refresh : PhoneBearer()
+    data object SignedOut : PhoneBearer()
+}
+
+internal fun phoneBearer(access: String?, expiresAt: Long, hasRefresh: Boolean, now: Long): PhoneBearer {
+    if (access != null && (!hasRefresh || now + 180_000 < expiresAt)) return PhoneBearer.Current(access)
+    if (hasRefresh) return PhoneBearer.Refresh
+    return PhoneBearer.SignedOut
+}
 @Serializable data class ErrorReply(val error: String)
 
 sealed interface RemoteResult<out T> {

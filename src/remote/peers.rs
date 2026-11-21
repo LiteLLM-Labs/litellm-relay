@@ -113,10 +113,19 @@ impl Peers {
         }
     }
 
-    pub async fn connected(self: Arc<Self>, mut socket: WebSocket, device: Device) {
+    pub async fn connected(
+        self: Arc<Self>,
+        mut socket: WebSocket,
+        device: Device,
+        expires_at: i64,
+    ) {
         if self.store.device(device.id, &device.subject).is_err() {
             return;
         }
+        let expiry = tokio::time::sleep(Duration::from_millis(
+            expires_at.saturating_sub(now_ms()).max(0) as u64,
+        ));
+        tokio::pin!(expiry);
         let generation = Uuid::new_v4();
         let (sender, mut receiver) = mpsc::channel(16);
         {
@@ -172,6 +181,7 @@ impl Peers {
                 _ = heartbeat.tick() => {
                     if !self.online(device.id) || socket.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
                 }
+                _ = &mut expiry => break,
             }
         }
         if let Ok(mut connections) = self.connections.lock() {

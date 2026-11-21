@@ -212,6 +212,18 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(longLine.streamingPreview, String(repeating: "🧑🏽‍💻", count: 600))
     }
 
+    func testPhoneSessionKeepsTheAccessTokenInMemoryAndRotatesRefresh() {
+        var session = PhoneSession(refreshToken: "refresh-1")
+        XCTAssertEqual(session.bearer(now: 0), .refresh)
+        session.rotated(access: "access-1", refresh: "refresh-2", expiresAt: 1_000_000)
+        XCTAssertEqual(session.bearer(now: 1_000_000 - 180_001), .current("access-1"))
+        XCTAssertEqual(session.bearer(now: 1_000_000 - 180_000), .refresh)
+        XCTAssertEqual(session.refreshToken, "refresh-2")
+        XCTAssertNil(session.legacyToken)
+        XCTAssertEqual(PhoneSession(legacyToken: "week-old").bearer(now: 0), .current("week-old"))
+        XCTAssertEqual(PhoneSession().bearer(now: 0), .signedOut)
+    }
+
     func testAttachmentsTravelAsFencedBlocksWithSizeLimits() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("attach-\(UUID().uuidString)")

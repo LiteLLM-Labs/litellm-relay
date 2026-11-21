@@ -61,8 +61,15 @@ pub struct LoginStart {
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum LoginStatus {
     Pending,
-    Teams { teams: Vec<Team> },
-    Ready { token: String, identity: Identity },
+    Teams {
+        teams: Vec<Team>,
+    },
+    Ready {
+        token: String,
+        #[serde(rename = "refreshToken")]
+        refresh_token: String,
+        identity: Identity,
+    },
 }
 
 pub struct Authentication {
@@ -180,7 +187,7 @@ impl Authentication {
         Ok(started)
     }
 
-    pub async fn poll(&self, token: &str, team: Option<&str>) -> Result<LoginStatus> {
+    pub async fn poll(&self, token: &str, team: Option<&str>, now: i64) -> Result<LoginStatus> {
         let key = digest(token);
         let flow = {
             let mut flows = self
@@ -197,7 +204,7 @@ impl Authentication {
             pending.polling = true;
             pending.flow.clone()
         };
-        let result = self.poll_gateway(flow, team).await;
+        let result = self.poll_gateway(flow, team, now).await;
         if let Ok(mut flows) = self.flows.lock() {
             if matches!(result, Ok(LoginStatus::Ready { .. })) {
                 flows.remove(&key);
@@ -208,7 +215,12 @@ impl Authentication {
         result
     }
 
-    async fn poll_gateway(&self, flow: LoginFlow, team: Option<&str>) -> Result<LoginStatus> {
+    async fn poll_gateway(
+        &self,
+        flow: LoginFlow,
+        team: Option<&str>,
+        now: i64,
+    ) -> Result<LoginStatus> {
         let mut endpoint = Url::parse(&format!(
             "{}/sso/cli/poll/",
             self.gateway.as_str().trim_end_matches('/')
@@ -299,7 +311,11 @@ impl Authentication {
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        let (token, identity) = self.store.issue(&subject, &models, now_ms())?;
-        Ok(LoginStatus::Ready { token, identity })
+        let issued = self.store.issue(&subject, &models, now)?;
+        Ok(LoginStatus::Ready {
+            token: issued.access_token,
+            refresh_token: issued.refresh_token,
+            identity: issued.identity,
+        })
     }
 }

@@ -121,6 +121,37 @@ struct LoginPoll: Decodable, Sendable {
     let status: String
     let teams: [LoginTeam]?
     let token: String?
+    let refreshToken: String?
+    let expiresAt: Int64?
+}
+
+enum PhoneBearer: Equatable {
+    case current(String)
+    case refresh
+    case signedOut
+}
+
+struct PhoneSession: Equatable {
+    var accessToken: String?
+    var accessExpiresAt: Int64?
+    var refreshToken: String?
+    var legacyToken: String?
+
+    func bearer(now: Int64) -> PhoneBearer {
+        if let accessToken, let accessExpiresAt, now + 180_000 < accessExpiresAt {
+            return .current(accessToken)
+        }
+        if refreshToken != nil { return .refresh }
+        if let legacyToken { return .current(legacyToken) }
+        return .signedOut
+    }
+
+    mutating func rotated(access: String, refresh: String, expiresAt: Int64) {
+        accessToken = access
+        refreshToken = refresh
+        accessExpiresAt = expiresAt
+        legacyToken = nil
+    }
 }
 
 struct EmptyReply: Decodable, Sendable {}
