@@ -33,18 +33,19 @@ final class StreamingTests: XCTestCase {
         defer { app.terminate() }
         let session = app.staticTexts[StreamingService.title]
         let composer = app.descendants(matching: .any)["messageComposer"].firstMatch
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: composer)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 8), .completed)
-        composer.tap()
-        composer.typeText(StreamingService.firstPrompt)
-        app.buttons["sendMessageButton"].tap()
-
         let back = app.navigationBars.buttons.element(boundBy: 0)
         let latest = app.buttons["Latest message"]
         let chip = app.buttons["sessionChip"]
         XCTAssertTrue(chip.isHittable)
         XCTAssertGreaterThanOrEqual(chip.frame.minX, back.frame.maxX)
         XCTAssertLessThanOrEqual(chip.frame.maxX, latest.frame.minX)
+
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: composer)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 8), .completed)
+        composer.tap()
+        composer.typeText(StreamingService.firstPrompt)
+        app.buttons["sendMessageButton"].tap()
+
         let stop = app.buttons["stopTurnButton"]
         XCTAssertTrue(stop.waitForExistence(timeout: 10))
         XCTAssertTrue(latest.isHittable)
