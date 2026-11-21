@@ -75,6 +75,7 @@ import kotlinx.coroutines.launch
             }
         }
         (state.actionError ?: state.error ?: state.detail?.error?.takeUnless { session.status == "handoff_required" } ?: state.modelError)?.let { Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ErrorNotice(it) } }
+        if (state.sessionReconnecting) Text("Reconnecting to Relay…", modifier = Modifier.padding(horizontal = 22.dp, vertical = 8.dp), color = Secondary)
         LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(22.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
             if (session.status == "handoff_required") item {
                 Surface(color = Color.White, shape = RoundedCornerShape(18.dp)) {

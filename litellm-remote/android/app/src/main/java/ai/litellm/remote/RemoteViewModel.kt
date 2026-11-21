@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -22,6 +25,7 @@ data class RemoteState(
     val models: List<ModelOption> = emptyList(), val modelError: String? = null, val actionError: String? = null,
     val detailCurrent: Boolean = false,
     val dismissedExpiredApproval: String? = null,
+    val sessionReconnecting: Boolean = false,
 ) {
     val device get() = devices.firstOrNull { it.id == deviceId }
     val hasCurrentDetail get() = detailCurrent && detail != null && error == null && devices.firstOrNull { it.id == sessionDeviceId }?.online == true
@@ -42,7 +46,13 @@ data class RemoteState(
     else copy(actionError = failure.message, detailCurrent = detailCurrent && failure.status !in listOf(null, 503, 504))
 
     fun detailReceived(value: SessionDetail): RemoteState {
-        val updated = copy(detail = value, detailCurrent = true, error = null)
+        val previous = detail
+        if (value.session.agent == "claude" && value.session.status == "handoff_required" && previous?.session?.id == value.session.id &&
+            (sessionReconnecting || previous.session.canStop || previous.session.status == "working")) {
+            return copy(detail = previous.copy(session = previous.session.copy(canSend = false, canStop = false), approvals = emptyList(), error = null),
+                detailCurrent = false, error = null, sessionReconnecting = true)
+        }
+        val updated = copy(detail = value, detailCurrent = true, error = null, sessionReconnecting = false)
         return if (value.session.canStop || value.session.status == "working") updated.copy(dismissedExpiredApproval = detail?.expiredApproval?.id ?: dismissedExpiredApproval) else updated
     }
 
@@ -51,9 +61,8 @@ data class RemoteState(
     }
 }
 
-class RemoteViewModel(application: Application) : AndroidViewModel(application) {
+class RemoteViewModel @JvmOverloads constructor(application: Application, private val vault: SessionStorage = SessionVault(application)) : AndroidViewModel(application) {
     private val preferences = application.getSharedPreferences("remote.settings", Context.MODE_PRIVATE)
-    private val vault = SessionVault(application)
     private val mutable = MutableStateFlow(RemoteState(gateway = preferences.getString("gateway", "").orEmpty(),
         controlAddress = preferences.getString("controlAddress", "").orEmpty()))
     val state = mutable.asStateFlow()
@@ -86,18 +95,25 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         if (endpoint == null) { fail("Remote control isn’t configured at this gateway yet. Add its service address under Advanced."); return@launch }
-        val saved = vault.load(endpoint)
-        if (endpoint in refreshWorkspaces()) {
-            refreshToken = saved
-            token = null
-            accessExpiresAt = 0
-        } else {
-            refreshToken = null
-            token = saved
+        val connection = refreshMutex.withLock {
+            client?.takeIf { it.endpoint == endpoint } ?: run {
+                val saved = vault.load(endpoint)
+                if (endpoint in refreshWorkspaces()) {
+                    refreshToken = saved
+                    token = null
+                    accessExpiresAt = 0
+                } else {
+                    refreshToken = null
+                    token = saved
+                }
+                lateinit var api: ApiClient
+                api = ApiClient(endpoint, { refreshAccess(api) }) { bearer(api) }
+                api.also { client = it }
+            }
         }
-        val connection = ApiClient(endpoint, { refreshAccess() }) { bearer() }
-        client = connection
-        when (val reply = connection.request<Workspace>("/api/me")) {
+        val reply = connection.request<Workspace>("/api/me")
+        if (client !== connection) return@launch
+        when (reply) {
             is RemoteResult.Success -> {
                 if (workspaceAddress(reply.value.gateway, true) != gateway) { fail("This remote service is connected to a different gateway."); return@launch }
                 client = connection
@@ -142,14 +158,16 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                     rememberRefresh(state.value.endpoint)
                     refreshToken = value.refreshToken
                     token = access
-                    accessExpiresAt = value.expiresAt ?: 0L
+                    accessExpiresAt = value.identity?.expiresAt ?: value.expiresAt ?: 0L
                 } else {
                     if (!vault.save(state.value.endpoint, access)) { fail("Couldn’t securely save your sign-in."); return }
                     forgetRefresh(state.value.endpoint)
                     refreshToken = null
                     token = access
                 }
-                when (val workspace = api.request<Workspace>("/api/me")) {
+                val workspace = api.request<Workspace>("/api/me")
+                if (client !== api) return
+                when (workspace) {
                     is RemoteResult.Success -> { mutable.update { it.copy(workspace = workspace.value, login = null, teams = emptyList(), error = null) }; refresh() }
                     is RemoteResult.Failure -> handle(workspace)
                 }
@@ -203,11 +221,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun openSession(session: CodingSession, device: String?) { viewModelScope.launch {
         detailReplies.next()
-        mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, models = emptyList(), modelError = null, error = null, actionError = null) }
+        mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, models = emptyList(), modelError = null, error = null, actionError = null, sessionReconnecting = false) }
         loadDetail()
         loadModels()
     } }
-    fun closeSession() { detailReplies.next(); mutable.update { it.copy(selectedSession = null, sessionDeviceId = null, detail = null, models = emptyList(), modelError = null, error = null) } }
+    fun closeSession() { detailReplies.next(); mutable.update { it.copy(selectedSession = null, sessionDeviceId = null, detail = null, models = emptyList(), modelError = null, error = null, sessionReconnecting = false) } }
 
     private suspend fun loadDetail() {
         val api = client ?: return
@@ -318,8 +336,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         detailReplies.next()
         sessionReplies.next()
         deviceReplies.next()
-        forgetRefresh(state.value.endpoint)
-        vault.remove(state.value.endpoint)
+        val endpoint = client?.endpoint ?: state.value.endpoint
+        forgetRefresh(endpoint)
+        vault.remove(endpoint)
         token = null
         refreshToken = null
         accessExpiresAt = 0
@@ -336,26 +355,39 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         preferences.edit().putStringSet("refreshWorkspaces", refreshWorkspaces().apply { remove(endpoint) }).apply()
     }
 
-    private suspend fun bearer(): String? = when (val decision = phoneBearer(token, accessExpiresAt, refreshToken != null, System.currentTimeMillis())) {
-        is PhoneBearer.Current -> decision.token
-        PhoneBearer.Refresh -> if (refreshAccess()) token else null
-        PhoneBearer.SignedOut -> null
+    private suspend fun bearer(api: ApiClient): String? {
+        val decision = refreshMutex.withLock {
+            if (client !== api) PhoneBearer.SignedOut else phoneBearer(token, accessExpiresAt, refreshToken != null, System.currentTimeMillis())
+        }
+        return when (decision) {
+            is PhoneBearer.Current -> decision.token
+            PhoneBearer.Refresh -> if (refreshAccess(api)) refreshMutex.withLock { token.takeIf { client === api } } else null
+            PhoneBearer.SignedOut -> null
+        }
     }
 
-    private suspend fun refreshAccess(): Boolean {
+    private suspend fun refreshAccess(api: ApiClient): Boolean {
         val refresh = refreshToken ?: return false
-        val api = client ?: return false
-        return refreshMutex.withLock {
+        return withContext(NonCancellable + Dispatchers.IO) { refreshMutex.withLock {
             if (client !== api) return@withLock false
             if (refreshToken != refresh) return@withLock token != null
+            if (!vault.remove(api.endpoint)) {
+                disconnect()
+                fail("Couldn’t securely update your sign-in. Please sign in again.")
+                return@withLock false
+            }
             when (val result = api.refreshSession(refresh)) {
                 is RemoteResult.Success -> {
-                    if (refreshToken != refresh) return@withLock token != null
+                    if (client !== api || refreshToken != refresh) return@withLock false
                     val next = result.value.refreshToken
+                    if (!vault.save(api.endpoint, next)) {
+                        disconnect()
+                        fail("Couldn’t securely save your sign-in. Please sign in again.")
+                        return@withLock false
+                    }
                     refreshToken = next
                     token = result.value.token
                     accessExpiresAt = result.value.expiresAt
-                    vault.save(state.value.endpoint, next)
                     true
                 }
                 is RemoteResult.Failure -> {
@@ -363,7 +395,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                     false
                 }
             }
-        }
+        } }
     }
 
     private fun fail(message: String) { mutable.update { it.copy(error = message, busy = false, loading = false) } }
