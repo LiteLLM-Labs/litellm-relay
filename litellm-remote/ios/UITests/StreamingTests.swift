@@ -7,25 +7,9 @@ final class StreamingTests: XCTestCase {
     func testLongCodexReplyKeepsStopAndFollowUpResponsive() throws {
         continueAfterFailure = false
         let service = try StreamingService()
-        let port = try XCTUnwrap(service.port)
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-gatewayAddress", StreamingService.gateway,
-            "-workspaceAddress", "",
-            "-serviceOverride", "http://127.0.0.1:\(port)"
-        ]
-        app.launch()
+        let app = try launch(service)
         defer { app.terminate() }
-
-        let connect = app.buttons["connectButton"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 10))
-        connect.tap()
-        let signIn = app.buttons["Sign in with LiteLLM"]
-        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
-        signIn.tap()
         let session = app.staticTexts[StreamingService.title]
-        XCTAssertTrue(session.waitForExistence(timeout: 10))
-        session.tap()
 
         let reply = app.staticTexts["streamingReply"]
         XCTAssertTrue(reply.waitForExistence(timeout: 10))
@@ -58,6 +42,57 @@ final class StreamingTests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(session.waitForExistence(timeout: 5))
     }
+
+    @MainActor
+    func testDisconnectedMacPreservesDraftAndRestoresComposer() throws {
+        continueAfterFailure = false
+        let service = try StreamingService(working: false)
+        let app = try launch(service)
+        defer { app.terminate() }
+        XCTAssertTrue(app.staticTexts["Ready"].waitForExistence(timeout: 8))
+
+        let composer = app.descendants(matching: .any)["messageComposer"].firstMatch
+        let send = app.buttons["sendMessageButton"]
+        composer.tap()
+        composer.typeText("Draft before disconnect")
+        XCTAssertTrue(send.isEnabled)
+
+        service.setOnline(false)
+        XCTAssertTrue(app.staticTexts["Unavailable"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts[StreamingService.offlineMessage].exists)
+        XCTAssertFalse(send.isEnabled)
+        XCTAssertNil(service.sentText)
+
+        service.setOnline(true)
+        XCTAssertTrue(app.staticTexts["Ready"].waitForExistence(timeout: 8))
+        XCTAssertEqual(composer.value as? String, "Draft before disconnect")
+        XCTAssertNil(service.sentText)
+        send.tap()
+        XCTAssertTrue(app.staticTexts["Follow-up acknowledged"].waitForExistence(timeout: 8))
+        XCTAssertEqual(service.sentText, "Draft before disconnect")
+    }
+
+    @MainActor
+    private func launch(_ service: StreamingService) throws -> XCUIApplication {
+        let port = try XCTUnwrap(service.port)
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-gatewayAddress", StreamingService.gateway,
+            "-workspaceAddress", "",
+            "-serviceOverride", "http://127.0.0.1:\(port)"
+        ]
+        app.launch()
+        let connect = app.buttons["connectButton"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 10))
+        connect.tap()
+        let signIn = app.buttons["Sign in with LiteLLM"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
+        signIn.tap()
+        let session = app.staticTexts[StreamingService.title]
+        XCTAssertTrue(session.waitForExistence(timeout: 10))
+        session.tap()
+        return app
+    }
 }
 
 // The simulator and runner share loopback. Only the remote HTTP service is
@@ -65,18 +100,24 @@ final class StreamingTests: XCTestCase {
 private final class StreamingService: @unchecked Sendable {
     static let gateway = "https://gateway.example.test"
     static let title = "Long Codex turn"
+    static let offlineMessage = "This device is offline. Keep Relay Remote connected on your Mac."
 
     private let queue = DispatchQueue(label: "RemoteUITests.StreamingService")
     private let listener: NWListener
     private var poll = 0
     private var interrupts = 0
     private var followUp: String?
+    private var online = true
+    private let startsWorking: Bool
 
     var port: UInt16? { listener.port?.rawValue }
     var interruptCount: Int { queue.sync { interrupts } }
     var sentText: String? { queue.sync { followUp } }
 
-    init() throws {
+    func setOnline(_ value: Bool) { queue.sync { online = value } }
+
+    init(working: Bool = true) throws {
+        startsWorking = working
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: params)
@@ -124,7 +165,7 @@ private final class StreamingService: @unchecked Sendable {
         let base = "/api/devices/test-mac"
         let detail = base + "/sessions/codex:fixture"
         let now = Date().timeIntervalSince1970
-        let working = interrupts == 0
+        let working = startsWorking && interrupts == 0
         let session: [String: Any] = [
             "id": "codex:fixture", "title": Self.title, "project": "Fixture", "cwd": "/fixture",
             "agent": "codex", "status": working ? "working" : "ready",
@@ -143,12 +184,16 @@ private final class StreamingService: @unchecked Sendable {
             loggedIn = true
             response = ["status": "ready", "token": "fixture"]
         case "/api/devices":
-            response = ["devices": [["id": "test-mac", "name": "Test Mac", "online": true, "lastSeen": now, "platform": "macOS"]]]
+            response = ["devices": [["id": "test-mac", "name": "Test Mac", "online": online, "lastSeen": now, "platform": "macOS"]]]
         case base + "/sessions":
             response = ["sessions": [session]]
         case base + "/models":
             response = ["models": []]
         case detail:
+            guard online else {
+                send(["error": Self.offlineMessage], status: "503 Service Unavailable", on: connection)
+                return
+            }
             poll += 1
             let stream = String(repeating: "**Streaming** `code` [link](https://example.test)\n", count: 500)
             var messages = [

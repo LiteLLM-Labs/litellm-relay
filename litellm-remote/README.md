@@ -75,6 +75,8 @@ Both agents support history, new sessions, messages, incremental public assistan
 
 On iOS, the latest assistant reply shows a short plain-text preview while a turn is active. The conversation displays the formatted reply available from the connector once the turn ends.
 
+An iPhone on a different network can control sessions while the Mac is still connected to the service. If the Mac loses that connection, iOS keeps the currently open conversation and draft visible, but pauses session controls until it can refresh the conversation. The Mac runs the agents; it cannot take new turns while it is offline.
+
 The model picker uses the signed-in account’s gateway catalog. Sign in again to refresh access. Changing models or sending another message while a turn is active is refused. New Codex sessions use workspace-write sandboxing and on-request approvals. Resumed Codex sessions preserve their existing permissions, with one exception: a thread whose approval policy is `never` would deny mobile tool requests without showing a card, so sending from the phone raises it to `on-request`, still subject to administrator constraints and the unchanged sandbox. Claude uses its normal settings and default permission mode, without bypass flags.
 
 File approvals require the complete diff. Oversized requests, broad persistent-access grants, and unsupported interactive dialogs must be reviewed on the Mac. Stopping or declining remains possible if Relay changes environments. New input and approval acceptance verify that the agent still routes to the paired gateway, including Relay’s current broker gateway rather than a stale account snapshot.

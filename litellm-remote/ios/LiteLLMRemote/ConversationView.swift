@@ -23,6 +23,7 @@ struct SessionView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private var session: CodingSession { detail?.session ?? route.session }
+    private var hasCurrentDetail: Bool { detail != nil && loadError == nil }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,12 +31,16 @@ struct SessionView: View {
                 Image(systemName: "folder").font(.system(size: 10))
                 Text(session.project).font(.system(size: 11, weight: .medium)).lineLimit(1)
                 Spacer()
-                Circle().fill(session.status == "working" ? Palette.accent : Palette.success).frame(width: 5, height: 5)
-                Text(session.activity).font(.system(size: 11, weight: .medium))
+                Circle().fill(!hasCurrentDetail ? Palette.secondary : session.status == "working" ? Palette.accent : Palette.success)
+                    .frame(width: 5, height: 5)
+                Text(loadError != nil ? "Unavailable" : detail == nil ? "Connecting…" : session.activity)
+                    .font(.system(size: 11, weight: .medium))
             }
             .foregroundStyle(Palette.secondary).padding(.horizontal, 22).padding(.vertical, 13)
             .background(Palette.surface)
-            if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError { InlineError(text: error).padding(.horizontal, 18).padding(.top, 8) }
+            if let error = loadError ?? actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? modelError {
+                InlineError(text: error).padding(.horizontal, 18).padding(.top, 8)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
                     if detail?.olderMessages == true { Text("Latest messages").font(.caption2).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity) }
@@ -55,7 +60,7 @@ struct SessionView: View {
                         MessageView(message: message, agentName: session.agentName, streaming: message.id == streamingID)
                     }
                     ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
-                    if session.status == "working" {
+                    if hasCurrentDetail && session.status == "working" {
                         HStack(spacing: 10) { ProgressView().controlSize(.mini); Text("\(session.agentName) is working").font(.caption) }.foregroundStyle(Palette.secondary)
                     }
                 }
@@ -77,7 +82,7 @@ struct SessionView: View {
                         if stopping { ProgressView().controlSize(.small).frame(width: 18, height: 18) }
                         else { Label("Stop", systemImage: "stop.fill").labelStyle(.titleAndIcon).font(.caption.weight(.semibold)) }
                     }
-                    .disabled(stopping).accessibilityLabel("Stop current turn")
+                    .disabled(stopping || !hasCurrentDetail).accessibilityLabel("Stop current turn")
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -123,16 +128,18 @@ struct SessionView: View {
                         .foregroundStyle(Palette.ink).padding(.vertical, 6)
                     }
                     .accessibilityLabel("Choose model").accessibilityIdentifier("modelPicker")
-                    .disabled(sending || !session.canSend)
+                    .disabled(sending || !hasCurrentDetail || !session.canSend)
                     Spacer()
-                    Text(session.status == "working" ? "Working" : "Gateway").font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                    if hasCurrentDetail {
+                        Text(session.status == "working" ? "Working" : "Gateway").font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                    }
                 }
                 .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 3)
                 Divider().overlay(Palette.border.opacity(0.6)).padding(.horizontal, 12)
             HStack(alignment: .bottom, spacing: 12) {
                 TextField("Message \(session.agentName)…", text: $draft, axis: .vertical).lineLimit(1...6).font(.system(size: 15))
                     .padding(.horizontal, 16).padding(.vertical, 14)
-                    .disabled(sending || !session.canSend).accessibilityIdentifier("messageComposer")
+                    .disabled(sending || !hasCurrentDetail || !session.canSend).accessibilityIdentifier("messageComposer")
                     .onChange(of: draft) { if !sending { requestId = UUID().uuidString } }
                 Button { Task { await send() } } label: {
                     Group {
@@ -143,7 +150,7 @@ struct SessionView: View {
                     .background(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Palette.secondary.opacity(0.3) : Palette.accent, in: RoundedRectangle(cornerRadius: 12))
                 }
                 .padding(6).accessibilityLabel("Send message").accessibilityIdentifier("sendMessageButton")
-                .disabled(sending || !session.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 32000)
+                .disabled(sending || !hasCurrentDetail || !session.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 32000)
             }
             }
             .background(Palette.surface, in: RoundedRectangle(cornerRadius: 19))
@@ -173,6 +180,7 @@ struct SessionView: View {
                     .padding(.vertical, 5)
                 }
             }
+            .disabled(!hasCurrentDetail)
             .searchable(text: $modelSearch, prompt: "Search gateway models")
             .navigationTitle("Choose model").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showingModels = false } } }
@@ -190,7 +198,7 @@ struct SessionView: View {
                 Button("Decline", role: .destructive) { Task { await decide(approval, decision: "decline") } }.buttonStyle(.bordered)
                 if approval.canAccept { Button("Allow once") { Task { await decide(approval, decision: "accept") } }.buttonStyle(.borderedProminent).foregroundStyle(.white) }
             }
-            .disabled(deciding)
+            .disabled(deciding || !hasCurrentDetail)
             .controlSize(.large)
         }
         .padding(18).frame(maxWidth: .infinity, alignment: .leading).background(Palette.surface, in: RoundedRectangle(cornerRadius: 17))
@@ -210,7 +218,7 @@ struct SessionView: View {
     }
 
     private func stopTurn() async {
-        guard !stopping else { return }
+        guard hasCurrentDetail, !stopping else { return }
         stopping = true
         switch await store.interrupt(id: session.id, deviceId: route.deviceId, requestId: stopRequestId) {
         case .success: actionError = nil; stopRequestId = UUID().uuidString
@@ -221,7 +229,7 @@ struct SessionView: View {
     }
 
     private func send() async {
-        guard !sending else { return }
+        guard hasCurrentDetail, !sending else { return }
         sending = true
         actionError = nil
         switch await store.send(id: session.id, deviceId: route.deviceId, text: draft, requestId: requestId, model: selectedModel) {
@@ -250,7 +258,7 @@ struct SessionView: View {
     }
 
     private func decide(_ approval: SessionApproval, decision: String) async {
-        guard !deciding else { return }
+        guard hasCurrentDetail, !deciding else { return }
         deciding = true
         switch await store.approve(id: session.id, deviceId: route.deviceId, approvalId: approval.id, decision: decision) {
         case .success: actionError = nil
