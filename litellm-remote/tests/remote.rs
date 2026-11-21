@@ -45,6 +45,23 @@ impl Drop for Directory {
     }
 }
 
+struct ShortSocket(PathBuf);
+
+impl ShortSocket {
+    fn listen() -> (Self, tokio::net::UnixListener) {
+        let id = Uuid::new_v4().simple().to_string();
+        let path = PathBuf::from(format!("/tmp/r{}.sock", &id[..8]));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        (Self(path), listener)
+    }
+}
+
+impl Drop for ShortSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 struct Server {
     url: Url,
     task: tokio::task::JoinHandle<()>,
@@ -524,16 +541,26 @@ fn only_public_messages_are_exposed_and_credentials_are_redacted() {
 }
 
 #[tokio::test]
+async fn codex_rejects_a_socket_path_longer_than_sun_path() {
+    let path = PathBuf::from(format!("/tmp/{}", "s".repeat(120)));
+    let codex = codex::Codex::new(
+        path,
+        "litellm".into(),
+        Url::parse("https://gateway.example.test").unwrap(),
+    );
+    let error = codex.read(Uuid::new_v4()).await.unwrap_err();
+    assert!(
+        error.error.contains("must be shorter than"),
+        "{}",
+        error.error
+    );
+    assert!(!error.error.contains("Keep Codex running"));
+}
+
+#[tokio::test]
 async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
-    let socket_path = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
-    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-    struct SocketFile(PathBuf);
-    impl Drop for SocketFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _file = SocketFile(socket_path.clone());
+    let (socket, listener) = ShortSocket::listen();
+    let socket_path = socket.0.clone();
     let thread = Uuid::new_v4();
     let resumes = Arc::new(AtomicUsize::new(0));
     let observed_resumes = resumes.clone();
@@ -642,16 +669,8 @@ async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
 #[tokio::test]
 async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
     let directory = Directory::new();
-    let socket_name = format!(".remote-{}.sock", Uuid::new_v4().simple());
-    let socket_path = PathBuf::from(&socket_name);
-    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-    struct SocketFile(PathBuf);
-    impl Drop for SocketFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _file = SocketFile(socket_path.clone());
+    let (socket, listener) = ShortSocket::listen();
+    let socket_path = socket.0.clone();
     let thread = Uuid::new_v4();
     let approvals = Arc::new(AtomicUsize::new(0));
     let accepted = approvals.clone();
@@ -846,15 +865,8 @@ async fn codex_controls_a_shared_session_with_scoped_approvals_and_live_text() {
 #[tokio::test]
 async fn codex_stop_then_send_shows_the_new_turn_instead_of_interrupted_live_text() {
     let directory = Directory::new();
-    let path = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    struct SocketFile(PathBuf);
-    impl Drop for SocketFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _file = SocketFile(path.clone());
+    let (socket, listener) = ShortSocket::listen();
+    let path = socket.0.clone();
     let thread = Uuid::new_v4();
     let phase = Arc::new(AtomicUsize::new(0));
     let stage = phase.clone();
@@ -978,15 +990,8 @@ async fn codex_stop_then_send_shows_the_new_turn_instead_of_interrupted_live_tex
 #[tokio::test]
 async fn codex_new_session_remains_readable_before_its_first_turn_is_saved() {
     let directory = Directory::new();
-    let path = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    struct SocketFile(PathBuf);
-    impl Drop for SocketFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _file = SocketFile(path.clone());
+    let (socket, listener) = ShortSocket::listen();
+    let path = socket.0.clone();
     let cwd = directory.0.to_str().unwrap().to_owned();
     let project = cwd.clone();
     let thread = Uuid::new_v4();
