@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use axum::{
@@ -35,6 +38,7 @@ pub struct Service {
     gateway: Url,
     public: Url,
     attempts: Mutex<HashMap<IpAddr, (u32, i64)>>,
+    clock: AtomicI64,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +82,11 @@ struct InterruptInput {
 struct ListInput {
     cursor: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RefreshInput {
+    refresh_token: String,
+}
 
 impl Service {
     pub fn open(gateway: Url, public: Url, path: &Path) -> Result<Arc<Self>> {
@@ -89,7 +98,20 @@ impl Service {
             gateway,
             public,
             attempts: Mutex::new(HashMap::new()),
+            clock: AtomicI64::new(0),
         }))
+    }
+
+    fn now(&self) -> i64 {
+        match self.clock.load(Ordering::Relaxed) {
+            0 => now_ms(),
+            now => now,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_clock(&self, now: i64) {
+        self.clock.store(now, Ordering::Relaxed);
     }
 
     pub fn router(self: Arc<Self>) -> Router {
@@ -100,6 +122,8 @@ impl Service {
             .route("/api/auth/start", post(start))
             .route("/api/auth/poll", post(poll))
             .route("/api/auth/logout", post(logout))
+            .route("/api/auth/refresh", post(refresh))
+            .route("/api/auth/device", post(exchange_device))
             .route("/api/devices", get(devices).post(enroll))
             .route("/api/devices/{id}", axum::routing::delete(remove))
             .route("/api/devices/{id}/models", get(models))
@@ -142,7 +166,7 @@ impl Service {
         let token = bearer(headers)
             .ok_or_else(|| Failure::new(401, "Sign in to your LiteLLM workspace."))?;
         self.store
-            .identity(&token, now_ms())?
+            .identity(&token, self.now())?
             .map(|identity| (identity, token))
             .ok_or_else(|| Failure::new(401, "Sign in to your LiteLLM workspace."))
     }
@@ -152,14 +176,14 @@ impl Service {
             .attempts
             .lock()
             .map_err(|_| Failure::new(503, "Sign-in is unavailable."))?;
-        attempts.retain(|_, (_, until)| *until > now_ms());
+        attempts.retain(|_, (_, until)| *until > self.now());
         if attempts.len() >= 1000 {
             return Err(Failure::new(
                 429,
                 "Too many sign-in attempts. Wait a minute.",
             ));
         }
-        let (count, _) = attempts.entry(address).or_insert((0, now_ms() + 60_000));
+        let (count, _) = attempts.entry(address).or_insert((0, self.now() + 60_000));
         *count += 1;
         if *count > 100 {
             return Err(Failure::new(
@@ -191,7 +215,7 @@ impl Service {
         );
         match self
             .store
-            .begin(&identity.subject, request, &fingerprint, now_ms())?
+            .begin(&identity.subject, request, &fingerprint, self.now())?
         {
             RequestState::Cached(outcome) => return outcome.into_result(),
             RequestState::Unconfirmed => {
@@ -280,7 +304,7 @@ async fn discovery(State(service): State<Arc<Service>>) -> Json<Value> {
 
 async fn identity(State(service): State<Arc<Service>>, headers: HeaderMap) -> Result<Json<Value>> {
     let identity = match bearer(&headers) {
-        Some(token) => service.store.identity(&token, now_ms())?,
+        Some(token) => service.store.identity(&token, service.now())?,
         None => None,
     };
     Ok(Json(
@@ -302,7 +326,7 @@ async fn poll(
     }
     service
         .auth
-        .poll(&input.flow_token, input.team.as_deref())
+        .poll(&input.flow_token, input.team.as_deref(), service.now())
         .await
         .map(Json)
 }
@@ -343,7 +367,7 @@ async fn enroll(
     let (device, token) =
         service
             .store
-            .enroll(&identity.subject, name, input.platform, now_ms())?;
+            .enroll(&identity.subject, name, input.platform, service.now())?;
     Ok(Json(
         json!({"deviceId":device.id,"deviceToken":token,"gateway":service.gateway.as_str().trim_end_matches('/')}),
     ))
@@ -513,6 +537,31 @@ async fn approve(
         .map(Json)
 }
 
+async fn refresh(
+    State(service): State<Arc<Service>>,
+    Json(input): Json<RefreshInput>,
+) -> Result<Json<Value>> {
+    if input.refresh_token.len() != 43 {
+        return Err(Failure::new(401, "Sign in again."));
+    }
+    let issued = service.store.refresh(&input.refresh_token, service.now())?;
+    Ok(Json(json!({
+        "token": issued.access_token,
+        "refreshToken": issued.refresh_token,
+        "expiresAt": issued.identity.expires_at,
+    })))
+}
+
+async fn exchange_device(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let token =
+        bearer(&headers).ok_or_else(|| Failure::new(401, "Device authentication required."))?;
+    let (access, expires) = service.store.exchange_device(&token, service.now())?;
+    Ok(Json(json!({ "token": access, "expiresAt": expires })))
+}
+
 async fn agent(
     State(service): State<Arc<Service>>,
     headers: HeaderMap,
@@ -520,12 +569,12 @@ async fn agent(
 ) -> Result<Response> {
     let token =
         bearer(&headers).ok_or_else(|| Failure::new(401, "Device authentication required."))?;
-    let device = service
+    let (device, expires_at) = service
         .store
-        .authenticate_device(&token)?
+        .authenticate_access(&token, service.now())?
         .ok_or_else(|| Failure::new(401, "Device authentication failed."))?;
     Ok(upgrade
         .max_message_size(4 * 1024 * 1024)
-        .on_upgrade(move |socket| service.peers.clone().connected(socket, device))
+        .on_upgrade(move |socket| service.peers.clone().connected(socket, device, expires_at))
         .into_response())
 }

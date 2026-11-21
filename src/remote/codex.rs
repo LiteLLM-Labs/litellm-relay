@@ -363,6 +363,20 @@ fn disconnected() -> Failure {
     )
 }
 
+fn sun_path_len() -> usize {
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos",
+        target_os = "visionos"
+    )) {
+        104
+    } else {
+        108
+    }
+}
+
 pub struct Codex {
     path: PathBuf,
     auto_start: bool,
@@ -461,6 +475,15 @@ impl Codex {
         }
         self.drafts.lock().expect("Codex draft lock").clear();
         self.starting.lock().expect("Codex starting lock").clear();
+        if self.path.as_os_str().len() >= sun_path_len() {
+            return Err(Failure::new(
+                400,
+                format!(
+                    "The Codex socket path must be shorter than {} bytes. Shorten CODEX_HOME or pass --codex-socket.",
+                    sun_path_len()
+                ),
+            ));
+        }
         let stream = tokio::time::timeout(
             Duration::from_secs(8),
             self.control_stream(Self::start_daemon()),

@@ -20,9 +20,69 @@ use super::{
     auth::{http_client, response_json},
     claude::Claude,
     codex::Codex,
-    protocol::{self, Outcome, Reply},
+    protocol::{self, now_ms, Outcome, Reply},
     sessions::Sessions,
 };
+
+pub struct DeviceAccess {
+    credential: String,
+    cached: Option<(String, i64, i64)>,
+}
+
+impl DeviceAccess {
+    pub fn new(credential: impl Into<String>) -> Self {
+        Self {
+            credential: credential.into(),
+            cached: None,
+        }
+    }
+
+    pub fn needs_refresh(&self, now: i64) -> bool {
+        let Some((_, issued, expires)) = self.cached else {
+            return true;
+        };
+        let ttl = expires.saturating_sub(issued);
+        now >= issued.saturating_add(ttl.saturating_mul(4) / 5)
+    }
+
+    pub fn reject(&mut self) {
+        self.cached = None;
+    }
+
+    pub fn remember(&mut self, token: impl Into<String>, now: i64, expires_at: i64) {
+        self.cached = Some((token.into(), now, expires_at));
+    }
+
+    fn cached_token(&self, now: i64) -> Option<String> {
+        (!self.needs_refresh(now)).then(|| self.cached.as_ref().unwrap().0.clone())
+    }
+}
+
+pub async fn ensure_device_access(
+    endpoint: &Url,
+    access: &mut DeviceAccess,
+    now: i64,
+) -> Result<(String, i64)> {
+    if let Some(token) = access.cached_token(now) {
+        let expires = access.cached.as_ref().unwrap().2;
+        return Ok((token, expires));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Exchanged {
+        token: String,
+        expires_at: i64,
+    }
+    let exchanged: Exchanged = post(
+        endpoint,
+        "/api/auth/device",
+        json!({}),
+        Some(&access.credential),
+    )
+    .await?;
+    access.remember(exchanged.token.clone(), now, exchanged.expires_at);
+    Ok((exchanged.token, exchanged.expires_at))
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -225,16 +285,42 @@ pub fn sessions(
 
 pub async fn connect(credentials: Credentials, sessions: Sessions) -> Result<()> {
     let sessions = Arc::new(sessions);
+    let mut access = DeviceAccess::new(credentials.device_token.clone());
     let mut delay = 1;
+    let mut rejected = false;
     loop {
-        let connected = connection(&credentials, sessions.clone());
+        if rejected {
+            access.reject();
+        }
+        let now = now_ms();
+        let opened = ensure_device_access(&credentials.endpoint, &mut access, now).await;
+        let (token, _) = match opened {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
+                println!("Remote service disconnected. Reconnecting.");
+                tokio::select! { _ = tokio::time::sleep(Duration::from_secs(delay)) => {}, _ = tokio::signal::ctrl_c() => return Ok(()) }
+                delay = (delay * 2).min(30);
+                rejected = false;
+                continue;
+            }
+        };
+        let refresh_at = access
+            .cached
+            .as_ref()
+            .map(|(_, issued, expires)| issued + (expires - issued) * 4 / 5)
+            .unwrap_or(now);
+        let connected = connection(&credentials, &token, sessions.clone());
+        let wait = Duration::from_millis(refresh_at.saturating_sub(now).max(1) as u64);
         tokio::select! {
             result = connected => {
                 match result {
-                    Ok(()) => { delay = 1; }
-                    Err(error) => { eprintln!("{error}"); }
+                    Ok(()) => { delay = 1; rejected = false; }
+                    Err(error) if error.downcast_ref::<RejectedToken>().is_some() && !rejected => { rejected = true; continue; }
+                    Err(error) => { eprintln!("{error}"); rejected = false; }
                 }
             }
+            _ = tokio::time::sleep(wait) => { rejected = false; continue; }
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
         println!("Remote service disconnected. Reconnecting.");
@@ -243,7 +329,18 @@ pub async fn connect(credentials: Credentials, sessions: Sessions) -> Result<()>
     }
 }
 
-async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Result<()> {
+#[derive(Debug)]
+struct RejectedToken;
+
+impl std::fmt::Display for RejectedToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("The remote service rejected the access token.")
+    }
+}
+
+impl std::error::Error for RejectedToken {}
+
+async fn connection(credentials: &Credentials, token: &str, sessions: Arc<Sessions>) -> Result<()> {
     let mut endpoint = credentials.endpoint.join("/agent")?;
     let scheme = if endpoint.scheme() == "https" {
         "wss"
@@ -254,10 +351,9 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
         .set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("Invalid service address."))?;
     let mut request = endpoint.as_str().into_client_request()?;
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {}", credentials.device_token).parse()?,
-    );
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse()?);
     let config = WebSocketConfig::default().max_message_size(Some(131_072));
     let opened = tokio::time::timeout(
         Duration::from_secs(10),
@@ -266,7 +362,12 @@ async fn connection(credentials: &Credentials, sessions: Arc<Sessions>) -> Resul
     .await;
     let (socket, _) = opened
         .map_err(|_| anyhow::anyhow!("The remote service timed out."))?
-        .map_err(|_| {
+        .map_err(|error| {
+            if let tokio_tungstenite::tungstenite::Error::Http(response) = &error {
+                if response.status().as_u16() == 401 {
+                    return anyhow::Error::from(RejectedToken);
+                }
+            }
             anyhow::anyhow!("Cannot connect to the remote service. Check the address and pairing.")
         })?;
     println!("Connected to LiteLLM Remote. Keep this device online.");

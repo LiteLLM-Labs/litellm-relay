@@ -4,7 +4,7 @@ import Observation
 actor RemoteTransport {
     private let baseURL: URL
     private let session: URLSession
-    private let token: String?
+    private var token: String?
 
     init(baseURL: URL, token: String?, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -50,6 +50,8 @@ actor RemoteTransport {
             return .failure(RemoteFailure(message: "Couldn’t reach your workspace. Check your connection and try again.", status: nil))
         }
     }
+
+    func use(_ token: String?) { self.token = token }
 }
 
 @MainActor @Observable
@@ -70,6 +72,7 @@ final class RemoteStore {
     var loading = false
     var error: String?
     private var transport: RemoteTransport?
+    private var phone = PhoneSession()
     private let defaults: UserDefaults
     private let session: URLSession?
 
@@ -113,10 +116,16 @@ final class RemoteStore {
             return
         }
         let normalized = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let token = SessionVault.load(workspace: normalized)
-        hasSavedSession = token != nil
-        let connection = RemoteTransport(baseURL: url, token: token, session: session)
-        let result = await connection.request("/api/me", as: ServiceConfiguration.self)
+        let saved = SessionVault.load(workspace: normalized)
+        hasSavedSession = saved != nil
+        if remembersRefresh(normalized), let saved {
+            phone = PhoneSession(refreshToken: saved)
+        } else {
+            phone = PhoneSession(legacyToken: saved)
+        }
+        let connection = RemoteTransport(baseURL: url, token: nil, session: session)
+        transport = connection
+        let result = await call("/api/me", as: ServiceConfiguration.self)
         guard normalizedGateway(gatewayAddress) == gateway, serviceOverride == override else { return }
         switch result {
         case .success(let value):
@@ -124,12 +133,14 @@ final class RemoteStore {
                 error = "This remote service is connected to a different gateway. Check the address with your administrator."
                 return
             }
-            transport = connection
             configuration = value
             address = normalized
             if value.identity == nil {
                 hasSavedSession = false
-                if token != nil { SessionVault.remove(workspace: normalized) }
+                if phone.refreshToken == nil, saved != nil {
+                    SessionVault.remove(workspace: normalized)
+                    forgetRefresh(normalized)
+                }
             }
             defaults.set(address, forKey: "workspaceAddress")
             defaults.set(gateway.absoluteString, forKey: "gatewayAddress")
@@ -166,7 +177,15 @@ final class RemoteStore {
         case .success(let value):
             if value.status == "teams" { teams = value.teams ?? []; return }
             guard value.status == "ready", let token = value.token else { return }
-            guard SessionVault.save(token, workspace: address) else { error = "Couldn’t securely save your sign-in. Please try again."; return }
+            if let refresh = value.refreshToken {
+                guard SessionVault.save(refresh, workspace: address) else { error = "Couldn’t securely save your sign-in. Please try again."; return }
+                rememberRefresh(address)
+                phone.rotated(access: token, refresh: refresh, expiresAt: value.expiresAt ?? 0)
+            } else {
+                guard SessionVault.save(token, workspace: address) else { error = "Couldn’t securely save your sign-in. Please try again."; return }
+                forgetRefresh(address)
+                phone = PhoneSession(legacyToken: token)
+            }
             hasSavedSession = true
             await connect()
             self.login = nil
@@ -179,7 +198,7 @@ final class RemoteStore {
 
     func refreshDevices() async {
         guard let transport else { return }
-        switch await transport.request("/api/devices", as: DevicePage.self) {
+        switch await call("/api/devices", as: DevicePage.self) {
         case .success(let value):
             devices = value.devices
             if !devices.contains(where: { $0.id == selectedDeviceId }) {
@@ -203,7 +222,7 @@ final class RemoteStore {
         loading = true
         let base = "/api/devices/\(deviceId)/sessions"
         let path = older ? nextCursor.map { queryPath(base, name: "cursor", value: $0) } ?? base : base
-        switch await transport.request(path, as: SessionPage.self) {
+        switch await call(path, as: SessionPage.self) {
         case .success(let value):
             if deviceId == selectedDeviceId {
                 sessions = older ? sessions + value.sessions.filter { incoming in !sessions.contains { $0.id == incoming.id } } : value.sessions
@@ -217,39 +236,39 @@ final class RemoteStore {
 
     func detail(id: String, deviceId: String) async -> Result<SessionDetail, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
-        return await transport.request("/api/devices/\(deviceId)/sessions/\(id)", as: SessionDetail.self)
+        return await call("/api/devices/\(deviceId)/sessions/\(id)", as: SessionDetail.self)
     }
 
     func create(cwd: String, agent: String, deviceId: String, requestId: String) async -> Result<CodingSession, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
-        return await transport.request("/api/devices/\(deviceId)/sessions", method: "POST", body: ["cwd": cwd, "agent": agent, "requestId": requestId], as: CodingSession.self)
+        return await call("/api/devices/\(deviceId)/sessions", method: "POST", body: ["cwd": cwd, "agent": agent, "requestId": requestId], as: CodingSession.self)
     }
 
     func models(deviceId: String, cursor: String? = nil) async -> Result<ModelPage, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
         let base = "/api/devices/\(deviceId)/models"
-        return await transport.request(cursor.map { queryPath(base, name: "cursor", value: $0) } ?? base, as: ModelPage.self)
+        return await call(cursor.map { queryPath(base, name: "cursor", value: $0) } ?? base, as: ModelPage.self)
     }
 
     func send(id: String, deviceId: String, text: String, requestId: String, model: String? = nil) async -> Result<EmptyReply, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
         let input = ["text": text, "requestId": requestId].merging(model.map { ["model": $0] } ?? [:]) { _, value in value }
-        return await transport.request("/api/devices/\(deviceId)/sessions/\(id)/messages", method: "POST", body: input, as: EmptyReply.self)
+        return await call("/api/devices/\(deviceId)/sessions/\(id)/messages", method: "POST", body: input, as: EmptyReply.self)
     }
 
     func interrupt(id: String, deviceId: String, requestId: String) async -> Result<EmptyReply, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
-        return await transport.request("/api/devices/\(deviceId)/sessions/\(id)/interrupt", method: "POST", body: ["requestId": requestId], as: EmptyReply.self)
+        return await call("/api/devices/\(deviceId)/sessions/\(id)/interrupt", method: "POST", body: ["requestId": requestId], as: EmptyReply.self)
     }
 
     func approve(id: String, deviceId: String, approvalId: String, decision: String) async -> Result<EmptyReply, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
-        return await transport.request("/api/devices/\(deviceId)/sessions/\(id)/approvals/\(approvalId)", method: "POST", body: ["decision": decision], as: EmptyReply.self)
+        return await call("/api/devices/\(deviceId)/sessions/\(id)/approvals/\(approvalId)", method: "POST", body: ["decision": decision], as: EmptyReply.self)
     }
 
     func removeDevice(_ id: String) async {
         guard let transport else { return }
-        switch await transport.request("/api/devices/\(id)", method: "DELETE", as: EmptyReply.self) {
+        switch await call("/api/devices/\(id)", method: "DELETE", as: EmptyReply.self) {
         case .success: await refreshDevices()
         case .failure(let failure): await handle(failure)
         }
@@ -257,7 +276,7 @@ final class RemoteStore {
 
     func signOut() async {
         guard let transport else { return }
-        switch await transport.request("/api/auth/logout", method: "POST", as: EmptyReply.self) {
+        switch await call("/api/auth/logout", method: "POST", as: EmptyReply.self) {
         case .success: disconnect()
         case .failure(let failure):
             if failure.status == 401 { disconnect() }
@@ -266,6 +285,8 @@ final class RemoteStore {
     }
 
     func disconnect() {
+        forgetRefresh(address)
+        phone = PhoneSession()
         SessionVault.remove(workspace: address)
         hasSavedSession = false
         transport = nil
@@ -280,6 +301,67 @@ final class RemoteStore {
     }
 
     private var disconnected: RemoteFailure { RemoteFailure(message: "Sign in to your workspace first.", status: 401) }
+
+    private func remembersRefresh(_ workspace: String) -> Bool {
+        defaults.stringArray(forKey: "refreshWorkspaces")?.contains(workspace) == true
+    }
+
+    private func rememberRefresh(_ workspace: String) {
+        var saved = defaults.stringArray(forKey: "refreshWorkspaces") ?? []
+        if !saved.contains(workspace) { saved.append(workspace) }
+        defaults.set(saved, forKey: "refreshWorkspaces")
+    }
+
+    private func forgetRefresh(_ workspace: String) {
+        var saved = defaults.stringArray(forKey: "refreshWorkspaces") ?? []
+        saved.removeAll { $0 == workspace }
+        defaults.set(saved, forKey: "refreshWorkspaces")
+    }
+
+    private func call<T: Decodable & Sendable>(_ path: String, method: String = "GET", body: [String: String] = [:], as type: T.Type) async -> Result<T, RemoteFailure> {
+        guard await ensureAccess() else {
+            return .failure(RemoteFailure(message: "Couldn’t refresh your sign-in. Check your connection and try again.", status: nil))
+        }
+        guard let transport else { return .failure(disconnected) }
+        let result = await transport.request(path, method: method, body: body, as: type)
+        if case .failure(let failure) = result, failure.status == 401, phone.refreshToken != nil {
+            phone.accessToken = nil
+            phone.accessExpiresAt = nil
+            guard await ensureAccess(), let transport = self.transport else { return result }
+            return await transport.request(path, method: method, body: body, as: type)
+        }
+        return result
+    }
+
+    private func ensureAccess() async -> Bool {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        switch phone.bearer(now: now) {
+        case .current(let token):
+            await transport?.use(token)
+            return true
+        case .refresh:
+            guard let refresh = phone.refreshToken, let transport else { return false }
+            switch await transport.request("/api/auth/refresh", method: "POST", body: ["refreshToken": refresh], as: LoginPoll.self) {
+            case .success(let value):
+                guard let access = value.token, let next = value.refreshToken, let expires = value.expiresAt,
+                      SessionVault.save(next, workspace: address) else { return false }
+                phone.rotated(access: access, refresh: next, expiresAt: expires)
+                await transport.use(access)
+                return true
+            case .failure(let failure):
+                if failure.status == 401 {
+                    phone.refreshToken = nil
+                    SessionVault.remove(workspace: address)
+                    forgetRefresh(address)
+                    hasSavedSession = false
+                }
+                return false
+            }
+        case .signedOut:
+            await transport?.use(nil)
+            return true
+        }
+    }
 
     private func resolveService(gateway: URL) async -> Result<URL, RemoteFailure> {
         if !serviceOverride.isEmpty {

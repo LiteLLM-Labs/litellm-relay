@@ -22,12 +22,16 @@ fun workspaceAddress(text: String, gateway: Boolean = false): String? = runCatch
     URI(uri.scheme, null, uri.host, uri.port, path, null, null).toString()
 }.getOrNull()
 
-class ApiClient(val endpoint: String, private val token: () -> String?) {
+class ApiClient(
+    val endpoint: String,
+    private val refresh: (suspend () -> Boolean)? = null,
+    private val token: suspend () -> String? = { null },
+) {
     val json = Json { ignoreUnknownKeys = true }
 
     suspend inline fun <reified T> request(
-        path: String, method: String = "GET", body: Map<String, String> = emptyMap(),
-    ): RemoteResult<T> = when (val result = exchange(path, method, body)) {
+        path: String, method: String = "GET", body: Map<String, String> = emptyMap(), retry: Boolean = true,
+    ): RemoteResult<T> = when (val result = exchange(path, method, body, retry)) {
         is RemoteResult.Failure -> result
         is RemoteResult.Success -> withContext(Dispatchers.Default) {
             runCatching { RemoteResult.Success(json.decodeFromString<T>(result.value)) }
@@ -35,7 +39,13 @@ class ApiClient(val endpoint: String, private val token: () -> String?) {
         }
     }
 
-    suspend fun exchange(path: String, method: String, body: Map<String, String>): RemoteResult<String> = withContext(Dispatchers.IO) {
+    suspend fun exchange(path: String, method: String, body: Map<String, String>, retry: Boolean = true): RemoteResult<String> {
+        val first = once(path, method, body)
+        if (retry && first is RemoteResult.Failure && first.status == 401 && refresh?.invoke() == true) return once(path, method, body)
+        return first
+    }
+
+    private suspend fun once(path: String, method: String, body: Map<String, String>): RemoteResult<String> = withContext(Dispatchers.IO) {
         val base = URI(endpoint)
         val uri = base.resolve(path)
         if (uri.host != base.host || uri.port != base.port || uri.scheme != base.scheme) {

@@ -61,6 +61,8 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     val state = mutable.asStateFlow()
     private var client: ApiClient? = null
     private var token: String? = null
+    private var refreshToken: String? = null
+    private var accessExpiresAt: Long = 0
     private val detailReplies = ReplyGate()
     private val sessionReplies = ReplyGate()
     private val deviceReplies = ReplyGate()
@@ -78,21 +80,33 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         mutable.update { it.copy(busy = true, error = null) }
         val override = state.value.controlAddress
         val endpoint = if (override.isNotBlank()) workspaceAddress(override) else {
-            when (val manifest = ApiClient(gateway) { null }.request<Discovery>("${URI(gateway).path}/.well-known/litellm-remote.json")) {
+            when (val manifest = ApiClient(gateway).request<Discovery>("${URI(gateway).path}/.well-known/litellm-remote.json")) {
                 is RemoteResult.Success -> manifest.value.takeIf { workspaceAddress(it.gatewayUrl, true) == gateway }
                     ?.controlUrl?.let { workspaceAddress(it) }?.takeIf { it.startsWith("https://") }
                 is RemoteResult.Failure -> null
             }
         }
         if (endpoint == null) { fail("Remote control isn’t configured at this gateway yet. Add its service address under Advanced."); return@launch }
-        token = vault.load(endpoint)
-        val connection = ApiClient(endpoint) { token }
+        val saved = vault.load(endpoint)
+        if (endpoint in refreshWorkspaces()) {
+            refreshToken = saved
+            token = null
+            accessExpiresAt = 0
+        } else {
+            refreshToken = null
+            token = saved
+        }
+        val connection = ApiClient(endpoint, { refreshAccess() }) { bearer() }
+        client = connection
         when (val reply = connection.request<Workspace>("/api/me")) {
             is RemoteResult.Success -> {
                 if (workspaceAddress(reply.value.gateway, true) != gateway) { fail("This remote service is connected to a different gateway."); return@launch }
                 client = connection
                 preferences.edit().putString("gateway", gateway).putString("controlAddress", override).apply()
-                if (reply.value.identity == null) { vault.remove(endpoint); token = null }
+                if (reply.value.identity == null) {
+                    if (refreshToken != null) { fail("Couldn’t refresh your sign-in. Check your connection and try again."); return@launch }
+                    vault.remove(endpoint); forgetRefresh(endpoint); token = null
+                }
                 mutable.update { RemoteState(gateway = it.gateway, controlAddress = override, workspace = reply.value, endpoint = endpoint) }
                 if (reply.value.identity != null) refresh()
             }
@@ -123,9 +137,19 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             is RemoteResult.Success -> {
                 val value = result.value
                 if (value.status == "teams") { mutable.update { it.copy(teams = value.teams) }; return }
-                if (value.status != "ready" || value.token == null) return
-                if (!vault.save(state.value.endpoint, value.token)) { fail("Couldn’t securely save your sign-in."); return }
-                token = value.token
+                val access = value.token ?: return
+                if (value.refreshToken != null) {
+                    if (!vault.save(state.value.endpoint, value.refreshToken)) { fail("Couldn’t securely save your sign-in."); return }
+                    rememberRefresh(state.value.endpoint)
+                    refreshToken = value.refreshToken
+                    token = access
+                    accessExpiresAt = value.expiresAt ?: 0L
+                } else {
+                    if (!vault.save(state.value.endpoint, access)) { fail("Couldn’t securely save your sign-in."); return }
+                    forgetRefresh(state.value.endpoint)
+                    refreshToken = null
+                    token = access
+                }
                 when (val workspace = api.request<Workspace>("/api/me")) {
                     is RemoteResult.Success -> { mutable.update { it.copy(workspace = workspace.value, login = null, teams = emptyList(), error = null) }; refresh() }
                     is RemoteResult.Failure -> handle(workspace)
@@ -300,11 +324,56 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         detailReplies.next()
         sessionReplies.next()
         deviceReplies.next()
+        forgetRefresh(state.value.endpoint)
         vault.remove(state.value.endpoint)
         token = null
+        refreshToken = null
+        accessExpiresAt = 0
         client = null
         mutable.update { RemoteState(gateway = it.gateway, controlAddress = it.controlAddress) }
     }
+    private fun refreshWorkspaces() = preferences.getStringSet("refreshWorkspaces", emptySet())?.toMutableSet() ?: mutableSetOf()
+
+    private fun rememberRefresh(endpoint: String) {
+        preferences.edit().putStringSet("refreshWorkspaces", refreshWorkspaces().apply { add(endpoint) }).apply()
+    }
+
+    private fun forgetRefresh(endpoint: String) {
+        preferences.edit().putStringSet("refreshWorkspaces", refreshWorkspaces().apply { remove(endpoint) }).apply()
+    }
+
+    private suspend fun bearer(): String? = when (val decision = phoneBearer(token, accessExpiresAt, refreshToken != null, System.currentTimeMillis())) {
+        is PhoneBearer.Current -> decision.token
+        PhoneBearer.Refresh -> if (refreshAccess()) token else null
+        PhoneBearer.SignedOut -> null
+    }
+
+    private suspend fun refreshAccess(): Boolean {
+        val refresh = refreshToken ?: return false
+        val api = client ?: return false
+        return when (val result = api.request<LoginPoll>("/api/auth/refresh", "POST", mapOf("refreshToken" to refresh), retry = false)) {
+            is RemoteResult.Success -> {
+                val access = result.value.token ?: return false
+                val next = result.value.refreshToken ?: return false
+                if (!vault.save(state.value.endpoint, next)) return false
+                refreshToken = next
+                token = access
+                accessExpiresAt = result.value.expiresAt ?: 0L
+                true
+            }
+            is RemoteResult.Failure -> {
+                if (result.status == 401) {
+                    refreshToken = null
+                    token = null
+                    accessExpiresAt = 0
+                    vault.remove(state.value.endpoint)
+                    forgetRefresh(state.value.endpoint)
+                }
+                false
+            }
+        }
+    }
+
     private fun fail(message: String) { mutable.update { it.copy(error = message, busy = false, loading = false) } }
     private fun handle(failure: RemoteResult.Failure) {
         if (failure.status == 401) disconnect()

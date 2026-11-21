@@ -71,7 +71,7 @@ class RemoteViewModelTest {
             store.put("remote", model)
             val endpoint = server.url("/").toString().trimEnd('/')
             RemoteViewModel::class.java.getDeclaredField("client").apply { isAccessible = true }
-                .set(model, ApiClient(endpoint) { null })
+                .set(model, ApiClient(endpoint, token = { null }))
             @Suppress("UNCHECKED_CAST")
             val state = RemoteViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
                 .get(model) as MutableStateFlow<RemoteState>
