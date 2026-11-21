@@ -58,6 +58,46 @@ final class RemoteTests: XCTestCase {
     }
 
     @MainActor
+    func testSignInUsesNewAccessTokenWithoutRefreshing() async throws {
+        try await withSavedSession { defaults, workspace, _ in
+            SessionVault.remove(workspace: workspace)
+            let store = RemoteStore(defaults: defaults, session: restoreSession(response: "login"))
+            await store.connect()
+            await store.startLogin()
+            XCTAssertNotNil(store.login)
+            await store.pollLogin()
+            XCTAssertNil(store.login)
+            XCTAssertNil(store.error)
+            XCTAssertEqual(store.configuration?.identity?.subject, "signed-in")
+            XCTAssertEqual(SessionVault.load(workspace: workspace), "login-refresh")
+        }
+    }
+
+    @MainActor
+    func testReconnectDoesNotDiscardAnInFlightRefresh() async throws {
+        try await withSavedSession { defaults, workspace, _ in
+            defaults.set([workspace], forKey: "refreshWorkspaces")
+            let store = RemoteStore(defaults: defaults, session: restoreSession(response: "rotate"))
+            await store.restore()
+            let started = XCTestExpectation(description: "Server accepted the next rotation")
+            let observer = NotificationCenter.default.addObserver(
+                forName: RestoreProtocol.started, object: nil, queue: nil
+            ) { notification in
+                if (notification.object as? URL)?.absoluteString == workspace + "/api/auth/refresh" { started.fulfill() }
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            let request = Task { await store.models(deviceId: "fixture") }
+            let observed = await XCTWaiter.fulfillment(of: [started], timeout: 3)
+            XCTAssertEqual(observed, .completed)
+            await store.connect()
+            let result = await request.value
+            XCTAssertTrue(try result.get().models.isEmpty)
+            XCTAssertEqual(store.configuration?.identity?.subject, "qa")
+            XCTAssertEqual(SessionVault.load(workspace: workspace), "next-refresh")
+        }
+    }
+
+    @MainActor
     func testConcurrentRequestsShareOneSignInRefresh() async throws {
         try await withSavedSession { defaults, workspace, _ in
             defaults.set([workspace], forKey: "refreshWorkspaces")
@@ -334,6 +374,25 @@ private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         let mode = request.value(forHTTPHeaderField: "X-Test-Response")
+        if mode == "login", let url = request.url {
+            let expiry = Int64(Date().addingTimeInterval(900).timeIntervalSince1970 * 1000)
+            let identity: [String: Any] = ["subject": "signed-in", "label": "QA", "method": "sso", "expiresAt": expiry]
+            switch url.path {
+            case "/api/me":
+                var response: [String: Any] = ["gateway": Self.gateway]
+                if request.value(forHTTPHeaderField: "Authorization") == "Bearer login-access" {
+                    response["identity"] = identity
+                }
+                respond(url, json: response)
+            case "/api/auth/start":
+                respond(url, json: ["flowToken": "test", "code": "TEST", "verificationUrl": Self.gateway])
+            case "/api/auth/poll":
+                respond(url, json: ["status": "ready", "token": "login-access", "refreshToken": "login-refresh", "identity": identity])
+            default:
+                respond(url, status: 503, json: ["error": "Unexpected fixture route."])
+            }
+            return
+        }
         if mode == "refresh" || mode == "rotate", let url = request.url {
             respondToRotation(url, useLoginStatus: mode == "rotate")
             return
@@ -381,6 +440,7 @@ private final class RestoreProtocol: URLProtocol, @unchecked Sendable {
                 if useLoginStatus { reply["status"] = "ready" }
                 respond(url, json: reply)
             case 2:
+                NotificationCenter.default.post(name: Self.started, object: url)
                 DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
                     self?.respond(url, json: [
                         "status": "ready", "token": "next-access", "refreshToken": "next-refresh",

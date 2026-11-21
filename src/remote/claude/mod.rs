@@ -158,7 +158,7 @@ impl Claude {
             .grant(id)
             .or_else(|error| external.clone().ok_or(error))?;
         if external.is_some() {
-            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), expired_approval: None, error: Some("On your Mac, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
+            return Ok(Detail { session: self.summary(&grant, true), messages: Vec::new(), older_messages: false, approvals: Vec::new(), streaming_reply_id: None, expired_approval: None, error: Some("On your Mac, finish this turn, run /exit, then run relay remote handoff and choose this conversation.".into()) });
         }
         let (stored, older) = match self.history(id) {
             Ok(history) => history,
@@ -191,6 +191,11 @@ impl Claude {
             )
             .collect();
         Ok(Detail {
+            streaming_reply_id: live
+                .as_ref()
+                .filter(|live| live.working)
+                .and_then(|live| live.transcript.streaming_reply.as_ref())
+                .map(|(_, id)| id.clone()),
             session,
             expired_approval: if live
                 .as_ref()

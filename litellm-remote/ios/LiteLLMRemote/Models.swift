@@ -93,11 +93,7 @@ struct SessionDetail: Decodable, Equatable, Sendable {
     let approvals: [SessionApproval]
     let expiredApproval: ExpiredApproval?
 
-    var streamingReplyID: String? {
-        guard session.canStop else { return nil }
-        return messages.last { $0.role == "user" || $0.role == "assistant" }
-            .flatMap { $0.role == "assistant" ? $0.id : nil }
-    }
+    let streamingReplyId: String?
 }
 
 struct ExpiredApproval: Decodable, Identifiable, Equatable, Sendable {
@@ -125,11 +121,14 @@ struct LoginTeam: Decodable, Identifiable, Sendable {
 }
 
 struct LoginPoll: Decodable, Sendable {
+    struct Identity: Decodable, Sendable { let expiresAt: Int64 }
+
     let status: String
     let teams: [LoginTeam]?
     let token: String?
     let refreshToken: String?
     let expiresAt: Int64?
+    let identity: Identity?
 }
 
 struct RefreshedAccess: Decodable, Sendable {

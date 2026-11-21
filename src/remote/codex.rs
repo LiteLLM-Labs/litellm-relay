@@ -137,6 +137,7 @@ struct Live {
     item: String,
     text: String,
     at: i64,
+    complete: bool,
 }
 #[derive(Default)]
 struct Events {
@@ -183,6 +184,7 @@ impl Events {
                     item: item.into(),
                     text: String::new(),
                     at: now_ms(),
+                    complete: false,
                 });
                 if live.text.len() < 256_000 {
                     live.text.extend(
@@ -231,6 +233,13 @@ impl Events {
                     "{thread}/{}",
                     params["item"]["id"].as_str().unwrap_or("")
                 ));
+                if let Some(live) = self.live.get_mut(&format!(
+                    "{thread}/{}/{}",
+                    params["turnId"].as_str().unwrap_or(""),
+                    params["item"]["id"].as_str().unwrap_or("")
+                )) {
+                    live.complete = true;
+                }
             }
             _ => {}
         }
@@ -693,6 +702,12 @@ impl Codex {
         let mut events = self.events.lock().expect("Codex event lock");
         events.tracked.insert(id.to_string());
         events.live.retain(|_, live| live.at > now_ms() - 300_000);
+        let streaming_reply_id = events
+            .live
+            .values()
+            .filter(|live| live.thread == id.to_string() && !live.complete)
+            .max_by_key(|live| live.at)
+            .map(|live| format!("{}/{}", live.turn, live.item));
         let live = events
             .live
             .values()
@@ -717,6 +732,7 @@ impl Codex {
                 .filter(|message| !stored.iter().any(|value| value.id == message.id)),
         );
         Ok(Detail {
+            streaming_reply_id,
             session: thread.summary(),
             expired_approval: None,
             messages,

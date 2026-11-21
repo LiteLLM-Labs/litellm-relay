@@ -115,6 +115,7 @@ final class StreamingTests: XCTestCase {
         let retry = app.buttons["retryExpiredApproval"]
         XCTAssertTrue(retry.waitForExistence(timeout: 8))
         XCTAssertTrue(retry.isEnabled)
+        XCTAssertTrue(app.staticTexts["Approval expired because Relay restarted. The command didn't run."].exists)
         XCTAssertTrue(app.staticTexts[StreamingService.expiredSummary].exists)
         XCTAssertFalse(app.buttons["Allow once"].exists)
 
@@ -127,6 +128,8 @@ final class StreamingTests: XCTestCase {
         service.setOnline(true)
         XCTAssertTrue(app.buttons["stopTurnButton"].waitForExistence(timeout: 8))
         XCTAssertFalse(retry.isEnabled)
+        XCTAssertTrue(app.staticTexts["Previous reply"].exists)
+        XCTAssertFalse(app.staticTexts["streamingReply"].exists)
         service.setBusy(false)
         XCTAssertTrue(app.buttons["stopTurnButton"].waitForNonExistence(timeout: 8))
         XCTAssertTrue(retry.isEnabled)
@@ -135,7 +138,7 @@ final class StreamingTests: XCTestCase {
         XCTAssertTrue(app.buttons["Allow once"].waitForExistence(timeout: 8))
         XCTAssertTrue(retry.waitForNonExistence(timeout: 5))
         XCTAssertEqual(service.sendCount, 1)
-        XCTAssertEqual(service.sentText, "The connector restarted before I could approve your last command, so it didn't run. Please try it again.")
+        XCTAssertEqual(service.sentText, "Relay restarted before I could approve your last command, so it didn't run. Please try it again.")
     }
 
     @MainActor
@@ -302,6 +305,7 @@ private final class StreamingService: @unchecked Sendable {
                 ]
             }
             response = ["session": session, "messages": messages, "olderMessages": false, "approvals": []]
+            if firstSent && working { response["streamingReplyId"] = "next-reply" }
             if expiredApproval && !needsApproval {
                 response["expiredApproval"] = ["id": "old-tool", "tool": "Bash", "summary": Self.expiredSummary]
             }
