@@ -4,7 +4,7 @@ import Observation
 actor RemoteTransport {
     private let baseURL: URL
     private let session: URLSession
-    private let token: String?
+    private var token: String?
 
     init(baseURL: URL, token: String?, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -318,7 +318,7 @@ final class RemoteStore {
         defaults.set(saved, forKey: "refreshWorkspaces")
     }
 
-    private func call<T: Decodable>(_ path: String, method: String = "GET", body: [String: String] = [:], as type: T.Type) async -> Result<T, RemoteFailure> {
+    private func call<T: Decodable & Sendable>(_ path: String, method: String = "GET", body: [String: String] = [:], as type: T.Type) async -> Result<T, RemoteFailure> {
         guard await ensureAccess() else {
             return .failure(RemoteFailure(message: "Couldn’t refresh your sign-in. Check your connection and try again.", status: nil))
         }
