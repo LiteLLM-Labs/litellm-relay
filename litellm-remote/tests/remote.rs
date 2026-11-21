@@ -1,4 +1,5 @@
 use std::{
+    os::fd::AsFd,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -958,6 +959,222 @@ async fn codex_replays_a_pending_approval(
         usize::from(decision == Decision::Accept)
     );
     server.abort();
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ApprovalFault {
+    Resume,
+    HistoryBeforeReplay,
+    HistoryAfterReplay,
+    ClosedHistory,
+    ReplacedSocket,
+    SocketWrite,
+}
+
+#[tokio::test]
+async fn codex_approval_retries_after_resume_failure() {
+    codex_approval_fault(ApprovalFault::Resume).await;
+}
+
+#[tokio::test]
+async fn codex_approval_retries_after_history_socket_closes() {
+    codex_approval_fault(ApprovalFault::ClosedHistory).await;
+}
+
+#[tokio::test]
+async fn codex_approval_retries_after_history_failure_before_replay() {
+    codex_approval_fault(ApprovalFault::HistoryBeforeReplay).await;
+}
+
+#[tokio::test]
+async fn codex_approval_retries_after_history_failure_with_replay() {
+    codex_approval_fault(ApprovalFault::HistoryAfterReplay).await;
+}
+
+#[tokio::test]
+async fn codex_approval_uses_the_socket_that_restored_it() {
+    codex_approval_fault(ApprovalFault::ReplacedSocket).await;
+}
+
+#[tokio::test]
+async fn codex_approval_retries_after_a_failed_socket_write() {
+    codex_approval_fault(ApprovalFault::SocketWrite).await;
+}
+
+async fn codex_approval_fault(fault: ApprovalFault) {
+    for decision in [Decision::Accept, Decision::Decline] {
+        let (path, listener) = ShortSocket::listen();
+        let thread = Uuid::new_v4();
+        let decisions = Arc::new(AtomicUsize::new(0));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let answered_on = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let observed_decisions = decisions.clone();
+        let observed_executions = executions.clone();
+        let observed_connection = answered_on.clone();
+        let release_socket = release.clone();
+        let server = tokio::spawn(async move {
+            let mut pending = false;
+            let mut failed = false;
+            for connection in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Frame::Text(text))) = socket.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let Some(method) = request["method"].as_str() else {
+                        assert_eq!(request["id"], 17);
+                        assert_eq!(
+                            request["result"]["decision"],
+                            serde_json::to_value(decision).unwrap()
+                        );
+                        assert!(pending, "The command must not be answered twice");
+                        pending = false;
+                        observed_decisions.fetch_add(1, Ordering::SeqCst);
+                        observed_executions
+                            .fetch_add(usize::from(decision == Decision::Accept), Ordering::SeqCst);
+                        observed_connection.store(connection, Ordering::SeqCst);
+                        socket.send(Frame::Text(json!({"method":"serverRequest/resolved","params":{"requestId":17}}).to_string().into())).await.unwrap();
+                        continue;
+                    };
+                    if method == "initialized" {
+                        continue;
+                    }
+                    let metadata = json!({"id":thread,"cwd":"/repo","preview":"Retry approval","modelProvider":"litellm","updatedAt":1,"status":if pending {json!({"type":"active","activeFlags":["waitingOnApproval"]})} else {json!({"type":"idle"})}});
+                    if connection == 1
+                        && !failed
+                        && ((method == "thread/turns/list"
+                            && matches!(
+                                fault,
+                                ApprovalFault::HistoryBeforeReplay
+                                    | ApprovalFault::HistoryAfterReplay
+                            ))
+                            || (method == "thread/resume" && fault == ApprovalFault::Resume))
+                    {
+                        failed = true;
+                        socket.send(Frame::Text(json!({"id":request["id"],"error":{"message":"History temporarily unavailable"}}).to_string().into())).await.unwrap();
+                        continue;
+                    }
+                    let result = match method {
+                        "initialize" => json!({}),
+                        "thread/read" | "thread/resume" => {
+                            json!({"thread":metadata,"approvalPolicy":"on-request"})
+                        }
+                        "config/read" => {
+                            json!({"config":{"model_providers":{"litellm":{"base_url":"https://gateway.example.test"}}}})
+                        }
+                        "turn/start" => {
+                            pending = true;
+                            json!({"turn":{"id":"turn"}})
+                        }
+                        "thread/turns/list" => {
+                            json!({"data":[{"id":"turn","status":if pending {"inProgress"} else {"completed"},"items":[]}]})
+                        }
+                        _ => panic!("Unexpected RPC {method}"),
+                    };
+                    let response = Frame::Text(
+                        json!({"id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    );
+                    if connection == 1
+                        && ((fault == ApprovalFault::ReplacedSocket
+                            && ((decision == Decision::Accept && method == "config/read")
+                                || (decision == Decision::Decline && method == "thread/read")))
+                            || (fault == ApprovalFault::ClosedHistory
+                                && method == "thread/turns/list"))
+                    {
+                        socket.feed(response).await.unwrap();
+                        socket.feed(Frame::Close(None)).await.unwrap();
+                        socket.flush().await.unwrap();
+                        break;
+                    }
+                    let fail_write = connection == 1
+                        && !failed
+                        && method == "thread/turns/list"
+                        && fault == ApprovalFault::SocketWrite;
+                    if fail_write {
+                        failed = true;
+                        let fd = socket.get_ref().as_fd().try_clone_to_owned().unwrap();
+                        std::os::unix::net::UnixStream::from(fd)
+                            .shutdown(std::net::Shutdown::Read)
+                            .unwrap();
+                    }
+                    socket.send(response).await.unwrap();
+                    if fail_write {
+                        release_socket.notified().await;
+                        break;
+                    }
+                    if pending
+                        && matches!(method, "turn/start" | "thread/resume")
+                        && !(connection == 1
+                            && !failed
+                            && fault == ApprovalFault::HistoryBeforeReplay)
+                    {
+                        socket.send(Frame::Text(json!({"id":17,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"turnId":"turn","itemId":"command","command":"echo retry","availableDecisions":["accept","decline"]}}).to_string().into())).await.unwrap();
+                    }
+                }
+            }
+        });
+        let gateway = Url::parse("https://gateway.example.test").unwrap();
+        let original = codex::Codex::new(path.0.clone(), "litellm".into(), gateway.clone());
+        original
+            .send(thread, "Run the command".into(), None)
+            .await
+            .unwrap();
+        let old_id =
+            Uuid::parse_str(&original.read(thread).await.unwrap().approvals[0].id).unwrap();
+        drop(original);
+        let restarted = codex::Codex::new(path.0.clone(), "litellm".into(), gateway);
+        let first = restarted.approve(thread, old_id, decision).await;
+        release.notify_one();
+        if fault == ApprovalFault::ReplacedSocket {
+            first.expect("The approval must be answered on the restored socket");
+        } else {
+            assert_eq!(
+                first.unwrap_err().status,
+                if matches!(
+                    fault,
+                    ApprovalFault::SocketWrite | ApprovalFault::ClosedHistory
+                ) {
+                    503
+                } else {
+                    502
+                }
+            );
+            restarted
+                .approve(thread, old_id, decision)
+                .await
+                .expect("The pending approval must remain answerable after a transient failure");
+        }
+        assert!(restarted.read(thread).await.unwrap().approvals.is_empty());
+        assert_eq!(
+            restarted
+                .approve(thread, old_id, decision)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(decisions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            usize::from(decision == Decision::Accept)
+        );
+        assert_eq!(
+            answered_on.load(Ordering::SeqCst),
+            if matches!(
+                fault,
+                ApprovalFault::SocketWrite
+                    | ApprovalFault::ReplacedSocket
+                    | ApprovalFault::ClosedHistory
+            ) {
+                2
+            } else {
+                1
+            }
+        );
+        server.abort();
+    }
 }
 
 #[tokio::test]

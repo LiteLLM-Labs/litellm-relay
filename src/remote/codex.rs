@@ -336,6 +336,7 @@ impl Events {
 struct Call {
     value: Value,
     reply: Option<oneshot::Sender<Result<Value>>>,
+    written: Option<oneshot::Sender<Result<()>>>,
 }
 #[derive(Clone)]
 struct Rpc {
@@ -349,6 +350,7 @@ impl Rpc {
             .send(Call {
                 value: json!({"id":Uuid::new_v4().to_string(),"method":method,"params":params}),
                 reply: Some(reply),
+                written: None,
             })
             .await
             .map_err(|_| disconnected())?;
@@ -365,10 +367,16 @@ impl Rpc {
             .map_err(|_| Failure::new(502, "This Codex response is not supported yet."))
     }
     async fn write(&self, value: Value) -> Result<()> {
+        let (written, receive) = oneshot::channel();
         self.sender
-            .send(Call { value, reply: None })
+            .send(Call {
+                value,
+                reply: None,
+                written: Some(written),
+            })
             .await
-            .map_err(|_| disconnected())
+            .map_err(|_| disconnected())?;
+        receive.await.map_err(|_| disconnected())?
     }
 }
 
@@ -451,13 +459,16 @@ impl Codex {
         tokio::spawn(async move {
             let (mut sink, mut source) = socket.split();
             let mut pending = HashMap::<String, oneshot::Sender<Result<Value>>>::new();
+            let mut failed_write = None;
             loop {
                 tokio::select! {
                     call = receiver.recv() => {
                         let Some(call) = call else { break; };
                         pending.retain(|_, reply| !reply.is_closed());
                         if let Some(reply) = call.reply { pending.insert(call.value["id"].as_str().unwrap_or("").into(), reply); }
-                        if sink.send(Frame::Text(call.value.to_string().into())).await.is_err() { break; }
+                        let sent = tokio::time::timeout(Duration::from_secs(10), sink.send(Frame::Text(call.value.to_string().into()))).await.is_ok_and(|result| result.is_ok());
+                        if !sent { failed_write = call.written; break; }
+                        if let Some(written) = call.written { let _ = written.send(Ok(())); }
                     }
                     frame = source.next() => {
                         match frame {
@@ -479,10 +490,14 @@ impl Codex {
                     }
                 }
             }
+            receiver.close();
+            *events.lock().expect("Codex event lock") = Events::default();
             for (_, reply) in pending {
                 let _ = reply.send(Err(disconnected()));
             }
-            *events.lock().expect("Codex event lock") = Events::default();
+            if let Some(written) = failed_write {
+                let _ = written.send(Err(disconnected()));
+            }
         });
         let rpc = Rpc { sender };
         let _: Value = rpc.request("initialize", json!({"clientInfo":{"name":"litellm_remote_control","title":"LiteLLM Remote","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
@@ -631,6 +646,10 @@ impl Codex {
     }
 
     pub async fn read(&self, id: Uuid) -> Result<Detail> {
+        self.read_with_rpc(id).await.map(|(detail, _)| detail)
+    }
+
+    async fn read_with_rpc(&self, id: Uuid) -> Result<(Detail, Rpc)> {
         let rpc = self.connection().await?;
         let thread = self.metadata(&rpc, id).await?;
         if !self
@@ -646,11 +665,6 @@ impl Codex {
             if resumed.thread.id != id || resumed.thread.model_provider != self.provider {
                 return Err(Failure::new(404, "Session not found."));
             }
-            self.events
-                .lock()
-                .expect("Codex event lock")
-                .tracked
-                .insert(id.to_string());
         }
         let draft = self
             .drafts
@@ -711,6 +725,9 @@ impl Codex {
             .flat_map(|turn| turn.items.iter().filter_map(|item| visible(item, &turn.id)))
             .collect::<Vec<_>>();
         let mut events = self.events.lock().expect("Codex event lock");
+        if rpc.sender.is_closed() {
+            return Err(disconnected());
+        }
         events.tracked.insert(id.to_string());
         events.live.retain(|_, live| live.at > now_ms() - 300_000);
         let streaming_reply_id = events
@@ -742,7 +759,7 @@ impl Codex {
             live.into_iter()
                 .filter(|message| !stored.iter().any(|value| value.id == message.id)),
         );
-        Ok(Detail {
+        let detail = Detail {
             streaming_reply_id,
             session: thread.summary(),
             expired_approval: None,
@@ -759,11 +776,13 @@ impl Codex {
                 .first()
                 .and_then(|turn| turn.error.as_ref())
                 .map(|error| public_error(&error.message)),
-        })
+        };
+        Ok((detail, rpc))
     }
 
     pub async fn approve(&self, id: Uuid, approval: Uuid, decision: Decision) -> Result<Value> {
-        let rpc = self.connection().await?;
+        let _guard = self.mutation.lock().await;
+        let mut rpc = self.connection().await?;
         let thread = self.metadata(&rpc, id).await?;
         if decision == Decision::Accept {
             self.verify(&rpc, &thread.cwd).await?;
@@ -776,26 +795,46 @@ impl Codex {
             .get(&approval)
             .is_some_and(|request| request.thread == id.to_string());
         if !known {
-            self.read(id).await?;
+            let (detail, restored) = self.read_with_rpc(id).await?;
+            if decision == Decision::Accept && !rpc.sender.same_channel(&restored.sender) {
+                self.verify(&restored, &detail.session.cwd).await?;
+            }
+            rpc = restored;
         }
         let request = {
-            let mut events = self.events.lock().expect("Codex event lock");
+            let events = self.events.lock().expect("Codex event lock");
             let pending = events
                 .approvals
                 .get(&approval)
                 .filter(|request| request.thread == id.to_string())
-                .ok_or_else(|| Failure::new(409, "This approval was already resolved."))?;
+                .ok_or_else(|| {
+                    if rpc.sender.is_closed() {
+                        disconnected()
+                    } else {
+                        Failure::new(409, "This approval was already resolved.")
+                    }
+                })?;
             if decision == Decision::Accept && !pending.approval.can_accept {
                 return Err(Failure::new(400, "Review this request on your Mac."));
             }
-            events
-                .approvals
-                .remove(&approval)
-                .expect("pending approval")
-                .request
+            pending.request.clone()
         };
-        rpc.write(json!({"id":request,"result":{"decision":decision}}))
-            .await?;
+        let result = rpc
+            .write(json!({"id":request,"result":{"decision":decision}}))
+            .await;
+        let mut events = self.events.lock().expect("Codex event lock");
+        if let Err(error) = result.and_then(|()| {
+            if rpc.sender.is_closed() {
+                Err(disconnected())
+            } else {
+                Ok(())
+            }
+        }) {
+            events.tracked.remove(&id.to_string());
+            return Err(error);
+        }
+        events.approvals.remove(&approval);
+        events.tracked.insert(id.to_string());
         Ok(json!({"resolved":true}))
     }
 
