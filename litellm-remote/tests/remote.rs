@@ -525,9 +525,15 @@ fn only_public_messages_are_exposed_and_credentials_are_redacted() {
 
 #[tokio::test]
 async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
-    let directory = Directory::new();
-    let socket_path = directory.0.join("codex.sock");
+    let socket_path = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
     let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    struct SocketFile(PathBuf);
+    impl Drop for SocketFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _file = SocketFile(socket_path.clone());
     let thread = Uuid::new_v4();
     let resumes = Arc::new(AtomicUsize::new(0));
     let observed_resumes = resumes.clone();
