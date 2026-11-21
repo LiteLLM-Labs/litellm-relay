@@ -2,6 +2,7 @@ package ai.litellm.remote
 
 import android.app.Application
 import android.content.Context
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.net.URI
@@ -15,6 +16,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+private const val CLAUDE_RECONNECT_GRACE_MS = 180_000L
+
 data class RemoteState(
     val gateway: String = "", val controlAddress: String = "", val endpoint: String = "",
     val workspace: Workspace? = null, val devices: List<Device> = emptyList(), val deviceId: String? = null,
@@ -25,8 +28,9 @@ data class RemoteState(
     val models: List<ModelOption> = emptyList(), val modelError: String? = null, val actionError: String? = null,
     val detailCurrent: Boolean = false,
     val dismissedExpiredApproval: String? = null,
-    val sessionReconnecting: Boolean = false,
+    val sessionReconnectStartedAt: Long? = null,
 ) {
+    val sessionReconnecting get() = sessionReconnectStartedAt != null
     val device get() = devices.firstOrNull { it.id == deviceId }
     val hasCurrentDetail get() = detailCurrent && detail != null && error == null && devices.firstOrNull { it.id == sessionDeviceId }?.online == true
     val turnRunning get() = (detail?.session ?: selectedSession)?.let { it.canStop || it.status in setOf("working", "needs_approval") } == true
@@ -45,14 +49,17 @@ data class RemoteState(
     fun actionFailed(failure: RemoteResult.Failure): RemoteState = if (failure.status == 401) requestFailed(failure)
     else copy(actionError = failure.message, detailCurrent = detailCurrent && failure.status !in listOf(null, 503, 504))
 
-    fun detailReceived(value: SessionDetail): RemoteState {
+    fun detailReceived(value: SessionDetail, now: Long = SystemClock.elapsedRealtime()): RemoteState {
         val previous = detail
         if (value.session.agent == "claude" && value.session.status == "handoff_required" && previous?.session?.id == value.session.id &&
             (sessionReconnecting || previous.session.canStop || previous.session.status == "working")) {
-            return copy(detail = previous.copy(session = previous.session.copy(canSend = false, canStop = false), approvals = emptyList(), error = null),
-                detailCurrent = false, error = null, sessionReconnecting = true)
+            val started = sessionReconnectStartedAt ?: now
+            if (now - started < CLAUDE_RECONNECT_GRACE_MS) {
+                return copy(detail = previous.copy(session = previous.session.copy(canSend = false, canStop = false), approvals = emptyList(), error = null),
+                    detailCurrent = false, error = null, sessionReconnectStartedAt = started)
+            }
         }
-        val updated = copy(detail = value, detailCurrent = true, error = null, sessionReconnecting = false)
+        val updated = copy(detail = value, detailCurrent = true, error = null, sessionReconnectStartedAt = null)
         return if (value.session.canStop || value.session.status == "working") updated.copy(dismissedExpiredApproval = detail?.expiredApproval?.id ?: dismissedExpiredApproval) else updated
     }
 
@@ -221,11 +228,11 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
 
     private fun openSession(session: CodingSession, device: String?) { viewModelScope.launch {
         detailReplies.next()
-        mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, models = emptyList(), modelError = null, error = null, actionError = null, sessionReconnecting = false) }
+        mutable.update { it.copy(selectedSession = session, sessionDeviceId = device, detail = null, models = emptyList(), modelError = null, error = null, actionError = null, sessionReconnectStartedAt = null) }
         loadDetail()
         loadModels()
     } }
-    fun closeSession() { detailReplies.next(); mutable.update { it.copy(selectedSession = null, sessionDeviceId = null, detail = null, models = emptyList(), modelError = null, error = null, sessionReconnecting = false) } }
+    fun closeSession() { detailReplies.next(); mutable.update { it.copy(selectedSession = null, sessionDeviceId = null, detail = null, models = emptyList(), modelError = null, error = null, sessionReconnectStartedAt = null) } }
 
     private suspend fun loadDetail() {
         val api = client ?: return
@@ -371,11 +378,6 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         return withContext(NonCancellable + Dispatchers.IO) { refreshMutex.withLock {
             if (client !== api) return@withLock false
             if (refreshToken != refresh) return@withLock token != null
-            if (!vault.remove(api.endpoint)) {
-                disconnect()
-                fail("Couldn’t securely update your sign-in. Please sign in again.")
-                return@withLock false
-            }
             when (val result = api.refreshSession(refresh)) {
                 is RemoteResult.Success -> {
                     if (client !== api || refreshToken != refresh) return@withLock false

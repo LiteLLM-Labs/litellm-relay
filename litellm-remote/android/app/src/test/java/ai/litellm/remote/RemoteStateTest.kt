@@ -77,6 +77,35 @@ class RemoteStateTest {
         assertTrue(connected.requestFailed(RemoteResult.Failure("Offline", 503)).copy(error = null, detailCurrent = true).hasCurrentDetail)
     }
 
+    @Test fun aPersistentClaudeHandoffBecomesVisibleAfterTheReconnectGracePeriod() {
+        val claude = session.copy(id = "claude:one", agent = "claude")
+        val running = connected.copy(selectedSession = claude, detail = connected.detail!!.copy(session = claude))
+        val external = SessionDetail(claude.copy(status = "handoff_required", canSend = false, canStop = false), emptyList(), false,
+            error = "Finish this turn, run /exit, then run relay remote handoff.")
+        val first = running.detailReceived(external, now = 1_000)
+        val stillRunning = first.detailReceived(external, now = 91_000)
+        assertTrue(stillRunning.sessionReconnecting)
+        assertEquals(running.detail!!.messages, stillRunning.detail!!.messages)
+        assertFalse(stillRunning.hasCurrentDetail)
+        val offline = stillRunning.requestFailed(RemoteResult.Failure("Offline", 503))
+        val expired = offline.detailReceived(external, now = 181_000)
+        assertFalse(expired.sessionReconnecting)
+        assertEquals(external, expired.detail)
+        assertFalse(expired.detail!!.session.canSend)
+        assertFalse(expired.detail!!.session.canStop)
+        val later = expired.detailReceived(external, now = 300_000)
+        assertFalse(later.sessionReconnecting)
+        assertEquals(external, later.detail)
+        val ready = external.copy(session = claude.copy(status = "ready", canSend = true, canStop = false), error = null)
+        val recovered = stillRunning.detailReceived(ready, now = 92_000)
+        assertFalse(recovered.sessionReconnecting)
+        assertEquals(ready, recovered.detail)
+        assertTrue(recovered.hasCurrentDetail)
+        val anotherTurn = expired.detailReceived(running.detail!!, now = 301_000).detailReceived(external, now = 302_000)
+        assertTrue(anotherTurn.sessionReconnecting)
+        assertEquals(running.detail!!.messages, anotherTurn.detail!!.messages)
+    }
+
     @Test fun expiredAuthenticationClearsPrivateWorkspaceState() {
         val expired = connected.copy(gateway = "https://gateway.example").requestFailed(RemoteResult.Failure("Sign in again", 401))
         assertNull(expired.selectedSession)

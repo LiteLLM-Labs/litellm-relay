@@ -29,6 +29,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.Before
@@ -97,14 +98,65 @@ class RefreshTest {
         }
     }
 
-    @Test fun rotationDoesNotStartIfTheOldCredentialCannotBeRemovedDurably() = runBlocking {
+    @Test fun successfulRotationDoesNotRequireDeletingTheOldCredentialFirst() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("{\"token\":\"access-2\",\"refreshToken\":\"refresh-2\",\"expiresAt\":50}"))
             val fixture = Fixture(server.url("/").toString())
             fixture.vault.rejectRemove = true
+            assertEquals("access-2", fixture.bearer())
+            assertEquals("refresh-2", fixture.vault.load(fixture.endpoint))
+            assertEquals(1, server.requestCount)
+            assertNull(fixture.model.state.value.error)
+        }
+    }
+
+    @Test fun transientRefreshFailurePreservesTheSavedCredentialForAColdStart() = runBlocking {
+        for (status in listOf<Int?>(503, 500, null)) {
+            MockWebServer().use { server ->
+                val rotations = AtomicInteger()
+                val bodies = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val future = System.currentTimeMillis() + 3_600_000
+                server.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                        "/api/auth/refresh" -> {
+                            bodies.add(request.body.readUtf8())
+                            if (rotations.getAndIncrement() == 0) {
+                                if (status != null) MockResponse().setResponseCode(status).setBody("{\"error\":\"Unavailable\"}")
+                                else MockResponse().setBody("x".repeat(100)).setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+                            } else MockResponse().setBody("{\"token\":\"access-2\",\"refreshToken\":\"refresh-2\",\"expiresAt\":$future}")
+                        }
+                        "/api/me" -> if (request.getHeader("Authorization") == "Bearer access-2") {
+                            MockResponse().setBody("{\"gateway\":\"https://gateway.example\",\"identity\":{\"subject\":\"user\",\"label\":\"User\",\"expiresAt\":$future}}")
+                        } else MockResponse().setResponseCode(401).setBody("{\"error\":\"Sign in again\"}")
+                        "/api/devices" -> MockResponse().setBody("{\"devices\":[]}")
+                        else -> MockResponse().setResponseCode(404)
+                    }
+                }
+                val fixture = Fixture(server.url("/").toString())
+                assertNull(fixture.bearer())
+                assertEquals("refresh-credential", fixture.vault.load(fixture.endpoint))
+                val cold = Fixture(fixture.endpoint, fixture.vault)
+                cold.connect()
+                assertEquals("user", cold.model.state.value.workspace?.identity?.subject)
+                assertEquals("refresh-2", cold.vault.load(cold.endpoint))
+                assertEquals(listOf("{\"refreshToken\":\"refresh-credential\"}", "{\"refreshToken\":\"refresh-credential\"}"), bodies)
+            }
+        }
+    }
+
+    @Test fun failedRotationSaveAndRemovalStillSignOutWithAVisibleError() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{\"token\":\"access-2\",\"refreshToken\":\"refresh-2\",\"expiresAt\":50}"))
+            val fixture = Fixture(server.url("/").toString())
+            fixture.vault.rejectSave = true
+            fixture.vault.rejectRemove = true
             assertNull(fixture.bearer())
-            assertEquals(0, server.requestCount)
-            assertNotNull(fixture.model.state.value.error)
+            assertEquals(1, server.requestCount)
+            assertNull(fixture.field("token"))
+            assertNull(fixture.field("refreshToken"))
+            assertNull(fixture.model.state.value.workspace)
+            assertTrue(fixture.refreshWorkspaces.isEmpty())
+            assertTrue(fixture.model.state.value.error!!.contains("securely"))
         }
     }
 
@@ -126,7 +178,7 @@ class RefreshTest {
             try {
                 val caller = async { fixture.bearer() }
                 assertTrue(withContext(Dispatchers.IO) { started.await(5, TimeUnit.SECONDS) })
-                assertNull(fixture.vault.load(fixture.endpoint))
+                assertEquals("refresh-credential", fixture.vault.load(fixture.endpoint))
                 caller.cancel()
                 release.countDown()
                 caller.join()
@@ -278,6 +330,7 @@ class RefreshTest {
             assertNull(fixture.field("token"))
             assertNull(fixture.field("refreshToken"))
             assertTrue(fixture.refreshWorkspaces.isEmpty())
+            assertNull(fixture.vault.load(fixture.endpoint))
         }
     }
 
