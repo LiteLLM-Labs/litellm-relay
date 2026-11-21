@@ -718,6 +718,7 @@ impl Codex {
         );
         Ok(Detail {
             session: thread.summary(),
+            expired_approval: None,
             messages,
             older_messages: turns.next_cursor.is_some(),
             approvals: events

@@ -3,6 +3,7 @@ use super::super::{
     route,
 };
 use super::history::{settings, Transcript};
+use super::journal::Journal;
 use super::{Claude, Grant};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -36,6 +37,9 @@ pub(super) struct Live {
     pub(super) error: Option<String>,
     pub(super) transcript: Transcript,
     pub(super) approvals: HashMap<Uuid, Permission>,
+    pub(super) turn: String,
+    pub(super) permission_closed: bool,
+    journal: Option<Journal>,
 }
 
 impl Live {
@@ -48,12 +52,20 @@ impl Live {
                 self.model = value["model"].as_str().map(str::to_owned);
             }
             "assistant" | "user" if value["parent_tool_use_id"].is_null() => {
+                if value["type"] == "user" {
+                    self.permission_closed |= value["message"]["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["is_error"] == true && block["content"].as_str().is_some_and(|text| text.contains("Tool permission stream closed before response received"))));
+                }
                 self.transcript.append(value);
             }
             "stream_event" if value["parent_tool_use_id"].is_null() => {
                 self.transcript.stream(&value["event"]);
             }
             "result" => {
+                if !self.permission_closed {
+                    if let Some(journal) = &self.journal {
+                        journal.clear(id)?;
+                    }
+                }
                 self.working = false;
                 self.approvals.clear();
                 if !self.stopping && (value["is_error"] == true || value["subtype"] != "success") {
@@ -77,12 +89,28 @@ impl Live {
                         json!({"type":"control_response","response":{"subtype":"error","request_id":request_id,"error":"Review this request on your Mac."}}),
                     ));
                 }
+                if self.stopping {
+                    return Ok(Some(
+                        json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"deny","message":"The user stopped this turn."}}}),
+                    ));
+                }
+                if self
+                    .approvals
+                    .values()
+                    .any(|permission| permission.request == request_id)
+                {
+                    return Ok(None);
+                }
                 let tool = request["tool_name"].as_str().unwrap_or("Tool");
                 let full = format!(
                     "{tool}\n{}",
                     serde_json::to_string_pretty(&request["input"]).unwrap_or_default()
                 );
                 let approval = Uuid::new_v4();
+                let summary: String = redact(&full).chars().take(32_000).collect();
+                if let Some(journal) = &self.journal {
+                    journal.pending(id, &self.turn, request_id, request, &summary)?;
+                }
                 self.approvals.insert(
                     approval,
                     Permission {
@@ -91,16 +119,21 @@ impl Live {
                         approval: Approval {
                             id: approval.to_string(),
                             title: format!("Allow {tool}?"),
-                            text: redact(&full).chars().take(32_000).collect(),
+                            text: summary,
                             can_accept: full.len() <= 32_000
                                 && !matches!(tool, "AskUserQuestion" | "ExitPlanMode"),
                         },
                     },
                 );
             }
-            "control_cancel_request" => self.approvals.retain(|_, approval| {
-                approval.request != value["request_id"].as_str().unwrap_or("")
-            }),
+            "control_cancel_request" => {
+                let request = value["request_id"].as_str().unwrap_or("");
+                if let Some(journal) = &self.journal {
+                    journal.cancel(id, request)?;
+                }
+                self.approvals
+                    .retain(|_, approval| approval.request != request);
+            }
             _ => {}
         }
         Ok(None)
@@ -386,6 +419,7 @@ impl Claude {
         let (stop, mut stopping) = watch::channel(false);
         let (finished, completion) = watch::channel(false);
         let live = Arc::new(Mutex::new(Live {
+            journal: Some(self.journal()),
             starting: true,
             ..Live::default()
         }));

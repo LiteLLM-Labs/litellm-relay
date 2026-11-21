@@ -1415,6 +1415,358 @@ impl Drop for CredentialEnv {
 }
 
 #[tokio::test]
+#[ignore = "requires real Claude, an isolated LiteLLM on 127.0.0.1:4019 and LITELLM_API_KEY"]
+async fn claude_approval_journal_live_probe() {
+    let _env = CLAUDE_ENV.lock().await;
+    use std::os::unix::fs::PermissionsExt;
+    let root = PathBuf::from(
+        std::env::var("CLAUDE_JOURNAL_LIVE_ROOT").expect("Set an isolated live probe directory"),
+    );
+    let directory = root.join(Uuid::new_v4().to_string());
+    let home = directory.join("config");
+    let grants = directory.join("grants");
+    let project = directory.join("project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let gateway = Url::parse("http://127.0.0.1:4019").unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        json!({"env":{"ANTHROPIC_BASE_URL":gateway}}).to_string(),
+    )
+    .unwrap();
+    let executable = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("claude")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let wrapper = directory.join("claude-owner");
+    std::fs::write(&wrapper, format!(r#"#!/usr/bin/python3
+import os, pathlib, sys
+session = next((arg.split('=', 1)[1] for arg in sys.argv if arg.startswith(('--session-id=', '--resume='))), None)
+if session:
+    (pathlib.Path(os.environ['CLAUDE_CONFIG_DIR']) / (session + '.pid')).write_text(str(os.getpid()))
+os.execv({executable:?}, [{executable:?}] + sys.argv[1:])
+"#)).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let make = || {
+        claude::Claude::new(
+            wrapper.clone(),
+            home.clone(),
+            grants.clone(),
+            gateway.clone(),
+        )
+    };
+    for allowed in [false, true] {
+        let client = make();
+        let session = client.create(project.to_str().unwrap().into()).unwrap();
+        let id = Uuid::parse_str(session.id.trim_start_matches("claude:")).unwrap();
+        let marker = project.join(format!("{id}.txt"));
+        let command = format!(
+            "printf 'approved\\n' >> {}{}",
+            marker.display(),
+            if allowed { "; sleep 8" } else { "" }
+        );
+        client.send(id, format!("Use only the Bash tool to execute exactly this command, then reply DONE. Do not use another tool or change the command. Command: {command}"), Some("claude-sonnet-5-5".into())).await.unwrap();
+        let approval = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let detail = client.read(id).await.unwrap();
+                if let Some(approval) = detail.approvals.first() {
+                    break approval.clone();
+                }
+                assert!(detail.error.is_none(), "{:?}", detail.error);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let path = grants.join("approvals").join(format!("{id}.json"));
+        let pending: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(pending[0]["state"], "pending");
+        assert_eq!(pending[0]["summary"], approval.text);
+        if allowed {
+            client
+                .approve(id, Uuid::parse_str(&approval.id).unwrap(), Decision::Accept)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !marker.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(client.read(id).await.unwrap().session.can_stop);
+            let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved[0]["state"], "allowed");
+        }
+        let pid: i32 = std::fs::read_to_string(home.join(format!("{id}.pid")))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while client.read(id).await.unwrap().session.can_stop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(client);
+        let detail = make().read(id).await.unwrap();
+        let serialized = serde_json::to_value(&detail).unwrap();
+        assert_eq!(serialized.get("expiredApproval").is_some(), !allowed);
+        assert_eq!(marker.exists(), allowed);
+        if !allowed {
+            assert_eq!(serialized["expiredApproval"]["id"], pending[0]["id"]);
+            assert_eq!(serialized["expiredApproval"]["summary"], approval.text);
+        }
+        println!(
+            "LIVE allowed={allowed} expiredApproval={} marker_exists={} session={id}",
+            serialized.get("expiredApproval").is_some(),
+            marker.exists()
+        );
+    }
+    println!("LIVE artifacts={}", directory.display());
+}
+
+#[tokio::test]
+async fn claude_approval_journal_survives_restart_without_misreporting_executed_tools() {
+    let _env = CLAUDE_ENV.lock().await;
+    use std::os::unix::fs::PermissionsExt;
+    let directory = Directory::new();
+    let home = directory.0.join("config");
+    let grants = directory.0.join("grants");
+    let project = home.join("projects/fixture");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        json!({"env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test"}}).to_string(),
+    )
+    .unwrap();
+    let script = directory.0.join("claude-fixture");
+    std::fs::write(&script, r#"#!/usr/bin/python3
+import json, os, pathlib, sys
+if sys.argv[1:] == ['agents', '--json']:
+    print('[]')
+    sys.exit(0)
+session = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith(('--session-id=', '--resume=')))
+home = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+(home / (session + '.pid')).write_text(str(os.getpid()))
+path = home / 'projects' / 'fixture' / (session + '.jsonl')
+def emit(value):
+    print(json.dumps(value), flush=True)
+def append(value):
+    with path.open('a') as output:
+        output.write(json.dumps(value) + '\n')
+for line in sys.stdin:
+    value = json.loads(line)
+    if value['type'] == 'control_request':
+        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
+        if value['request']['subtype'] == 'interrupt':
+            emit({'type':'result','subtype':'success'})
+    elif value['type'] == 'user':
+        mode = value['message']['content']
+        append(value)
+        if mode == 'cannot-persist':
+            journal = home.parent / 'grants' / 'approvals'
+            journal.rename(home.parent / 'grants' / 'saved-approvals')
+            journal.write_text('not a directory')
+        if mode != 'unflushed':
+            append({'type':'assistant','message':{'content':[{'type':'tool_use','id':'tool-' + session,'name':'Bash','input':{'command':'echo ok'}}]}})
+        emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_use_id':'tool-' + session,'tool_name':'Bash','input':{'command':'echo ok'}}})
+    elif value['type'] == 'control_response':
+        records = json.loads((home.parent / 'grants' / 'approvals' / (session + '.json')).read_text())
+        (home / (session + '.forwarded')).write_text(records[0]['state'])
+        if mode == 'completed' or value['response']['response']['behavior'] == 'deny':
+            append({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'tool-' + session,'content':'done'}]}})
+            emit({'type':'result','subtype':'success'})
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let make = || {
+        claude::Claude::new(
+            script.clone(),
+            home.clone(),
+            grants.clone(),
+            Url::parse("https://gateway.example.test").unwrap(),
+        )
+    };
+    for mode in [
+        "pending",
+        "unflushed",
+        "allowed",
+        "declined",
+        "stop",
+        "completed",
+        "later",
+        "corrupt",
+        "expired",
+        "cannot-decide",
+        "new-turn",
+    ] {
+        let client = make();
+        let session = client.create(directory.0.to_str().unwrap().into()).unwrap();
+        let id = Uuid::parse_str(session.id.trim_start_matches("claude:")).unwrap();
+        client.send(id, mode.into(), None).await.unwrap();
+        let detail = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let detail = client.read(id).await.unwrap();
+                if !detail.approvals.is_empty() {
+                    break detail;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(serde_json::to_value(&detail).unwrap()["expiredApproval"].is_null());
+        let journal = grants.join("approvals").join(format!("{id}.json"));
+        let summary = detail.approvals[0].text.clone();
+        let approval = Uuid::parse_str(&detail.approvals[0].id).unwrap();
+        if ["allowed", "declined", "completed"].contains(&mode) {
+            client
+                .approve(
+                    id,
+                    approval,
+                    if mode == "declined" {
+                        Decision::Decline
+                    } else {
+                        Decision::Accept
+                    },
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !home.join(format!("{id}.forwarded")).exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(home.join(format!("{id}.forwarded"))).unwrap(),
+                if mode == "declined" {
+                    "declined"
+                } else {
+                    "allowed"
+                }
+            );
+        }
+        if mode == "stop" {
+            client.interrupt(id).await.unwrap();
+        }
+        if ["stop", "declined", "completed"].contains(&mode) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client.read(id).await.unwrap().session.can_stop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!journal.exists());
+        }
+        if mode == "cannot-decide" {
+            std::fs::write(&journal, "not json").unwrap();
+            assert!(client
+                .approve(id, approval, Decision::Accept)
+                .await
+                .is_err());
+            assert!(!home.join(format!("{id}.forwarded")).exists());
+        }
+        let pid: i32 = std::fs::read_to_string(home.join(format!("{id}.pid")))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.read(id).await.unwrap().session.can_stop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(client);
+        if mode == "later" {
+            use std::io::Write;
+            writeln!(std::fs::OpenOptions::new().append(true).open(project.join(format!("{id}.jsonl"))).unwrap(), "{}", json!({"type":"user","uuid":Uuid::new_v4(),"message":{"content":[{"type":"text","text":"A later turn"}]}})).unwrap();
+        }
+        if mode == "corrupt" {
+            std::fs::write(&journal, "{broken").unwrap();
+        }
+        if mode == "expired" {
+            let mut old: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            old[0]["createdAt"] = json!(protocol::now_ms() - 8 * 24 * 60 * 60 * 1000);
+            std::fs::write(&journal, old.to_string()).unwrap();
+        }
+        let restored = make();
+        let detail = restored.read(id).await.unwrap();
+        let value = serde_json::to_value(&detail).unwrap();
+        if ["pending", "unflushed", "new-turn"].contains(&mode) {
+            assert_eq!(
+                value["expiredApproval"],
+                json!({"id":format!("tool-{id}"),"tool":"Bash","summary":"Bash\n{\n  \"command\": \"echo ok\"\n}"}),
+                "Pending approval was silently lost after restart ({mode})"
+            );
+        } else {
+            assert!(
+                value.get("expiredApproval").is_none(),
+                "Unexpected expired approval for {mode}"
+            );
+        }
+        if mode == "pending" {
+            assert_eq!(
+                std::fs::metadata(&journal).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let record: Value = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(record[0]["state"], "pending");
+            assert_eq!(record[0]["summary"], summary);
+        }
+        if mode == "new-turn" {
+            restored.send(id, "unflushed".into(), None).await.unwrap();
+            assert!(serde_json::to_value(restored.read(id).await.unwrap())
+                .unwrap()
+                .get("expiredApproval")
+                .is_none());
+        }
+    }
+    let client = make();
+    let session = client.create(directory.0.to_str().unwrap().into()).unwrap();
+    let id = Uuid::parse_str(session.id.trim_start_matches("claude:")).unwrap();
+    assert!(serde_json::to_value(client.read(id).await.unwrap())
+        .unwrap()
+        .get("expiredApproval")
+        .is_none());
+    client
+        .send(id, "cannot-persist".into(), None)
+        .await
+        .unwrap();
+    let failed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let detail = client.read(id).await.unwrap();
+            if !detail.session.can_stop {
+                break detail;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        failed.approvals.is_empty(),
+        "Never expose an approval whose pending record could not be saved"
+    );
+    assert!(failed
+        .error
+        .unwrap()
+        .contains("Cannot safely save Claude approval state"));
+}
+
+#[tokio::test]
 async fn claude_native_protocol_handoff_approvals_stop_and_route_changes() {
     let _env = CLAUDE_ENV.lock().await;
     use std::os::unix::fs::PermissionsExt;
@@ -1503,7 +1855,7 @@ for line in sys.stdin:
         emit({'type':'stream_event','event':{'type':'message_start','message':{'id':'reply'}}})
         emit({'type':'assistant','uuid':'thinking','message':{'id':'reply','content':[{'type':'thinking','thinking':'Hidden'}]}})
         emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'text_delta','text':'Live Claude reply'}}})
-        emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Edit','input':{'file_path':'fixture.txt','old_string':'before','new_string':'after'}}})
+        emit({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_use_id':'fixture-tool','tool_name':'Edit','input':{'file_path':'fixture.txt','old_string':'before','new_string':'after'}}})
     elif value['type'] == 'control_response':
         assert value['response']['response']['behavior'] == 'allow'
         assert value['response']['response']['updatedInput']['new_string'] == 'after'

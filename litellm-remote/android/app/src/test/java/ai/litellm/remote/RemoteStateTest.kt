@@ -5,6 +5,27 @@ import org.junit.Test
 import kotlinx.coroutines.runBlocking
 
 class RemoteStateTest {
+    @Test fun expiredApprovalNoticeSurvivesOfflineButRetryRequiresAnIdleOnlineClaudeSession() {
+        val session = CodingSession("claude:one", "Task", "repo", "/repo", "claude", "ready", true, false, 1)
+        val expired = ExpiredApproval("tool-1", "Bash", "Bash\n{\"command\":\"echo ok\"}")
+        val ready = connected.copy(selectedSession = session, detail = SessionDetail(session, emptyList(), false, expiredApproval = expired))
+        assertEquals("Approval expired because the connector restarted. The command didn't run.", EXPIRED_APPROVAL_NOTICE)
+        assertEquals(expired, ready.expiredApproval)
+        assertTrue(ready.canRetryExpiredApproval)
+        val offline = ready.copy(devices = ready.devices.map { it.copy(online = false) })
+        assertEquals(expired, offline.expiredApproval)
+        assertFalse(offline.canRetryExpiredApproval)
+        assertFalse(ready.copy(detailCurrent = false).canRetryExpiredApproval)
+        val running = ready.detail!!.copy(session = session.copy(status = "working", canStop = true))
+        assertFalse(ready.detailReceived(running).canRetryExpiredApproval)
+        assertNull(ready.detailReceived(running).detailReceived(ready.detail!!).expiredApproval)
+        assertNull(ready.hideExpiredApproval().detailReceived(ready.detail!!).expiredApproval)
+        assertNotNull(ready.hideExpiredApproval().detailReceived(ready.detail!!.copy(expiredApproval = expired.copy(id = "tool-2"))).expiredApproval)
+        assertNull(ready.copy(selectedSession = session.copy(agent = "codex")).expiredApproval)
+        assertNull(ready.copy(detail = ready.detail!!.copy(expiredApproval = null)).expiredApproval)
+        assertNull(ready.copy(detail = null).expiredApproval)
+    }
+
     private val session = CodingSession("codex:one", "Task", "repo", "/repo", "codex", "working", true, true, 1)
     private val connected = RemoteState(endpoint = "https://control.example", deviceId = "host", sessionDeviceId = "host",
         devices = listOf(Device("host", "Host", true, 1, "Linux")), selectedSession = session, detailCurrent = true,
