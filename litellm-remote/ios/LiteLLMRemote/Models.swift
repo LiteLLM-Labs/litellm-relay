@@ -18,12 +18,23 @@ struct RegisteredDevice: Decodable, Identifiable, Hashable, Sendable {
     let online: Bool
     let lastSeen: Double
     let platform: String
+
+    var platformLabel: String {
+        switch platform.lowercased() {
+        case "macos": "Mac"
+        case "linux": "Linux"
+        case "": "Unknown"
+        default: platform
+        }
+    }
+
+    var displayName: String { "\(name) (\(platformLabel))" }
 }
 
 struct DevicePage: Decodable, Sendable { let devices: [RegisteredDevice] }
 struct WorkspaceDiscovery: Decodable, Sendable { let gatewayUrl: String; let controlUrl: String }
 
-struct CodingSession: Decodable, Identifiable, Hashable, Sendable {
+struct CodingSession: Codable, Identifiable, Hashable, Sendable {
     let id: String
     let title: String
     let project: String
@@ -42,7 +53,7 @@ struct CodingSession: Decodable, Identifiable, Hashable, Sendable {
         case "working": return "Working"
         case "needs_approval": return "Needs approval"
         case "needs_input": return "Needs input"
-        case "handoff_required": return "Set up on Mac"
+        case "handoff_required": return "Set up on device"
         case "ready": return "Ready"
         case "error": return "Needs attention"
         default: return "Saved"

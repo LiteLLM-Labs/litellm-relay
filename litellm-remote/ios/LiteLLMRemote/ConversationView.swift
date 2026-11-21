@@ -23,6 +23,7 @@ struct SessionView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private var session: CodingSession { detail?.session ?? route.session }
+    private var online: Bool { store.deviceIsOnline(route.deviceId) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,30 +31,38 @@ struct SessionView: View {
                 Image(systemName: "folder").font(.system(size: 10))
                 Text(session.project).font(.system(size: 11, weight: .medium)).lineLimit(1)
                 Spacer()
-                Circle().fill(session.status == "working" ? Palette.accent : Palette.success).frame(width: 5, height: 5)
-                Text(session.activity).font(.system(size: 11, weight: .medium))
+                if online {
+                    Circle().fill(session.status == "working" ? Palette.accent : Palette.success).frame(width: 5, height: 5)
+                    Text(session.activity).font(.system(size: 11, weight: .medium))
+                } else {
+                    ConnectionBadge(online: false)
+                }
             }
             .foregroundStyle(Palette.secondary).padding(.horizontal, 22).padding(.vertical, 13)
             .background(Palette.surface)
-            if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError { InlineError(text: error).padding(.horizontal, 18).padding(.top, 8) }
+            if !online {
+                InlineError(text: "This device is offline. Reconnect it to continue this session.").padding(.horizontal, 18).padding(.top, 8)
+            } else if let error = actionError ?? (session.status == "handoff_required" ? nil : detail?.error) ?? loadError ?? modelError {
+                InlineError(text: error).padding(.horizontal, 18).padding(.top, 8)
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 22) {
                         if detail?.olderMessages == true { Text("Latest messages").font(.caption2).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity) }
-                        if session.status == "handoff_required" {
+                        if online && session.status == "handoff_required" {
                             VStack(alignment: .leading, spacing: 14) {
                                 Label("Set up mobile control", systemImage: "laptopcomputer").font(.headline)
-                                Text(detail?.error ?? "Finish the current turn and hand this session over from Relay on your Mac.")
+                                Text(detail?.error ?? "Finish the current turn and hand this session over from Relay on the device.")
                                     .font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
                             }
                             .padding(20).frame(maxWidth: .infinity, alignment: .leading)
                             .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18))
-                        } else if detail?.messages.isEmpty == true {
+                        } else if online && detail?.messages.isEmpty == true {
                             EmptyWorkspace(title: "What are we building?", text: "Send a message to start working in \(session.project).", symbol: "terminal")
                         }
                         ForEach(detail?.messages ?? []) { message in MessageView(message: message, agentName: session.agentName).id(message.id) }
                         ForEach(detail?.approvals ?? []) { approval in approvalCard(approval) }
-                        if session.status == "working" {
+                        if online && session.status == "working" {
                             HStack(spacing: 10) { ProgressView().controlSize(.mini); Text("\(session.agentName) is working").font(.caption) }.foregroundStyle(Palette.secondary)
                         }
                         Color.clear.frame(height: 1).id("latest")
@@ -77,7 +86,7 @@ struct SessionView: View {
                         if stopping { ProgressView().controlSize(.small).frame(width: 18, height: 18) }
                         else { Label("Stop", systemImage: "stop.fill").labelStyle(.titleAndIcon).font(.caption.weight(.semibold)) }
                     }
-                    .disabled(stopping).accessibilityLabel("Stop current turn")
+                    .disabled(stopping || !online).accessibilityLabel("Stop current turn")
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -85,9 +94,10 @@ struct SessionView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-        .task(id: route.deviceId) { await loadModels() }
+        .task(id: online) { if online { await loadModels() } }
         .sheet(isPresented: $showingModels) { allModels }
-        .task(id: route.session.id) {
+        .task(id: online) {
+            guard online else { return }
             await update()
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
@@ -123,7 +133,7 @@ struct SessionView: View {
                         .foregroundStyle(Palette.ink).padding(.vertical, 6)
                     }
                     .accessibilityLabel("Choose model").accessibilityIdentifier("modelPicker")
-                    .disabled(sending || !session.canSend)
+                    .disabled(sending || !online || !session.canSend)
                     Spacer()
                     Text(session.status == "working" ? "Working" : "Gateway").font(.system(size: 10)).foregroundStyle(Palette.secondary)
                 }
@@ -132,7 +142,7 @@ struct SessionView: View {
             HStack(alignment: .bottom, spacing: 12) {
                 TextField("Message \(session.agentName)…", text: $draft, axis: .vertical).lineLimit(1...6).font(.system(size: 15))
                     .padding(.horizontal, 16).padding(.vertical, 14)
-                    .disabled(sending || !session.canSend).accessibilityIdentifier("messageComposer")
+                    .disabled(sending || !online || !session.canSend).accessibilityIdentifier("messageComposer")
                     .onChange(of: draft) { if !sending { requestId = UUID().uuidString } }
                 Button { Task { await send() } } label: {
                     Group {
@@ -143,7 +153,7 @@ struct SessionView: View {
                     .background(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Palette.secondary.opacity(0.3) : Palette.accent, in: RoundedRectangle(cornerRadius: 12))
                 }
                 .padding(6).accessibilityLabel("Send message").accessibilityIdentifier("sendMessageButton")
-                .disabled(sending || !session.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 32000)
+                .disabled(sending || !online || !session.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 32000)
             }
             }
             .background(Palette.surface, in: RoundedRectangle(cornerRadius: 19))
@@ -190,7 +200,7 @@ struct SessionView: View {
                 Button("Decline", role: .destructive) { Task { await decide(approval, decision: "decline") } }.buttonStyle(.bordered)
                 if approval.canAccept { Button("Allow once") { Task { await decide(approval, decision: "accept") } }.buttonStyle(.borderedProminent).foregroundStyle(.white) }
             }
-            .disabled(deciding)
+            .disabled(deciding || !online)
             .controlSize(.large)
         }
         .padding(18).frame(maxWidth: .infinity, alignment: .leading).background(Palette.surface, in: RoundedRectangle(cornerRadius: 17))
@@ -198,6 +208,7 @@ struct SessionView: View {
     }
 
     private func update() async {
+        guard online else { return }
         switch await store.detail(id: session.id, deviceId: route.deviceId) {
         case .success(let value):
             guard !Task.isCancelled else { return }
@@ -210,7 +221,7 @@ struct SessionView: View {
     }
 
     private func stopTurn() async {
-        guard !stopping else { return }
+        guard !stopping, online else { return }
         stopping = true
         switch await store.interrupt(id: session.id, deviceId: route.deviceId, requestId: stopRequestId) {
         case .success: actionError = nil; stopRequestId = UUID().uuidString
@@ -221,7 +232,7 @@ struct SessionView: View {
     }
 
     private func send() async {
-        guard !sending else { return }
+        guard !sending, online else { return }
         sending = true
         actionError = nil
         switch await store.send(id: session.id, deviceId: route.deviceId, text: draft, requestId: requestId, model: selectedModel) {
@@ -250,7 +261,7 @@ struct SessionView: View {
     }
 
     private func decide(_ approval: SessionApproval, decision: String) async {
-        guard !deciding else { return }
+        guard !deciding, online else { return }
         deciding = true
         switch await store.approve(id: session.id, deviceId: route.deviceId, approvalId: approval.id, decision: decision) {
         case .success: actionError = nil

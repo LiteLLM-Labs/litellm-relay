@@ -3,7 +3,12 @@ import UIKit
 
 @main
 struct LiteLLMRemoteApp: App {
-    @State private var store = RemoteStore()
+    @State private var store: RemoteStore = {
+        #if DEBUG
+        if let fixture = RemoteUITestFixture.fromLaunchEnvironment { return fixture }
+        #endif
+        return RemoteStore()
+    }()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -21,7 +26,16 @@ struct LiteLLMRemoteApp: App {
             }
             .foregroundStyle(Palette.ink)
             .tint(Palette.accent)
-            .task { await store.restore() }
+            .task {
+                #if DEBUG
+                if RemoteUITestFixture.enabled {
+                    await store.connect()
+                    store.restoring = false
+                    return
+                }
+                #endif
+                await store.restore()
+            }
             .onChange(of: scenePhase) {
                 if scenePhase == .active { Task { await store.restore() } }
             }

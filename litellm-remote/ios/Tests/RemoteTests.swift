@@ -149,7 +149,7 @@ final class RemoteTests: XCTestCase {
         ]}
         """
         let page = try JSONDecoder().decode(SessionPage.self, from: Data(input.utf8))
-        XCTAssertEqual(page.sessions[0].activity, "Set up on Mac")
+        XCTAssertEqual(page.sessions[0].activity, "Set up on device")
         XCTAssertFalse(page.sessions[0].canSend)
         XCTAssertTrue(page.sessions[0].needsAttention)
         XCTAssertEqual(page.sessions[1].activity, "Needs approval")
@@ -188,9 +188,9 @@ final class RemoteTests: XCTestCase {
         async let earlier = MarkdownQueue.shared.parse("alpha")
         async let later = MarkdownQueue.shared.parse("beta")
         let (first, second) = await (earlier, later)
-        XCTAssertTrue(String(first?.characters ?? "").contains("alpha"),
+        XCTAssertTrue((first.map { String($0.characters) } ?? "").contains("alpha"),
                       "an earlier bubble must not stay unparsed because a newer string was queued")
-        XCTAssertTrue(String(second?.characters ?? "").contains("beta"))
+        XCTAssertTrue((second.map { String($0.characters) } ?? "").contains("beta"))
     }
 
     func testCachedMarkdownNeverShowsForNewerStreamedText() throws {
@@ -212,6 +212,78 @@ final class RemoteTests: XCTestCase {
         let cursor = "page=two&offset=20+item/next"
         let cursorPath = queryPath("/api/sessions", name: "cursor", value: cursor)
         XCTAssertEqual(URLComponents(string: cursorPath)?.queryItems?.first?.value, cursor)
+    }
+
+    @MainActor
+    func testNewSessionDevicePrefersSelectionThenLinuxThenAnyOnlineDevice() {
+        let store = RemoteStore(cacheDirectory: nil)
+        let mac = RegisteredDevice(id: "mac", name: "Laptop", online: true, lastSeen: 0, platform: "macOS")
+        let linux = RegisteredDevice(id: "linux", name: "Host", online: true, lastSeen: 0, platform: "Linux")
+        let other = RegisteredDevice(id: "other", name: "Other", online: true, lastSeen: 0, platform: "Other OS")
+        let offline = RegisteredDevice(id: "mac", name: "Laptop", online: false, lastSeen: 0, platform: "macOS")
+        XCTAssertEqual(mac.platformLabel, "Mac")
+        XCTAssertEqual(linux.platformLabel, "Linux")
+        XCTAssertEqual(other.platformLabel, "Other OS")
+        XCTAssertEqual(RegisteredDevice(id: "blank", name: "Blank", online: false, lastSeen: 0, platform: "").platformLabel, "Unknown")
+
+        store.selectedDeviceId = mac.id
+        store.devices = [other, linux, mac]
+        XCTAssertEqual(store.newSessionDevice, mac)
+        store.devices = [other, linux, offline]
+        XCTAssertEqual(store.newSessionDevice, linux)
+        XCTAssertEqual(store.selectedDevice, offline)
+        store.devices = [other, offline]
+        XCTAssertEqual(store.newSessionDevice, other)
+        store.devices = [offline]
+        XCTAssertNil(store.newSessionDevice)
+    }
+
+    @MainActor
+    func testLastSeenListsStayWithTheirDeviceAcrossOfflineFailureAndRelaunch() async throws {
+        let name = "cache-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appending(path: name)
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        func connect(mode: String, subject: String = "first") async -> RemoteStore {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RemoteTestProtocol.self]
+            configuration.httpAdditionalHeaders = ["X-Fixture-Mode": mode, "X-Fixture-Subject": subject]
+            let store = RemoteStore(defaults: defaults, session: URLSession(configuration: configuration), cacheDirectory: directory)
+            store.gatewayAddress = RemoteTestProtocol.gateway
+            store.serviceOverride = "https://service.fixture.test"
+            await store.connect()
+            await store.refreshDevices()
+            return store
+        }
+
+        let first = await connect(mode: "online")
+        XCTAssertEqual(first.selectedDeviceId, "mac")
+        await first.refresh()
+        XCTAssertEqual(first.nextCursor, "older")
+        await first.refresh(older: true)
+        XCTAssertEqual(first.sessions.map(\.id), ["mac-saved", "mac-older"])
+        XCTAssertNil(first.nextCursor)
+        await first.refresh()
+        await first.selectDevice("linux")
+        XCTAssertTrue(first.sessions.isEmpty)
+        XCTAssertEqual(first.sessions(for: "mac").map(\.id), ["mac-saved"])
+
+        let reopened = await connect(mode: "offline")
+        XCTAssertEqual(reopened.selectedDeviceId, "linux")
+        await reopened.selectDevice("mac")
+        XCTAssertFalse(reopened.deviceIsOnline("mac"))
+        XCTAssertEqual(reopened.sessions.map(\.id), ["mac-saved", "mac-older"])
+        XCTAssertNil(reopened.error)
+        XCTAssertNil(reopened.nextCursor)
+        XCTAssertEqual(reopened.newSessionDevice?.id, "linux")
+        XCTAssertTrue(reopened.sessions(for: "linux").isEmpty)
+
+        let otherAccount = await connect(mode: "offline", subject: "second")
+        await otherAccount.selectDevice("mac")
+        XCTAssertTrue(otherAccount.sessions.isEmpty)
     }
 }
 

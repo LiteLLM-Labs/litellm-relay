@@ -221,9 +221,9 @@ If the selected Mac is offline, **New session** can use an online Linux host. Th
 
 ### iOS
 
-In **Sessions**, open the device menu and select the online Linux host by the name you used to pair it. Tap **New session**, choose **Claude Code** or **Codex**, and enter the absolute path to a project on that host. Use **Devices** to check connector status or remove a device. The existing iOS client reads the platform from the shared device list but only enables **New session** for the selected online device. Select the Linux host manually if the Mac is offline.
+The **Sessions** device menu shows each device's platform. Use **Devices** to check connection status or remove a device. Tap **New session**, choose **Claude Code** or **Codex**, and enter the absolute path to a project on the device named under **Starting on**. New sessions use the selected device if it is online. Otherwise the app prefers an online Linux host, then another online device. With no online devices, **New session** is unavailable.
 
-Automatic new-session fallback, a visible Linux platform label in the session picker, and retention and offline labeling of previously loaded laptop sessions depend on the separate iOS host update. The intended rule is the same on both platforms: only new sessions may fall back to Linux, and existing sessions stay on the device that started them. The control service does not implement a fallback or migrate any session.
+Only new sessions can use a different device. Previously loaded session summaries stay under the device that owns them, even after reopening the app. If that device is offline, the sessions are marked **Offline** and actions are unavailable. Reconnect the original device to continue a session or load history the app hasn't seen. The app does not cache conversations or move sessions.
 
 ## What happens when you walk away
 
@@ -238,7 +238,7 @@ A stopped VM can't continue a turn. Boot it and wait for its connector to come b
 
 ## Operate and troubleshoot a Linux host
 
-Before rollout, sign in from each supported mobile app and confirm the paired host is online. Create a session for each agent and send a short prompt. Confirm the gateway serves both requests. Disconnect and reconnect the phone while a turn runs, then reopen that same session. With a paired Mac, put it offline and confirm its own session is not moved as you create a new session on the host. Check the Android fallback destination and follow the iOS procedure above for the build being tested. Restart just the Linux connector during a test window and confirm the device returns online and saved sessions remain on the host.
+Before rollout, sign in from each supported mobile app and confirm the paired host is online. Create a session for each agent and send a short prompt. Confirm the gateway serves both requests. Disconnect and reconnect the phone while a turn runs, then reopen that same session. With a paired Mac, put it offline and confirm its own session is not moved as you create a new session on the host. Check the fallback destination on both apps. Restart just the Linux connector during a test window and confirm the device returns online and saved sessions remain on the host.
 
 For an upgrade, use a maintenance window. Finish active turns, confirm saved work, and back up the VM's project and agent data as appropriate. Update Relay and the CLIs as the host user. If you edit a unit, run `systemctl --user daemon-reload` first. Restart only the units you changed. If you replace Codex or rotate its key, restart both units so both see the new configuration. Verify device status, the socket, and one turn in each agent again. Keep the same device credential when upgrading in place. Re-pair only if the credential or service origin changes.
 
@@ -270,7 +270,7 @@ Mutations carry request IDs and their outcomes are persisted. Uncertain requests
 cargo fmt --all --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
-xcodebuild -project litellm-remote/ios/LiteLLMRemote.xcodeproj -scheme LiteLLMRemote -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath litellm-remote/.local/DerivedData test
+xcodebuild -project litellm-remote/ios/LiteLLMRemote.xcodeproj -scheme LiteLLMRemote -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath litellm-remote/.local/DerivedData CODE_SIGN_IDENTITY=- test
 cd litellm-remote/android
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```

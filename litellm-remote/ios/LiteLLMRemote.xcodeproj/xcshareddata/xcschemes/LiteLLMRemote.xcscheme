@@ -50,6 +50,17 @@
                ReferencedContainer = "container:LiteLLMRemote.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AEBF89F200554F45B75A996B"
+               BuildableName = "LiteLLMRemoteUITests.xctest"
+               BlueprintName = "LiteLLMRemoteUITests"
+               ReferencedContainer = "container:LiteLLMRemote.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

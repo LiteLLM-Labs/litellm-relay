@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 
@@ -60,22 +61,26 @@ final class RemoteStore {
     var configuration: ServiceConfiguration?
     var devices: [RegisteredDevice] = []
     var selectedDeviceId: String?
-    var sessions: [CodingSession] = []
-    var nextCursor: String?
+    private var sessionPages: [String: SessionPage] = [:]
+    private var cachedSessions: [String: [CodingSession]] = [:]
+    private var loadingDevices: Set<String> = []
     var login: LoginStart?
     var teams: [LoginTeam] = []
     var busy = false
     var restoring: Bool
     var hasSavedSession = false
-    var loading = false
     var error: String?
     private var transport: RemoteTransport?
     private let defaults: UserDefaults
     private let session: URLSession?
+    private let cacheDirectory: URL?
+    private var cacheFile: URL?
 
-    init(defaults: UserDefaults = .standard, session: URLSession? = nil) {
+    init(defaults: UserDefaults = .standard, session: URLSession? = nil,
+         cacheDirectory: URL? = URL.applicationSupportDirectory.appending(path: "SessionLists", directoryHint: .isDirectory)) {
         self.defaults = defaults
         self.session = session
+        self.cacheDirectory = cacheDirectory
         self.address = defaults.string(forKey: "workspaceAddress")
             ?? ""
         let gateway = defaults.string(forKey: "gatewayAddress") ?? ""
@@ -85,6 +90,23 @@ final class RemoteStore {
     }
 
     var selectedDevice: RegisteredDevice? { devices.first { $0.id == selectedDeviceId } }
+    var newSessionDevice: RegisteredDevice? {
+        if let selectedDevice, selectedDevice.online { return selectedDevice }
+        return devices.first { $0.online && $0.platform.lowercased() == "linux" } ?? devices.first(where: \.online)
+    }
+    var sessions: [CodingSession] { selectedDeviceId.map { sessions(for: $0) } ?? [] }
+    var loading: Bool { selectedDeviceId.map { loadingDevices.contains($0) } ?? false }
+    var nextCursor: String? {
+        guard let selectedDevice, selectedDevice.online else { return nil }
+        return sessionPages[selectedDevice.id]?.nextCursor
+    }
+
+    func sessions(for deviceId: String) -> [CodingSession] {
+        if deviceIsOnline(deviceId), let page = sessionPages[deviceId] { return page.sessions }
+        return cachedSessions[deviceId] ?? []
+    }
+
+    func deviceIsOnline(_ id: String) -> Bool { devices.contains { $0.id == id && $0.online } }
 
     func restore() async {
         guard configuration?.identity == nil, login == nil, !busy else { return }
@@ -126,6 +148,7 @@ final class RemoteStore {
             }
             transport = connection
             configuration = value
+            loadSessionCache(workspace: normalized, gateway: gateway, subject: value.identity?.subject)
             address = normalized
             if value.identity == nil {
                 hasSavedSession = false
@@ -179,12 +202,13 @@ final class RemoteStore {
 
     func refreshDevices() async {
         guard let transport else { return }
-        switch await transport.request("/api/devices", as: DevicePage.self) {
+        let result = await transport.request("/api/devices", as: DevicePage.self)
+        guard self.transport === transport, !Task.isCancelled else { return }
+        switch result {
         case .success(let value):
             devices = value.devices
             if !devices.contains(where: { $0.id == selectedDeviceId }) {
                 selectedDeviceId = devices.first(where: \.online)?.id ?? devices.first?.id
-                sessions = []
             }
             error = nil
         case .failure(let failure): await handle(failure)
@@ -193,26 +217,38 @@ final class RemoteStore {
 
     func selectDevice(_ id: String) async {
         selectedDeviceId = id
-        sessions = []
-        nextCursor = nil
         await refresh()
     }
 
     func refresh(older: Bool = false) async {
-        guard let transport, let deviceId = selectedDeviceId else { return }
-        loading = true
+        guard let transport, let deviceId = selectedDeviceId, !loadingDevices.contains(deviceId) else { return }
+        let cursor = sessionPages[deviceId]?.nextCursor
+        if older && (cursor == nil || !deviceIsOnline(deviceId)) { return }
+        loadingDevices.insert(deviceId)
+        defer { if self.transport === transport { loadingDevices.remove(deviceId) } }
         let base = "/api/devices/\(deviceId)/sessions"
-        let path = older ? nextCursor.map { queryPath(base, name: "cursor", value: $0) } ?? base : base
-        switch await transport.request(path, as: SessionPage.self) {
+        let path = older ? cursor.map { queryPath(base, name: "cursor", value: $0) } ?? base : base
+        let result = await transport.request(path, as: SessionPage.self)
+        guard self.transport === transport, !Task.isCancelled else { return }
+        switch result {
         case .success(let value):
-            if deviceId == selectedDeviceId {
-                sessions = older ? sessions + value.sessions.filter { incoming in !sessions.contains { $0.id == incoming.id } } : value.sessions
-                nextCursor = value.nextCursor
-                error = value.warnings.flatMap { $0.isEmpty ? nil : $0.joined(separator: "\n") }
+            let current = sessionPages[deviceId]?.sessions ?? []
+            let currentIds = Set(current.map(\.id))
+            let rows = older ? current + value.sessions.filter { !currentIds.contains($0.id) } : value.sessions
+            sessionPages[deviceId] = SessionPage(sessions: rows, nextCursor: value.nextCursor, warnings: value.warnings)
+            let complete = !older && value.nextCursor == nil && (value.warnings?.isEmpty ?? true)
+            let rowIds = Set(rows.map(\.id))
+            let lastSeen = complete ? rows : rows + (cachedSessions[deviceId] ?? []).filter { !rowIds.contains($0.id) }
+            if cachedSessions[deviceId] != lastSeen {
+                cachedSessions[deviceId] = lastSeen
+                saveSessionCache()
             }
-        case .failure(let failure): if deviceId == selectedDeviceId { await handle(failure) }
+            if deviceId == selectedDeviceId {
+                error = deviceIsOnline(deviceId) ? value.warnings.flatMap { $0.isEmpty ? nil : $0.joined(separator: "\n") } : nil
+            }
+        case .failure(let failure):
+            if failure.status == 401 || (deviceId == selectedDeviceId && deviceIsOnline(deviceId)) { await handle(failure) }
         }
-        loading = false
     }
 
     func detail(id: String, deviceId: String) async -> Result<SessionDetail, RemoteFailure> {
@@ -250,7 +286,11 @@ final class RemoteStore {
     func removeDevice(_ id: String) async {
         guard let transport else { return }
         switch await transport.request("/api/devices/\(id)", method: "DELETE", as: EmptyReply.self) {
-        case .success: await refreshDevices()
+        case .success:
+            guard self.transport === transport else { return }
+            sessionPages.removeValue(forKey: id)
+            if cachedSessions.removeValue(forKey: id) != nil { saveSessionCache() }
+            await refreshDevices()
         case .failure(let failure): await handle(failure)
         }
     }
@@ -272,8 +312,10 @@ final class RemoteStore {
         configuration = nil
         selectedDeviceId = nil
         devices = []
-        sessions = []
-        nextCursor = nil
+        sessionPages = [:]
+        cachedSessions = [:]
+        loadingDevices = []
+        cacheFile = nil
         login = nil
         teams = []
         error = nil
@@ -308,5 +350,27 @@ final class RemoteStore {
         if failure.status == 499 { return }
         if failure.status == 401 { disconnect() }
         error = failure.message
+    }
+
+    private func loadSessionCache(workspace: String, gateway: URL, subject: String?) {
+        sessionPages = [:]
+        loadingDevices = []
+        cachedSessions = [:]
+        cacheFile = nil
+        guard let cacheDirectory, let subject else { return }
+        let key = SHA256.hash(data: Data("\(workspace)\n\(gateway.absoluteString)\n\(subject)".utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let file = cacheDirectory.appending(path: "\(key).json", directoryHint: .notDirectory)
+        cacheFile = file
+        if let data = try? Data(contentsOf: file),
+           let rows = try? JSONDecoder().decode([String: [CodingSession]].self, from: data) {
+            cachedSessions = rows
+        }
+    }
+
+    private func saveSessionCache() {
+        guard let cacheDirectory, let cacheFile, let data = try? JSONEncoder().encode(cachedSessions) else { return }
+        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try? data.write(to: cacheFile, options: [.atomic, .completeFileProtection])
     }
 }

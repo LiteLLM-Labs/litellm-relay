@@ -2,7 +2,7 @@ import SwiftUI
 
 struct NewSessionView: View {
     let store: RemoteStore
-    let deviceId: String
+    let device: RegisteredDevice
     let onCreated: (CodingSession) -> Void
     @State private var cwd = ""
     @State private var agent = "codex"
@@ -11,7 +11,8 @@ struct NewSessionView: View {
     @State private var requestId = UUID().uuidString
     @Environment(\.dismiss) private var dismiss
 
-    private var projects: [String] { Array(Set(store.sessions.map(\.cwd))).sorted() }
+    private var projects: [String] { Array(Set(store.sessions(for: device.id).map(\.cwd))).sorted() }
+    private var online: Bool { store.deviceIsOnline(device.id) }
 
     var body: some View {
         NavigationStack {
@@ -21,6 +22,7 @@ struct NewSessionView: View {
                         Text("A new conversation. Your project, connected through LiteLLM.")
                             .font(.subheadline)
                     } icon: { BrandMark(size: 28) }
+                    Text("Starting on \(device.displayName)").font(.subheadline)
                 }
                 Section {
                     Picker("Coding agent", selection: $agent) {
@@ -39,16 +41,17 @@ struct NewSessionView: View {
                         }
                         .font(.caption)
                     }
-                    TextField("/Users/you/project", text: $cwd)
+                    TextField("/path/to/project", text: $cwd)
                         .font(.system(.caption, design: .monospaced))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("newSessionDirectory")
                 } header: {
-                    Text("Project folder on your Mac")
+                    Text("Project folder on this device")
                 } footer: {
-                    Text("Runs the selected agent on your Mac through the connected LiteLLM gateway. Your project permissions still apply.")
+                    Text("Runs the selected agent on this device through LiteLLM. Your project permissions still apply.")
                 }
+                if !online { Section { Text("This device is offline. Reconnect it or close this form to choose an available device.").font(.caption) } }
                 if let error { Section { Text(error).font(.caption).foregroundStyle(.red) } }
                 Section {
                     Button { Task { await create() } } label: {
@@ -59,7 +62,7 @@ struct NewSessionView: View {
                             Spacer()
                         }
                     }
-                    .disabled(creating || !cwd.hasPrefix("/"))
+                    .disabled(creating || !online || !cwd.hasPrefix("/"))
                     .accessibilityIdentifier("startSessionButton")
                 }
             }
@@ -69,17 +72,17 @@ struct NewSessionView: View {
             .navigationTitle("New session")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-            .onAppear { if cwd.isEmpty { cwd = store.sessions.first?.cwd ?? "" } }
+            .onAppear { if cwd.isEmpty { cwd = store.sessions(for: device.id).first?.cwd ?? "" } }
             .onChange(of: agent) { if !creating { requestId = UUID().uuidString } }
             .onChange(of: cwd) { if !creating { requestId = UUID().uuidString } }
         }
     }
 
     private func create() async {
-        guard !creating else { return }
+        guard !creating, online else { return }
         creating = true
         error = nil
-        switch await store.create(cwd: cwd, agent: agent, deviceId: deviceId, requestId: requestId) {
+        switch await store.create(cwd: cwd, agent: agent, deviceId: device.id, requestId: requestId) {
         case .success(let session): onCreated(session)
         case .failure(let failure): error = failure.message
         }

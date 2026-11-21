@@ -12,7 +12,7 @@ struct DevicesView: View {
                     Text("Your workspace stays with you. Your files stay where they belong.")
                         .font(.subheadline).foregroundStyle(Palette.secondary).lineSpacing(4)
                     if store.devices.isEmpty {
-                        EmptyWorkspace(title: "Connect your first Mac", text: "Sign in to the Relay Remote connector on your Mac using this LiteLLM account.", symbol: "laptopcomputer")
+                        EmptyWorkspace(title: "Connect your first device", text: "Sign in to the Relay Remote connector on your device using this LiteLLM account.", symbol: "desktopcomputer")
                     }
                     ForEach(store.devices) { device in
                         VStack(alignment: .leading, spacing: 20) {
@@ -30,7 +30,7 @@ struct DevicesView: View {
                             }
                             Divider().overlay(Palette.border)
                             HStack {
-                                Text(device.platform).font(.caption).foregroundStyle(Palette.secondary)
+                                Text(device.platformLabel).font(.caption).foregroundStyle(Palette.secondary)
                                 Spacer()
                                 if !device.online {
                                     Text(Date(timeIntervalSince1970: device.lastSeen / 1000), style: .relative).font(.caption2).foregroundStyle(Palette.secondary)
@@ -53,10 +53,10 @@ struct DevicesView: View {
             .toolbar { ToolbarItem(placement: .topBarLeading) { BrandMark(size: 34) } }
             .refreshable { await store.refreshDevices() }
             .task { await store.refreshDevices() }
-            .alert("Connect your Mac", isPresented: $showingSetup) {
+            .alert("Connect a device", isPresented: $showingSetup) {
                 Button("Got it", role: .cancel) {}
             } message: {
-                Text("Start the Relay Remote connector on your Mac and sign in to this workspace. Your Mac will appear here automatically. No IP address or port forwarding is needed.")
+                Text("Start the Relay Remote connector on your device and sign in to this workspace. Your device will appear here automatically. No IP address or port forwarding is needed.")
             }
             .confirmationDialog("Disconnect \(removing?.name ?? "this device")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
                 Button("Disconnect device", role: .destructive) {
