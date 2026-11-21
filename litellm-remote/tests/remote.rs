@@ -1123,6 +1123,32 @@ async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
     let thread = Uuid::new_v4();
     let resumes = Arc::new(AtomicUsize::new(0));
     let observed_resumes = resumes.clone();
+    let listener = Arc::new(listener);
+    for decision in [Decision::Accept, Decision::Decline] {
+        resumes.store(0, Ordering::SeqCst);
+        codex_replays_a_pending_approval(
+            socket_path.clone(),
+            listener.clone(),
+            thread,
+            observed_resumes.clone(),
+            decision,
+        )
+        .await;
+    }
+}
+
+async fn codex_replays_a_pending_approval(
+    socket_path: PathBuf,
+    listener: Arc<tokio::net::UnixListener>,
+    thread: Uuid,
+    observed_resumes: Arc<AtomicUsize>,
+    decision: Decision,
+) {
+    let resumes = observed_resumes.clone();
+    let decisions = Arc::new(AtomicUsize::new(0));
+    let observed_decisions = decisions.clone();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed_executions = executions.clone();
     let server = tokio::spawn(async move {
         let mut pending = false;
         let mut completed = false;
@@ -1133,7 +1159,15 @@ async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
                 let request: Value = serde_json::from_str(&text).unwrap();
                 if request.get("method").is_none() {
                     assert_eq!(request["id"], 17);
-                    assert_eq!(request["result"]["decision"], "accept");
+                    assert_eq!(
+                        request["result"]["decision"],
+                        serde_json::to_value(decision).unwrap()
+                    );
+                    assert!(pending, "The same approval was answered twice");
+                    observed_decisions.fetch_add(1, Ordering::SeqCst);
+                    if decision == Decision::Accept {
+                        observed_executions.fetch_add(1, Ordering::SeqCst);
+                    }
                     pending = false;
                     completed = true;
                     socket
@@ -1192,7 +1226,9 @@ async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
         .send(thread, "Run the command".into(), None)
         .await
         .unwrap();
-    assert_eq!(original.read(thread).await.unwrap().approvals.len(), 1);
+    let before = original.read(thread).await.unwrap();
+    assert_eq!(before.approvals.len(), 1);
+    let old_id = Uuid::parse_str(&before.approvals[0].id).unwrap();
     drop(original);
 
     let restarted = codex::Codex::new(socket_path, "litellm".into(), gateway);
@@ -1204,24 +1240,32 @@ async fn codex_replays_a_pending_approval_after_the_connector_restarts() {
         "The daemon still holds an answerable approval"
     );
     assert!(restored.approvals[0].can_accept);
+    assert_eq!(
+        restored.approvals[0].id,
+        old_id.to_string(),
+        "Public approval ID changed after connector restart"
+    );
     assert_eq!(restarted.read(thread).await.unwrap().approvals.len(), 1);
     assert_eq!(
         resumes.load(Ordering::SeqCst),
         2,
         "Attach once per connection, not on every poll"
     );
-    restarted
-        .approve(
-            thread,
-            Uuid::parse_str(&restored.approvals[0].id).unwrap(),
-            Decision::Accept,
-        )
-        .await
-        .unwrap();
+    restarted.approve(thread, old_id, decision).await.unwrap();
     let resolved = restarted.read(thread).await.unwrap();
     assert!(resolved.approvals.is_empty());
     assert_eq!(resolved.session.status, "ready");
     assert!(!resolved.session.can_stop);
+    let repeated = restarted
+        .approve(thread, old_id, decision)
+        .await
+        .unwrap_err();
+    assert_eq!(repeated.status, 409);
+    assert_eq!(decisions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        usize::from(decision == Decision::Accept)
+    );
     server.abort();
 }
 
