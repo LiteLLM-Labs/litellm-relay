@@ -87,6 +87,7 @@ struct SessionView: View {
                         else { Label("Stop", systemImage: "stop.fill").labelStyle(.titleAndIcon).font(.caption.weight(.semibold)) }
                     }
                     .disabled(stopping || !online).accessibilityLabel("Stop current turn")
+                    .accessibilityIdentifier("stopTurnButton")
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {

@@ -228,17 +228,26 @@ final class RemoteStore {
         defer { if self.transport === transport { loadingDevices.remove(deviceId) } }
         let base = "/api/devices/\(deviceId)/sessions"
         let path = older ? cursor.map { queryPath(base, name: "cursor", value: $0) } ?? base : base
+        let cachedAtRequest = cachedSessions[deviceId] ?? []
         let result = await transport.request(path, as: SessionPage.self)
         guard self.transport === transport, !Task.isCancelled else { return }
         switch result {
         case .success(let value):
             let current = sessionPages[deviceId]?.sessions ?? []
             let currentIds = Set(current.map(\.id))
-            let rows = older ? current + value.sessions.filter { !currentIds.contains($0.id) } : value.sessions
+            let listed = older ? current + value.sessions.filter { !currentIds.contains($0.id) } : value.sessions
+            let cached = cachedSessions[deviceId] ?? []
+            var rows = listed
+            if cached != cachedAtRequest {
+                let previous = Set(cachedAtRequest)
+                let updatedWhileLoading = cached.filter { !previous.contains($0) }
+                let updatedIds = Set(updatedWhileLoading.map(\.id))
+                rows = updatedWhileLoading + listed.filter { !updatedIds.contains($0.id) }
+            }
             sessionPages[deviceId] = SessionPage(sessions: rows, nextCursor: value.nextCursor, warnings: value.warnings)
             let complete = !older && value.nextCursor == nil && (value.warnings?.isEmpty ?? true)
             let rowIds = Set(rows.map(\.id))
-            let lastSeen = complete ? rows : rows + (cachedSessions[deviceId] ?? []).filter { !rowIds.contains($0.id) }
+            let lastSeen = complete ? rows : rows + cached.filter { !rowIds.contains($0.id) }
             if cachedSessions[deviceId] != lastSeen {
                 cachedSessions[deviceId] = lastSeen
                 saveSessionCache()
@@ -253,12 +262,20 @@ final class RemoteStore {
 
     func detail(id: String, deviceId: String) async -> Result<SessionDetail, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
-        return await transport.request("/api/devices/\(deviceId)/sessions/\(id)", as: SessionDetail.self)
+        let result = await transport.request("/api/devices/\(deviceId)/sessions/\(id)", as: SessionDetail.self)
+        if self.transport === transport, case .success(let detail) = result {
+            rememberSession(detail.session, deviceId: deviceId)
+        }
+        return result
     }
 
     func create(cwd: String, agent: String, deviceId: String, requestId: String) async -> Result<CodingSession, RemoteFailure> {
         guard let transport else { return .failure(disconnected) }
-        return await transport.request("/api/devices/\(deviceId)/sessions", method: "POST", body: ["cwd": cwd, "agent": agent, "requestId": requestId], as: CodingSession.self)
+        let result = await transport.request("/api/devices/\(deviceId)/sessions", method: "POST", body: ["cwd": cwd, "agent": agent, "requestId": requestId], as: CodingSession.self)
+        if self.transport === transport, case .success(let session) = result {
+            rememberSession(session, deviceId: deviceId)
+        }
+        return result
     }
 
     func models(deviceId: String, cursor: String? = nil) async -> Result<ModelPage, RemoteFailure> {
@@ -365,6 +382,27 @@ final class RemoteStore {
         if let data = try? Data(contentsOf: file),
            let rows = try? JSONDecoder().decode([String: [CodingSession]].self, from: data) {
             cachedSessions = rows
+        }
+    }
+
+    private func rememberSession(_ session: CodingSession, deviceId: String) {
+        guard devices.contains(where: { $0.id == deviceId }) else { return }
+        func upserting(in summaries: [CodingSession]) -> [CodingSession]? {
+            var rows = summaries
+            if let index = summaries.firstIndex(where: { $0.id == session.id }) {
+                guard summaries[index] != session else { return nil }
+                rows[index] = session
+            } else {
+                rows.insert(session, at: 0)
+            }
+            return rows
+        }
+        if let page = sessionPages[deviceId], let rows = upserting(in: page.sessions) {
+            sessionPages[deviceId] = SessionPage(sessions: rows, nextCursor: page.nextCursor, warnings: page.warnings)
+        }
+        if let rows = upserting(in: cachedSessions[deviceId] ?? []) {
+            cachedSessions[deviceId] = rows
+            saveSessionCache()
         }
     }
 

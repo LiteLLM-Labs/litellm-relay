@@ -285,6 +285,51 @@ final class RemoteTests: XCTestCase {
         await otherAccount.selectDevice("mac")
         XCTAssertTrue(otherAccount.sessions.isEmpty)
     }
+
+    @MainActor
+    func testCreatedAndOpenedSessionsSurviveGoingOfflineWithoutAnotherListFetch() async throws {
+        let name = "cache-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appending(path: name)
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        func connect(mode: String) async -> RemoteStore {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RemoteTestProtocol.self]
+            configuration.httpAdditionalHeaders = ["X-Fixture-Mode": mode]
+            let store = RemoteStore(defaults: defaults, session: URLSession(configuration: configuration), cacheDirectory: directory)
+            store.gatewayAddress = RemoteTestProtocol.gateway
+            store.serviceOverride = "https://service.fixture.test"
+            await store.connect()
+            await store.refreshDevices()
+            return store
+        }
+
+        let store = await connect(mode: "online")
+        await store.refresh()
+        let created = try await store.create(cwd: "/Users/test/repo", agent: "codex", deviceId: "mac", requestId: "create").get()
+        XCTAssertEqual(store.sessions.map(\.id), [created.id, "mac-saved"])
+        XCTAssertEqual(store.nextCursor, "older")
+        await store.selectDevice("linux")
+        let updated = try await store.detail(id: created.id, deviceId: "mac").get()
+        let opened = try await store.detail(id: "mac-opened", deviceId: "mac").get()
+        let macSessions = store.sessions(for: "mac")
+        XCTAssertEqual(macSessions.map(\.id), [opened.session.id, created.id, "mac-saved"])
+        XCTAssertEqual(macSessions.first { $0.id == created.id }, updated.session)
+        XCTAssertTrue(store.sessions.isEmpty)
+
+        let reopened = await connect(mode: "offline")
+        await reopened.selectDevice("mac")
+        XCTAssertFalse(reopened.deviceIsOnline("mac"))
+        XCTAssertEqual(reopened.sessions.map(\.id), [opened.session.id, created.id, "mac-saved"])
+        XCTAssertEqual(reopened.sessions.first { $0.id == created.id }?.status, "working")
+        XCTAssertTrue(reopened.sessions(for: "linux").isEmpty)
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let cache = try String(contentsOf: XCTUnwrap(files.first), encoding: .utf8)
+        XCTAssertFalse(cache.contains("Fixture transcript"))
+    }
 }
 
 private final class RestoreProtocol: URLProtocol, @unchecked Sendable {

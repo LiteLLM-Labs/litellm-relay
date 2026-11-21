@@ -51,6 +51,14 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
             body = ["sessions": [session("codex", id: older ? "mac-older" : "mac-saved",
                                          title: older ? "Older laptop session" : "Saved laptop session", cwd: "/Users/test/repo")],
                     "nextCursor": older ? NSNull() : "older" as Any]
+        case "/api/devices/mac/sessions" where macOnline && request.httpMethod == "POST":
+            body = session("codex", id: "codex-mac", title: "New laptop Codex session", cwd: "/Users/test/repo")
+        case "/api/devices/mac/sessions/codex-mac" where macOnline, "/api/devices/mac/sessions/mac-opened" where macOnline:
+            let id = url.lastPathComponent
+            let summary = session("codex", id: id, title: id == "codex-mac" ? "New laptop Codex session" : "Opened laptop session",
+                                  cwd: "/Users/test/repo", status: "working")
+            body = ["session": summary, "messages": [["id": "reply", "role": "assistant", "text": "Fixture transcript"]],
+                    "olderMessages": false, "approvals": []]
         case "/api/devices/mac/sessions" where !macOnline:
             status = 503
             body = ["error": "This device is offline."]
@@ -64,7 +72,7 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
             }
         case "/api/devices/linux/sessions" where linuxOnline && request.httpMethod == "GET":
             body = ["sessions": []]
-        case "/api/devices/linux/models":
+        case "/api/devices/linux/models", "/api/devices/mac/models":
             body = ["models": []]
         case "/api/devices/linux/sessions/claude-linux", "/api/devices/linux/sessions/codex-linux":
             let agent = paths.last == "claude-linux" ? "claude" : "codex"
@@ -89,9 +97,9 @@ final class RemoteTestProtocol: URLProtocol, @unchecked Sendable {
         session(agent, id: "\(agent)-linux", title: agent == "claude" ? "Linux Claude Code session" : "Linux Codex session", cwd: "/srv/project")
     }
 
-    private func session(_ agent: String, id: String, title: String, cwd: String) -> [String: Any] {
+    private func session(_ agent: String, id: String, title: String, cwd: String, status: String = "ready") -> [String: Any] {
         ["id": id, "agent": agent, "title": title, "project": "repo", "cwd": cwd,
-         "status": "ready", "canSend": true, "canStop": true, "updatedAt": 1]
+         "status": status, "canSend": true, "canStop": true, "updatedAt": 1]
     }
 
     private func requestBody() -> [String: Any]? {

@@ -28,22 +28,56 @@ final class AlwaysOnHostTests: XCTestCase {
         saved.tap()
         XCTAssertTrue(app.staticTexts["This device is offline. Reconnect it to continue this session."].exists)
         XCTAssertFalse(app.buttons["sendMessageButton"].isEnabled)
-        XCTAssertFalse(app.navigationBars.buttons["Stop"].isEnabled)
+        let stop = app.buttons["stopTurnButton"]
+        XCTAssertTrue(stop.exists)
+        XCTAssertFalse(stop.isEnabled)
         app.navigationBars.buttons["BackButton"].tap()
 
-        for (agent, title) in [("Claude Code", "Linux Claude Code session"), ("Codex", "Linux Codex session")] {
+        let project = "/srv/project"
+        for (agent, title, prefilled) in [("Claude Code", "Linux Claude Code session", false), ("Codex", "Linux Codex session", true)] {
             app.buttons["newSessionButton"].tap()
             XCTAssertTrue(app.staticTexts["Starting on Test host (Linux)"].waitForExistence(timeout: 10))
             app.buttons[agent].tap()
             let directory = app.textFields["newSessionDirectory"]
-            directory.tap()
-            directory.typeText("/srv/project")
+            XCTAssertTrue(directory.exists)
+            if !prefilled {
+                directory.tap()
+                directory.typeText(project)
+            }
+            XCTAssertEqual(directory.value as? String, project)
             app.buttons["startSessionButton"].tap()
             XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 10))
             app.navigationBars.buttons["BackButton"].tap()
             XCTAssertTrue(saved.waitForExistence(timeout: 10))
             XCTAssertTrue(saved.label.contains("Offline"))
         }
+    }
+
+    @MainActor
+    func testCreatedLaptopSessionRemainsVisibleAfterGoingOfflineInConversation() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let run = UUID().uuidString
+        launch(app, mode: "online", run: run)
+        XCTAssertTrue(app.staticTexts["Saved laptop session"].waitForExistence(timeout: 10))
+        app.buttons["newSessionButton"].tap()
+        app.buttons["Codex"].tap()
+        let directory = app.textFields["newSessionDirectory"]
+        XCTAssertTrue(directory.exists)
+        XCTAssertEqual(directory.value as? String, "/Users/test/repo")
+        app.buttons["startSessionButton"].tap()
+        XCTAssertTrue(app.navigationBars["New laptop Codex session"].waitForExistence(timeout: 10))
+        app.terminate()
+
+        launch(app, mode: "offline", run: run)
+        let picker = app.buttons["sessionDevicePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.tap()
+        app.buttons["Test laptop (Mac)"].tap()
+        let created = app.buttons["sessionRow-codex-mac"]
+        XCTAssertTrue(created.waitForExistence(timeout: 10))
+        XCTAssertTrue(created.label.contains("Offline"))
+        XCTAssertTrue(app.buttons["sessionRow-mac-saved"].exists)
     }
 
     @MainActor
