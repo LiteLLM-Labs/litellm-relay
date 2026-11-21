@@ -282,7 +282,7 @@ private final class StreamingService: @unchecked Sendable {
             let stream = String(repeating: "**Streaming** `code` [link](https://example.test)\n", count: 500)
             var messages = [
                 ["id": "user", "role": "user", "text": "Generate a long reply"],
-                ["id": "reply", "role": "assistant", "text": streamOnFirstSend ? stream : "Previous reply"]
+                ["id": "reply", "role": "assistant", "text": "Previous reply"]
             ]
             if longHistory {
                 messages = (0..<11).flatMap { turn in
