@@ -17,6 +17,7 @@ struct SessionView: View {
     @State private var stopRequestId = UUID().uuidString
     @State private var requestId = UUID().uuidString
     @State private var followed = false
+    @State private var followsBottom = true
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var selectedModel: String?
     @State private var models: [ModelOption] = []
@@ -105,7 +106,15 @@ struct SessionView: View {
             .padding(.horizontal, Space.s4).padding(.vertical, Space.s6)
         }
         .scrollPosition($scrollPosition)
+        .defaultScrollAnchor(followsBottom ? .bottom : nil, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
+        .onScrollPhaseChange { oldPhase, newPhase, context in
+            if newPhase == .interacting {
+                followsBottom = false
+            } else if newPhase == .idle && (oldPhase == .interacting || oldPhase == .decelerating) {
+                followsBottom = context.geometry.visibleRect.maxY >= context.geometry.contentSize.height - 2
+            }
+        }
         .onChange(of: detail?.messages.last?.id) {
             if !followed { scrollToLatest(); followed = true }
         }
@@ -549,6 +558,7 @@ struct SessionView: View {
     // Scroll without an animation. An in-flight animation against a list whose
     // height is still changing retriggers layout until the process is killed.
     private func scrollToLatest() {
+        followsBottom = true
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
