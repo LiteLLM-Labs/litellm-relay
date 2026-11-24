@@ -18,6 +18,7 @@ struct SessionView: View {
     @State private var requestId = UUID().uuidString
     @State private var followed = false
     @State private var followsBottom = true
+    @State private var lastScrollOffset: CGFloat?
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var selectedModel: String?
     @State private var models: [ModelOption] = []
@@ -108,11 +109,17 @@ struct SessionView: View {
         .scrollPosition($scrollPosition)
         .defaultScrollAnchor(followsBottom ? .bottom : nil, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
-        .onScrollPhaseChange { oldPhase, newPhase, context in
-            if newPhase == .interacting {
+        .onScrollPhaseChange { _, newPhase, context in
+            let offset = context.geometry.contentOffset.y
+            // Keyboard show and hide also pass through the scroll phases. Only a
+            // finger moving up the transcript should leave the latest reply.
+            if newPhase == .interacting, let last = lastScrollOffset, last - offset > 12 {
                 followsBottom = false
-            } else if newPhase == .idle && (oldPhase == .interacting || oldPhase == .decelerating) {
-                followsBottom = context.geometry.visibleRect.maxY >= context.geometry.contentSize.height - 2
+            }
+            lastScrollOffset = offset
+            if newPhase == .idle,
+               context.geometry.contentSize.height - context.geometry.visibleRect.maxY <= 2 {
+                followsBottom = true
             }
         }
         .onChange(of: detail?.messages.last?.id) {

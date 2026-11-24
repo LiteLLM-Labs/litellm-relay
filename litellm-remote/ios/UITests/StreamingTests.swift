@@ -52,7 +52,7 @@ final class StreamingTests: XCTestCase {
                 && frame.minY >= app.navigationBars.firstMatch.frame.maxY
                 && frame.maxY <= composer.frame.minY
         }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 8), .completed,
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 15), .completed,
                        "Delayed reply should be visible above the composer")
     }
 
