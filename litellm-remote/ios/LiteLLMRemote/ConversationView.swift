@@ -124,8 +124,10 @@ struct SessionView: View {
                 distanceFromBottom: geometry.contentSize.height - geometry.visibleRect.maxY
             )
         } action: { previous, current in
-            // Keyboard resize changes the container, not the user's place in the transcript.
-            if abs(current.containerHeight - previous.containerHeight) > 0.5 {
+            // Keyboard resize and a shrinking row move the offset while the bottom stays put.
+            let layoutChange = abs(current.containerHeight - previous.containerHeight) > 0.5
+                || previous.contentHeight - current.contentHeight > 0.5
+            if layoutChange || current.distanceFromBottom <= 2 {
                 if current.distanceFromBottom <= 2 {
                     followsBottom = true
                     upwardTravel = 0
@@ -134,12 +136,7 @@ struct SessionView: View {
             }
             let movedUp = previous.offset - current.offset
             upwardTravel = movedUp > 0 ? upwardTravel + movedUp : 0
-            if upwardTravel > 12 {
-                followsBottom = false
-            } else if current.distanceFromBottom <= 2 {
-                followsBottom = true
-                upwardTravel = 0
-            }
+            if upwardTravel > 12 { followsBottom = false }
         }
         .onChange(of: detail?.messages.last?.id) {
             if !followed { scrollToLatest(); followed = true }
