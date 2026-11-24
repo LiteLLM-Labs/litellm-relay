@@ -471,6 +471,39 @@ async fn codex_starts_only_when_enabled_and_socket_is_missing() {
 }
 
 #[tokio::test]
+async fn codex_replaces_a_stale_socket_that_refuses_connections() {
+    let socket = PathBuf::from(format!(".remote-{}.sock", Uuid::new_v4().simple()));
+    struct SocketFile(PathBuf);
+    impl Drop for SocketFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _file = SocketFile(socket.clone());
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    assert!(socket.exists());
+    let gateway = Url::parse("https://gateway.example.com").unwrap();
+    let codex = codex::Codex::new(socket.clone(), "litellm".into(), gateway);
+    let no_start = || async { panic!("must not start a daemon") };
+    assert_eq!(
+        codex.control_stream(no_start()).await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+
+    let mut listener = None;
+    codex
+        .auto_start(true)
+        .control_stream(async {
+            std::fs::remove_file(&socket)?;
+            listener = Some(tokio::net::UnixListener::bind(&socket)?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    listener.unwrap().accept().await.unwrap();
+}
+
+#[tokio::test]
 async fn devices_report_the_paired_platform_with_a_legacy_default() {
     let gateway = gateway().await;
     let server = control(gateway.url.clone()).await;

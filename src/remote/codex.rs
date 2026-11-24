@@ -499,7 +499,14 @@ impl Codex {
         start: impl Future<Output = std::io::Result<()>>,
     ) -> std::io::Result<UnixStream> {
         match UnixStream::connect(&self.path).await {
-            Err(error) if self.auto_start && error.kind() == ErrorKind::NotFound => {}
+            // A crash leaves the socket file behind, so connect fails with
+            // ConnectionRefused rather than NotFound.
+            Err(error)
+                if self.auto_start
+                    && matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) => {}
             result => return result,
         }
         start.await?;

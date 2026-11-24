@@ -67,9 +67,15 @@ final class StreamingTests: XCTestCase {
         let back = app.navigationBars.buttons.element(boundBy: 0)
         let latest = app.buttons["Latest message"]
         let chip = app.buttons["sessionChip"]
-        XCTAssertTrue(chip.isHittable)
-        XCTAssertGreaterThanOrEqual(chip.frame.minX, back.frame.maxX)
-        XCTAssertLessThanOrEqual(chip.frame.maxX, latest.frame.minX)
+        XCTAssertTrue(chip.waitForExistence(timeout: 8))
+        XCTAssertTrue(latest.waitForExistence(timeout: 8))
+        let placed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let frame = chip.frame
+            return chip.isHittable && !frame.isEmpty
+                && frame.minX >= back.frame.maxX
+                && frame.maxX <= latest.frame.minX
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [placed], timeout: 8), .completed)
 
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: composer)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 8), .completed)

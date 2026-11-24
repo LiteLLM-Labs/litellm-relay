@@ -279,7 +279,17 @@ class RemoteViewModel @JvmOverloads constructor(application: Application, privat
         mutable.update { it.copy(busy = true, error = null) }
         return try { when (val result = api.request<CodingSession>("/api/devices/$device/sessions", "POST", mapOf("cwd" to cwd, "agent" to agent, "requestId" to requestId))) {
             is RemoteResult.Success -> {
-                openSession(device, result.value)
+                val created = result.value
+                fun listed(state: RemoteState): RemoteState {
+                    val page = state.sessionPages[device]
+                    val sessions = listOf(created) + page?.sessions.orEmpty().filter { it.id != created.id }
+                    val stored = page?.copy(sessions = sessions) ?: SessionPage(sessions)
+                    return state.copy(deviceId = device, error = null, sessionPages = state.sessionPages + (device to stored))
+                }
+                mutable.update(::listed)
+                openSession(device, created)
+                refreshSessions()
+                mutable.update(::listed)
                 true
             }
             is RemoteResult.Failure -> { handle(result); false }
