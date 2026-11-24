@@ -10,6 +10,43 @@ use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Failure>;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub enum Platform {
+    #[default]
+    #[serde(rename = "macOS")]
+    MacOs,
+    Linux,
+    Unknown,
+}
+
+impl Platform {
+    pub fn current() -> Self {
+        match std::env::consts::OS {
+            "macos" => Self::MacOs,
+            "linux" => Self::Linux,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MacOs => "macOS",
+            Self::Linux => "Linux",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+impl From<&str> for Platform {
+    fn from(value: &str) -> Self {
+        match value {
+            "macOS" => Self::MacOs,
+            "Linux" => Self::Linux,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Failure {
     pub status: u16,
@@ -272,7 +309,10 @@ impl Outcome {
             (false, None, Some(status @ 400..=599), Some(error)) => {
                 Err(Failure::new(status, error))
             }
-            _ => Err(Failure::new(502, "The Mac returned an invalid response.")),
+            _ => Err(Failure::new(
+                502,
+                "The device returned an invalid response.",
+            )),
         }
     }
 }

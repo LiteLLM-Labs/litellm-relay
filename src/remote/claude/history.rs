@@ -273,7 +273,7 @@ impl Claude {
     }
 
     pub(super) fn grant(&self, id: Uuid) -> Result<Grant> {
-        self.grants()?.into_iter().find(|grant| grant.id == id).ok_or_else(|| Failure::new(409, "On your Mac, finish the current turn, run /exit, then run relay remote handoff and choose this conversation."))
+        self.grants()?.into_iter().find(|grant| grant.id == id).ok_or_else(|| Failure::new(409, "On the device, finish the current turn, run /exit, then run relay remote handoff and choose this conversation."))
     }
 
     pub(super) fn save(&self, grant: &Grant) -> Result<()> {
@@ -358,7 +358,7 @@ pub(super) fn settings(home: &Path, cwd: &Path) -> Result<Value> {
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
             Failure::new(
                 409,
-                "Fix invalid Claude settings on your Mac before connecting remotely.",
+                "Fix invalid Claude settings on the device before connecting remotely.",
             )
         })?;
         if let Some(env) = value["env"].as_object() {

@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::{
     auth::Authentication,
     peers::Peers,
-    protocol::{digest, now_ms, split_session, Action, Agent, Decision, Failure, Result},
+    protocol::{digest, now_ms, split_session, Action, Agent, Decision, Failure, Platform, Result},
     store::{Identity, RequestState, Store},
 };
 
@@ -51,6 +51,8 @@ struct PollInput {
 #[serde(deny_unknown_fields)]
 struct EnrollInput {
     name: String,
+    #[serde(default)]
+    platform: Platform,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -338,7 +340,7 @@ async fn devices(State(service): State<Arc<Service>>, headers: HeaderMap) -> Res
     let (identity, _) = service.identity(&headers)?;
     Ok(Json(
         json!({ "devices": service.store.devices(&identity.subject)?.into_iter().map(|device| json!({
-        "id": device.id, "name": device.name, "lastSeen": device.last_seen, "online": service.peers.online(device.id), "platform":"macOS"
+        "id": device.id, "name": device.name, "lastSeen": device.last_seen, "online": service.peers.online(device.id), "platform":device.platform
     })).collect::<Vec<_>>() }),
     ))
 }
@@ -362,9 +364,10 @@ async fn enroll(
             "Remove an old device before adding another.",
         ));
     }
-    let (device, token) = service
-        .store
-        .enroll(&identity.subject, name, service.now())?;
+    let (device, token) =
+        service
+            .store
+            .enroll(&identity.subject, name, input.platform, service.now())?;
     Ok(Json(
         json!({"deviceId":device.id,"deviceToken":token,"gateway":service.gateway.as_str().trim_end_matches('/')}),
     ))
@@ -426,7 +429,7 @@ async fn create(
     Json(input): Json<CreateInput>,
 ) -> Result<Json<Value>> {
     if input.cwd.is_empty() || input.cwd.len() > 4096 {
-        return Err(Failure::new(400, "Choose a project folder on the Mac."));
+        return Err(Failure::new(400, "Choose a project folder on the device."));
     }
     service
         .once(

@@ -2,6 +2,13 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private struct ScrollSample: Equatable {
+    var offset: CGFloat
+    var contentHeight: CGFloat
+    var containerHeight: CGFloat
+    var distanceFromBottom: CGFloat
+}
+
 struct SessionView: View {
     let store: RemoteStore
     let route: SessionRoute
@@ -18,6 +25,7 @@ struct SessionView: View {
     @State private var requestId = UUID().uuidString
     @State private var followed = false
     @State private var followsBottom = true
+    @State private var upwardTravel: CGFloat = 0
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var selectedModel: String?
     @State private var models: [ModelOption] = []
@@ -108,12 +116,27 @@ struct SessionView: View {
         .scrollPosition($scrollPosition)
         .defaultScrollAnchor(followsBottom ? .bottom : nil, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
-        .onScrollPhaseChange { oldPhase, newPhase, context in
-            if newPhase == .interacting {
-                followsBottom = false
-            } else if newPhase == .idle && (oldPhase == .interacting || oldPhase == .decelerating) {
-                followsBottom = context.geometry.visibleRect.maxY >= context.geometry.contentSize.height - 2
+        .onScrollGeometryChange(for: ScrollSample.self) { geometry in
+            ScrollSample(
+                offset: geometry.contentOffset.y,
+                contentHeight: geometry.contentSize.height,
+                containerHeight: geometry.containerSize.height,
+                distanceFromBottom: geometry.contentSize.height - geometry.visibleRect.maxY
+            )
+        } action: { previous, current in
+            // Keyboard resize and a shrinking row move the offset while the bottom stays put.
+            let layoutChange = abs(current.containerHeight - previous.containerHeight) > 0.5
+                || previous.contentHeight - current.contentHeight > 0.5
+            if layoutChange || current.distanceFromBottom <= 2 {
+                if current.distanceFromBottom <= 2 {
+                    followsBottom = true
+                    upwardTravel = 0
+                }
+                return
             }
+            let movedUp = previous.offset - current.offset
+            upwardTravel = movedUp > 0 ? upwardTravel + movedUp : 0
+            if upwardTravel > 12 { followsBottom = false }
         }
         .onChange(of: detail?.messages.last?.id) {
             if !followed { scrollToLatest(); followed = true }
@@ -559,6 +582,7 @@ struct SessionView: View {
     // height is still changing retriggers layout until the process is killed.
     private func scrollToLatest() {
         followsBottom = true
+        upwardTravel = 0
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {

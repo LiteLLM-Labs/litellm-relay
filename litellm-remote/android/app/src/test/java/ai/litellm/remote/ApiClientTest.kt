@@ -29,7 +29,7 @@ class ApiClientTest {
             val text = "long reply ".repeat(10000)
             server.enqueue(MockResponse().setBody(Json.encodeToString(kotlinx.serialization.serializer<String>(), text)))
             val caller = Thread.currentThread()
-            val result = ApiClient(server.url("/").toString()) { null }.request<DecodedReply>("/api/session")
+            val result = ApiClient(server.url("/").toString(), token = { null }).request<DecodedReply>("/api/session")
             assertTrue(result is RemoteResult.Success)
             val reply = (result as RemoteResult.Success).value
             assertEquals(text, reply.text)
@@ -39,7 +39,7 @@ class ApiClientTest {
     @Test fun cancellationIsNotReportedAsANetworkFailure() = runBlocking {
         MockWebServer().use { server ->
             try {
-                ApiClient(server.url("/").toString()) { throw CancellationException("Cancelled") }.exchange("/api/me", "GET", emptyMap())
+                ApiClient(server.url("/").toString(), token = { throw CancellationException("Cancelled") }).exchange("/api/me", "GET", emptyMap())
                 fail("Cancellation must propagate to the caller")
             } catch (expected: CancellationException) {
                 assertEquals("Cancelled", expected.message)
@@ -66,7 +66,7 @@ class ApiClientTest {
     @Test fun messagesCarryNativeAuthenticationAndJsonWithoutChangingTheText() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("{\"turnId\":\"accepted\"}").addHeader("Content-Type", "application/json"))
-            val client = ApiClient(server.url("/").toString()) { "opaque-session" }
+            val client = ApiClient(server.url("/").toString(), token = { "opaque-session" })
             val text = "Continue with \"quotes\"\nAnd a new line & Unicode λ"
             val result = client.empty("/api/devices/device/sessions/session/messages", body = mapOf("text" to text, "requestId" to "request", "model" to "gateway/chosen-model"))
             assertTrue(result is RemoteResult.Success)
@@ -84,7 +84,7 @@ class ApiClientTest {
             {"id":"claude:session","agent":"claude","title":"Task","project":"repo","cwd":"/repo","status":"handoff_required","canSend":false,"canStop":false,"updatedAt":1},
             {"id":"codex:session","agent":"codex","title":"Task","project":"repo","cwd":"/repo","status":"needs_approval","canSend":true,"canStop":true,"updatedAt":1}
         ]}""")
-        assertEquals("Set up on Mac", page.sessions[0].activity)
+        assertEquals("Set up on device", page.sessions[0].activity)
         assertFalse(page.sessions[0].canSend)
         assertTrue(page.sessions[0].needsAttention)
         assertEquals("Needs approval", page.sessions[1].activity)
@@ -95,7 +95,7 @@ class ApiClientTest {
     @Test fun permissionFailuresKeepTheServerMessageAndStatus() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(403).setBody("{\"error\":\"This device is not yours.\"}"))
-            val result = ApiClient(server.url("/").toString()) { "session" }.empty("/api/devices/device/sessions")
+            val result = ApiClient(server.url("/").toString(), token = { "session" }).empty("/api/devices/device/sessions")
             assertEquals(RemoteResult.Failure("This device is not yours.", 403), result)
         }
     }

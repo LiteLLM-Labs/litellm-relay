@@ -86,7 +86,7 @@ impl Live {
                     .ok_or_else(|| Failure::new(502, "Invalid Claude permission request."))?;
                 if request["subtype"] != "can_use_tool" {
                     return Ok(Some(
-                        json!({"type":"control_response","response":{"subtype":"error","request_id":request_id,"error":"Review this request on your Mac."}}),
+                        json!({"type":"control_response","response":{"subtype":"error","request_id":request_id,"error":"Review this request on the device."}}),
                     ));
                 }
                 if self.stopping {
@@ -333,7 +333,7 @@ impl Claude {
         {
             return Err(Failure::new(
                 409,
-                "This session is open outside Relay. Exit it on your Mac first.",
+                "This session is open outside Relay. Exit it on the device first.",
             ));
         }
         if self
@@ -551,7 +551,7 @@ const CHILD_ENV: &[&str] = &[
     "all_proxy",
 ];
 
-fn isolate(command: &mut Command) {
+pub(in crate::remote) fn isolate(command: &mut Command) {
     command.env_clear();
     for key in CHILD_ENV {
         if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
@@ -560,7 +560,7 @@ fn isolate(command: &mut Command) {
     }
 }
 
-fn strip_provider_secrets(command: &mut Command) {
+pub(in crate::remote) fn strip_provider_secrets(command: &mut Command) {
     for key in PROVIDER_SECRETS {
         command.env_remove(key);
     }
@@ -574,7 +574,7 @@ async fn output(mut command: Command) -> Result<Vec<u8>> {
     let mut child = command.spawn().map_err(|_| {
         Failure::new(
             503,
-            "Install native Claude Code and configure Relay on this Mac.",
+            "Install native Claude Code and configure Relay on this device.",
         )
     })?;
     let mut bytes = Vec::new();

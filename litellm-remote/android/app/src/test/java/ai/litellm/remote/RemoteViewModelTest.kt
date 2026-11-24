@@ -78,6 +78,51 @@ class RemoteViewModelTest {
         } } finally { store.clear() }
     }
 
+    @Test fun creatingOnTheLinuxFallbackShowsThatSessionWhenTheMacListReturns() = runBlocking {
+        val created = CodingSession("codex:new", "New", "repo", "/home/me/repo", "codex", "ready", true, false, 2)
+        val laptopSession = created.copy(id = "codex:laptop", title = "Laptop work", cwd = "/Users/me/repo")
+        val laptop = Device("laptop", "Laptop", false, 0, "macOS")
+        val host = Device("host", "Always-on host", true, 1, "Linux")
+        val store = ViewModelStore()
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.method == "POST" -> MockResponse().setBody(Json.encodeToString(created))
+                    request.path!!.endsWith("/models") -> MockResponse().setBody(Json.encodeToString(ModelPage(emptyList())))
+                    request.path!!.substringBefore('?').endsWith("/sessions") -> MockResponse().setBody(Json.encodeToString(SessionPage(emptyList())))
+                    else -> MockResponse().setBody(Json.encodeToString(SessionDetail(created, emptyList(), false)))
+                }
+            }
+            val model = RemoteViewModel(object : Application() {
+                override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences =
+                    Proxy.newProxyInstance(SharedPreferences::class.java.classLoader, arrayOf(SharedPreferences::class.java)) { _, method, args ->
+                        if (method.name == "getString") args!![1] else error("Unexpected preferences call ${method.name}")
+                    } as SharedPreferences
+            })
+            store.put("remote", model)
+            val endpoint = server.url("/").toString().trimEnd('/')
+            RemoteViewModel::class.java.getDeclaredField("client").apply { isAccessible = true }
+                .set(model, ApiClient(endpoint, token = { null }))
+            @Suppress("UNCHECKED_CAST")
+            val state = RemoteViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                .get(model) as MutableStateFlow<RemoteState>
+            state.value = RemoteState(endpoint = endpoint, deviceId = laptop.id, devices = listOf(laptop, host),
+                sessionPages = mapOf(laptop.id to SessionPage(listOf(laptopSession))))
+            try {
+                assertTrue(model.create(host.id, created.cwd, "codex", "create-once"))
+                val opened = model.state.value
+                assertEquals(host.id, opened.deviceId)
+                assertEquals(host.id, opened.sessionDeviceId)
+                assertEquals(created.id, opened.selectedSession?.id)
+                model.closeSession()
+                val listed = model.state.value
+                assertEquals(host.id, listed.deviceId)
+                assertEquals(listOf(created.id), listed.sessions.map { it.id })
+                assertEquals(listOf(laptopSession.id), listed.sessionPages[laptop.id]?.sessions?.map { it.id })
+            } finally { store.clear() }
+        }
+    }
+
     @Test fun createdClaudeModelsLoadAfterTheNewSessionSheetIsCancelled() = runBlocking {
         modelsLoadAfterSheetCancellation("claude")
     }
@@ -98,6 +143,7 @@ class RemoteViewModelTest {
                 override fun dispatch(request: RecordedRequest): MockResponse = when {
                     request.method == "POST" -> MockResponse().setBody(Json.encodeToString(session))
                     request.path!!.endsWith("/models") -> MockResponse().setBody(Json.encodeToString(ModelPage(models)))
+                    request.path!!.substringBefore('?').endsWith("/sessions") -> MockResponse().setBody(Json.encodeToString(SessionPage(listOf(session))))
                     else -> {
                         detailStarted.countDown()
                         releaseDetail.await(5, TimeUnit.SECONDS)
@@ -114,13 +160,14 @@ class RemoteViewModelTest {
             store.put("remote", model)
             val endpoint = server.url("/").toString().trimEnd('/')
             RemoteViewModel::class.java.getDeclaredField("client").apply { isAccessible = true }
-                .set(model, ApiClient(endpoint) { null })
+                .set(model, ApiClient(endpoint, token = { null }))
             @Suppress("UNCHECKED_CAST")
             val state = RemoteViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
                 .get(model) as MutableStateFlow<RemoteState>
-            state.value = RemoteState(endpoint = endpoint, deviceId = "host")
+            state.value = RemoteState(endpoint = endpoint, deviceId = "host",
+                devices = listOf(Device("host", "Host", true, 1, "Linux")))
             try {
-                sheet.launch { model.create("/repo", agent, "create-once") }
+                sheet.launch { model.create("host", "/repo", agent, "create-once") }
                 withTimeout(5000) { model.state.first { it.selectedSession != null } }
                 assertTrue(withContext(Dispatchers.IO) { detailStarted.await(5, TimeUnit.SECONDS) })
                 sheet.cancel()
